@@ -14,7 +14,7 @@
   import TrackList from "$lib/components/TrackList.svelte";
   import { buildAlbums, buildArtists } from "$lib/data/libraryViews";
   import { albums as mockAlbums, artists as mockArtists, navItems } from "$lib/data/mockLibrary";
-  import type { Album, PlaybackStatus, Track } from "$lib/types/library";
+  import type { Album, Artist, PlaybackStatus, Track } from "$lib/types/library";
   import { localImageSource } from "$lib/utils/localImage";
   import { onMount } from "svelte";
 
@@ -27,12 +27,30 @@
   let hasLoadedCache = $state(false);
   let currentTrack = $state<Track | null>(null);
   let currentTrackIndex = $state<number | null>(null);
+  let mainElement: HTMLElement | undefined = $state();
+  let activeView = $state("Home");
+  let selectedAlbumId = $state<string | null>(null);
+  let selectedArtistName = $state<string | null>(null);
   let isPlaying = $state(false);
   let positionSeconds = $state(0);
   let durationSeconds = $state<number | null>(null);
   let volume = $state(1);
   let displayAlbums = $derived(!hasLoadedCache ? mockAlbums : buildAlbums(tracks));
   let displayArtists = $derived(!hasLoadedCache ? mockArtists : buildArtists(tracks));
+  let homeTracks = $derived(tracks.slice(0, 8));
+  let homeAlbums = $derived(displayAlbums.slice(0, 4));
+  let homeArtists = $derived(displayArtists.slice(0, 4));
+  let selectedAlbum = $derived(displayAlbums.find((album) => album.id === selectedAlbumId) ?? null);
+  let selectedArtist = $derived(displayArtists.find((artist) => artist.name === selectedArtistName) ?? null);
+  let selectedAlbumTracks = $derived(
+    selectedAlbum ? tracks.filter((track) => albumIdForTrack(track) === selectedAlbum.id) : [],
+  );
+  let selectedArtistTracks = $derived(
+    selectedArtist ? tracks.filter((track) => artistNameForTrack(track) === selectedArtist.name) : [],
+  );
+  let selectedArtistAlbums = $derived(
+    selectedArtist ? displayAlbums.filter((album) => album.artist === selectedArtist.name) : [],
+  );
   let canPlayPrevious = $derived(currentTrackIndex !== null && currentTrackIndex > 0);
   let canPlayNext = $derived(currentTrackIndex !== null && currentTrackIndex < tracks.length - 1);
 
@@ -115,6 +133,8 @@
       scannedFolder = folder;
       scanCount = null;
       tracks = [];
+      selectedAlbumId = null;
+      selectedArtistName = null;
       currentTrackIndex = null;
       hasLoadedCache = true;
 
@@ -132,6 +152,37 @@
   async function handleTrackSelect(track: Track) {
     const trackIndex = tracks.findIndex((candidate) => candidate.id === track.id);
     await playTrackAtIndex(trackIndex);
+  }
+
+  function handleNavigate(label: string) {
+    activeView = label;
+    selectedAlbumId = null;
+    selectedArtistName = null;
+    mainElement?.scrollTo({ top: 0 });
+  }
+
+  function handleAlbumSelect(album: Album) {
+    activeView = "Albums";
+    selectedAlbumId = album.id;
+    selectedArtistName = null;
+    mainElement?.scrollTo({ top: 0 });
+  }
+
+  function handleArtistSelect(artist: Artist) {
+    activeView = "Artists";
+    selectedArtistName = artist.name;
+    selectedAlbumId = null;
+    mainElement?.scrollTo({ top: 0 });
+  }
+
+  function handleBackToAlbums() {
+    selectedAlbumId = null;
+    mainElement?.scrollTo({ top: 0 });
+  }
+
+  function handleBackToArtists() {
+    selectedArtistName = null;
+    mainElement?.scrollTo({ top: 0 });
   }
 
   async function playTrackAtIndex(trackIndex: number) {
@@ -234,6 +285,55 @@
     return `${album.artist}${year} · ${trackCount}`;
   }
 
+  function albumIdForTrack(track: Track) {
+    const title = track.album ?? "Unknown Album";
+    const artist = track.albumArtist ?? track.artist ?? "Unknown Artist";
+
+    return `${artist.toLowerCase()}\u0000${title.toLowerCase()}`;
+  }
+
+  function artistNameForTrack(track: Track) {
+    return track.artist ?? track.albumArtist ?? "Unknown Artist";
+  }
+
+  function artistSongCount(artist: Artist) {
+    return artist.detail;
+  }
+
+  function viewTitle() {
+    if (activeView === "Home") {
+      return "Your music, on this machine.";
+    }
+
+    return activeView;
+  }
+
+  function viewEyebrow() {
+    return activeView;
+  }
+
+  function viewStatus() {
+    if (isScanning) {
+      return "Scanning your local music files...";
+    }
+
+    if (!hasLoadedCache) {
+      return "Loading cached library...";
+    }
+
+    if (activeView === "Settings") {
+      return scannedFolder
+        ? `Library folder: ${scannedFolder}`
+        : "No library folder is cached yet.";
+    }
+
+    if (scanCount !== null && scannedFolder) {
+      return `Found ${scanCount} ${scanCount === 1 ? "track" : "tracks"} in ${scannedFolder}`;
+    }
+
+    return "No cached tracks yet. Pick a folder to scan your local music files.";
+  }
+
   function hideBrokenImage(event: Event) {
     if (event.currentTarget instanceof HTMLImageElement) {
       event.currentTarget.hidden = true;
@@ -253,97 +353,262 @@
 
 <div class="app-shell">
   <div class="workspace">
-    <Sidebar items={navItems} />
+    <Sidebar items={navItems} active={activeView} onNavigate={handleNavigate} />
 
-    <main class="home">
+    <main class="home" bind:this={mainElement}>
       <header class="home-header">
         <div>
-          <p class="eyebrow">Home</p>
-          <h2>Your music, on this machine.</h2>
-          {#if scanCount !== null && !isScanning}
-            {#if scannedFolder}
-              <p class="scan-status">
-                Found {scanCount} {scanCount === 1 ? "track" : "tracks"} in {scannedFolder}
-              </p>
-            {:else}
-              <p class="scan-status">No cached tracks yet. Pick a folder to scan your local music files.</p>
-            {/if}
-          {:else}
-            <p class="scan-status">{hasLoadedCache ? "Pick a folder to scan your local music files." : "Loading cached library..."}</p>
-          {/if}
+          <p class="eyebrow">{viewEyebrow()}</p>
+          <h2>{viewTitle()}</h2>
+          <p class="scan-status">{viewStatus()}</p>
         </div>
         <button type="button" disabled={isScanning} onclick={handleScanLibrary}>
           {isScanning ? "Scanning..." : "Scan Library"}
         </button>
       </header>
 
-      <LibrarySection title="Recently Added">
-        {#if scanError}
-          <div class="scan-error" role="alert">{scanError}</div>
-        {/if}
-        {#if playbackError}
-          <div class="scan-error" role="alert">{playbackError}</div>
-        {/if}
-        <TrackList
-          {tracks}
-          {isScanning}
-          selectedTrackId={currentTrack?.id}
-          onTrackSelect={handleTrackSelect}
-        />
-      </LibrarySection>
+      {#if scanError}
+        <div class="scan-error" role="alert">{scanError}</div>
+      {/if}
+      {#if playbackError}
+        <div class="scan-error" role="alert">{playbackError}</div>
+      {/if}
 
-      <LibrarySection title="Albums">
-        {#if displayAlbums.length === 0}
-          <div class="group-empty">
-            <h3>No albums found</h3>
-            <p>Album tags were not found in the scanned tracks.</p>
-          </div>
-        {:else}
-          <div class="album-grid">
-            {#each displayAlbums as album}
-              <article class="album-card">
-                <div class="album-art" style={`--item-color: ${album.color}`} aria-hidden="true">
-                  {#if album.coverArtPath}
-                    <img
-                      src={localImageSource(album.coverArtPath) ?? ""}
-                      alt=""
-                      loading="lazy"
-                      onload={showLoadedImage}
-                      onerror={hideBrokenImage}
-                    />
-                  {/if}
-                  <span></span>
-                </div>
-                <h3>{album.title}</h3>
-                <p>{albumDetail(album)}</p>
-              </article>
-            {/each}
-          </div>
-        {/if}
-      </LibrarySection>
+      {#if activeView === "Home"}
+        <LibrarySection title="Recently Added">
+          <TrackList
+            tracks={homeTracks}
+            {isScanning}
+            selectedTrackId={currentTrack?.id}
+            onTrackSelect={handleTrackSelect}
+          />
+        </LibrarySection>
 
-      <LibrarySection title="Artists">
-        {#if displayArtists.length === 0}
-          <div class="group-empty">
-            <h3>No artists found</h3>
-            <p>Artist tags were not found in the scanned tracks.</p>
-          </div>
+        <LibrarySection title="Albums" viewAllLabel="Preview">
+          {#if homeAlbums.length === 0}
+            <div class="group-empty">
+              <h3>No albums found</h3>
+              <p>Album tags were not found in the scanned tracks.</p>
+            </div>
+          {:else}
+            <div class="album-grid">
+              {#each homeAlbums as album}
+                <button class="album-card" type="button" onclick={() => handleAlbumSelect(album)}>
+                  <div class="album-art" style={`--item-color: ${album.color}`} aria-hidden="true">
+                    {#if album.coverArtPath}
+                      <img
+                        src={localImageSource(album.coverArtPath) ?? ""}
+                        alt=""
+                        loading="lazy"
+                        onload={showLoadedImage}
+                        onerror={hideBrokenImage}
+                      />
+                    {/if}
+                    <span></span>
+                  </div>
+                  <h3>{album.title}</h3>
+                  <p>{albumDetail(album)}</p>
+                </button>
+              {/each}
+            </div>
+          {/if}
+        </LibrarySection>
+
+        <LibrarySection title="Artists" viewAllLabel="Preview">
+          {#if homeArtists.length === 0}
+            <div class="group-empty">
+              <h3>No artists found</h3>
+              <p>Artist tags were not found in the scanned tracks.</p>
+            </div>
+          {:else}
+            <div class="artist-grid">
+              {#each homeArtists as artist}
+                <button class="artist-card" type="button" onclick={() => handleArtistSelect(artist)}>
+                  <div class="artist-avatar" style={`--item-color: ${artist.color}`} aria-hidden="true">
+                    {artist.name.slice(0, 1)}
+                  </div>
+                  <div>
+                    <h3>{artist.name}</h3>
+                    <p>{artistSongCount(artist)}</p>
+                  </div>
+                </button>
+              {/each}
+            </div>
+          {/if}
+        </LibrarySection>
+      {:else if activeView === "Albums"}
+        {#if selectedAlbum}
+          <section class="detail-view" aria-labelledby="album-detail-title">
+            <button class="back-button" type="button" onclick={handleBackToAlbums}>Back to Albums</button>
+            <div class="album-detail-header">
+              <div class="album-art detail-cover" style={`--item-color: ${selectedAlbum.color}`} aria-hidden="true">
+                {#if selectedAlbum.coverArtPath}
+                  <img
+                    src={localImageSource(selectedAlbum.coverArtPath) ?? ""}
+                    alt=""
+                    onload={showLoadedImage}
+                    onerror={hideBrokenImage}
+                  />
+                {/if}
+                <span></span>
+              </div>
+              <div class="detail-copy">
+                <p class="eyebrow">Album</p>
+                <h3 id="album-detail-title">{selectedAlbum.title}</h3>
+                <p>{albumDetail(selectedAlbum)}</p>
+              </div>
+            </div>
+
+            <LibrarySection title="Album Songs" viewAllLabel={`${selectedAlbumTracks.length} total`}>
+              <TrackList
+                tracks={selectedAlbumTracks}
+                isScanning={false}
+                selectedTrackId={currentTrack?.id}
+                onTrackSelect={handleTrackSelect}
+              />
+            </LibrarySection>
+          </section>
         {:else}
-          <div class="artist-grid">
-            {#each displayArtists as artist}
-              <article class="artist-card">
-                <div class="artist-avatar" style={`--item-color: ${artist.color}`} aria-hidden="true">
-                  {artist.name.slice(0, 1)}
-                </div>
-                <div>
-                  <h3>{artist.name}</h3>
-                  <p>{artist.detail}</p>
-                </div>
-              </article>
-            {/each}
-          </div>
+          <LibrarySection title="All Albums" viewAllLabel={`${displayAlbums.length} total`}>
+            {#if displayAlbums.length === 0}
+              <div class="group-empty">
+                <h3>No albums found</h3>
+                <p>Scan a music folder to build your local album library.</p>
+              </div>
+            {:else}
+              <div class="album-grid">
+                {#each displayAlbums as album}
+                  <button class="album-card" type="button" onclick={() => handleAlbumSelect(album)}>
+                    <div class="album-art" style={`--item-color: ${album.color}`} aria-hidden="true">
+                      {#if album.coverArtPath}
+                        <img
+                          src={localImageSource(album.coverArtPath) ?? ""}
+                          alt=""
+                          loading="lazy"
+                          onload={showLoadedImage}
+                          onerror={hideBrokenImage}
+                        />
+                      {/if}
+                      <span></span>
+                    </div>
+                    <h3>{album.title}</h3>
+                    <p>{albumDetail(album)}</p>
+                  </button>
+                {/each}
+              </div>
+            {/if}
+          </LibrarySection>
         {/if}
-      </LibrarySection>
+      {:else if activeView === "Artists"}
+        {#if selectedArtist}
+          <section class="detail-view" aria-labelledby="artist-detail-title">
+            <button class="back-button" type="button" onclick={handleBackToArtists}>Back to Artists</button>
+            <div class="artist-detail-header">
+              <div class="artist-avatar detail-avatar" style={`--item-color: ${selectedArtist.color}`} aria-hidden="true">
+                {selectedArtist.name.slice(0, 1)}
+              </div>
+              <div class="detail-copy">
+                <p class="eyebrow">Artist</p>
+                <h3 id="artist-detail-title">{selectedArtist.name}</h3>
+                <p>{artistSongCount(selectedArtist)} · {selectedArtistAlbums.length} {selectedArtistAlbums.length === 1 ? "album" : "albums"}</p>
+              </div>
+            </div>
+
+            <LibrarySection title="Albums" viewAllLabel={`${selectedArtistAlbums.length} total`}>
+              {#if selectedArtistAlbums.length === 0}
+                <div class="group-empty">
+                  <h3>No albums found</h3>
+                  <p>No album tags were found for this artist.</p>
+                </div>
+              {:else}
+                <div class="album-grid">
+                  {#each selectedArtistAlbums as album}
+                    <button class="album-card" type="button" onclick={() => handleAlbumSelect(album)}>
+                      <div class="album-art" style={`--item-color: ${album.color}`} aria-hidden="true">
+                        {#if album.coverArtPath}
+                          <img
+                            src={localImageSource(album.coverArtPath) ?? ""}
+                            alt=""
+                            loading="lazy"
+                            onload={showLoadedImage}
+                            onerror={hideBrokenImage}
+                          />
+                        {/if}
+                        <span></span>
+                      </div>
+                      <h3>{album.title}</h3>
+                      <p>{albumDetail(album)}</p>
+                    </button>
+                  {/each}
+                </div>
+              {/if}
+            </LibrarySection>
+
+            <LibrarySection title="Songs" viewAllLabel={`${selectedArtistTracks.length} total`}>
+              <TrackList
+                tracks={selectedArtistTracks}
+                isScanning={false}
+                selectedTrackId={currentTrack?.id}
+                onTrackSelect={handleTrackSelect}
+              />
+            </LibrarySection>
+          </section>
+        {:else}
+          <LibrarySection title="All Artists" viewAllLabel={`${displayArtists.length} total`}>
+            {#if displayArtists.length === 0}
+              <div class="group-empty">
+                <h3>No artists found</h3>
+                <p>Scan a music folder to build your local artist library.</p>
+              </div>
+            {:else}
+              <div class="artist-grid">
+                {#each displayArtists as artist}
+                  <button class="artist-card" type="button" onclick={() => handleArtistSelect(artist)}>
+                    <div class="artist-avatar" style={`--item-color: ${artist.color}`} aria-hidden="true">
+                      {artist.name.slice(0, 1)}
+                    </div>
+                    <div>
+                      <h3>{artist.name}</h3>
+                      <p>{artistSongCount(artist)}</p>
+                    </div>
+                  </button>
+                {/each}
+              </div>
+            {/if}
+          </LibrarySection>
+        {/if}
+      {:else if activeView === "Songs"}
+        <LibrarySection title="All Songs" viewAllLabel={`${tracks.length} total`}>
+          <TrackList
+            {tracks}
+            {isScanning}
+            selectedTrackId={currentTrack?.id}
+            onTrackSelect={handleTrackSelect}
+          />
+        </LibrarySection>
+      {:else if activeView === "Playlists"}
+        <section class="placeholder-panel" aria-labelledby="playlists-title">
+          <p class="eyebrow">Coming Later</p>
+          <h3 id="playlists-title">Playlists</h3>
+          <p>Playlist management is not wired up yet. Your scanned library and playback controls are ready here when that feature lands.</p>
+        </section>
+      {:else if activeView === "Settings"}
+        <section class="placeholder-panel" aria-labelledby="settings-title">
+          <p class="eyebrow">Library</p>
+          <h3 id="settings-title">Settings</h3>
+          <div class="settings-grid">
+            <div>
+              <span>Library folder</span>
+              <p>{scannedFolder ?? "No folder scanned"}</p>
+            </div>
+            <div>
+              <span>Tracks</span>
+              <p>{scanCount ?? tracks.length}</p>
+            </div>
+          </div>
+          <p>More playback, library, and appearance settings will live here later.</p>
+        </section>
+      {/if}
     </main>
   </div>
 
@@ -480,6 +745,11 @@
     padding: 12px 14px;
   }
 
+  .scan-error + :global(.library-section),
+  .scan-error + .placeholder-panel {
+    margin-top: 16px;
+  }
+
   .home :global(.library-section + .library-section) {
     margin-top: 30px;
   }
@@ -544,9 +814,23 @@
 
   .album-card,
   .artist-card {
+    width: 100%;
     border: 1px solid #242b35;
     border-radius: 8px;
     background: #151a21;
+    color: inherit;
+    cursor: default;
+    font: inherit;
+    text-align: left;
+  }
+
+  .album-card:hover,
+  .album-card:focus-visible,
+  .artist-card:hover,
+  .artist-card:focus-visible {
+    border-color: #35544f;
+    background: #1b2027;
+    outline: none;
   }
 
   .album-card {
@@ -614,6 +898,135 @@
     margin-top: 4px;
   }
 
+  .detail-view {
+    display: grid;
+    gap: 22px;
+  }
+
+  .back-button {
+    justify-self: start;
+    min-height: 36px;
+    border: 1px solid #303844;
+    border-radius: 8px;
+    background: #161a20;
+    color: #d5dce5;
+    cursor: default;
+    font: inherit;
+    font-size: 0.88rem;
+    font-weight: 800;
+    padding: 0 13px;
+  }
+
+  .back-button:hover,
+  .back-button:focus-visible {
+    border-color: #35544f;
+    background: #1b2027;
+    outline: none;
+  }
+
+  .album-detail-header,
+  .artist-detail-header {
+    display: flex;
+    align-items: center;
+    gap: 22px;
+    min-width: 0;
+    border: 1px solid #242b35;
+    border-radius: 8px;
+    background: #151a21;
+    padding: 18px;
+  }
+
+  .detail-cover {
+    width: min(28vw, 190px);
+    min-width: 136px;
+    margin: 0;
+  }
+
+  .detail-avatar {
+    width: 104px;
+    height: 104px;
+    font-size: 2.1rem;
+  }
+
+  .detail-copy {
+    min-width: 0;
+  }
+
+  .detail-copy h3 {
+    margin: 0 0 8px;
+    overflow: hidden;
+    color: #f7f9fc;
+    font-size: clamp(1.7rem, 4vw, 3.2rem);
+    line-height: 1.03;
+    text-overflow: ellipsis;
+  }
+
+  .detail-copy p:not(.eyebrow) {
+    margin: 0;
+    color: #9aa4b1;
+    font-weight: 700;
+  }
+
+  .detail-view :global(.library-section + .library-section) {
+    margin-top: 8px;
+  }
+
+  .placeholder-panel {
+    max-width: 760px;
+    border: 1px solid #242b35;
+    border-radius: 8px;
+    background: #151a21;
+    padding: 22px;
+  }
+
+  .placeholder-panel h3 {
+    margin: 0 0 8px;
+    font-size: 1.3rem;
+  }
+
+  .placeholder-panel p {
+    max-width: 620px;
+    margin: 0;
+    color: #98a3b0;
+    font-weight: 620;
+  }
+
+  .placeholder-panel .eyebrow {
+    margin-bottom: 8px;
+  }
+
+  .settings-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+    margin: 16px 0;
+  }
+
+  .settings-grid div {
+    min-width: 0;
+    border: 1px solid #2a313c;
+    border-radius: 8px;
+    background: #12161c;
+    padding: 14px;
+  }
+
+  .settings-grid span {
+    display: block;
+    margin-bottom: 5px;
+    color: #8f9aa8;
+    font-size: 0.78rem;
+    font-weight: 800;
+    text-transform: uppercase;
+  }
+
+  .settings-grid p {
+    overflow: hidden;
+    margin: 0;
+    color: #f4f7fb;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
   @media (max-width: 1020px) {
     .album-grid,
     .artist-grid {
@@ -647,11 +1060,22 @@
     .home-header button {
       align-self: flex-start;
     }
+
+    .album-detail-header,
+    .artist-detail-header {
+      align-items: flex-start;
+      flex-direction: column;
+    }
+
+    .detail-cover {
+      width: min(100%, 220px);
+    }
   }
 
   @media (max-width: 520px) {
     .album-grid,
-    .artist-grid {
+    .artist-grid,
+    .settings-grid {
       grid-template-columns: 1fr;
     }
   }

@@ -4,9 +4,10 @@
   type Props = {
     items: NavItem[];
     active?: string;
+    onNavigate?: (label: string) => void;
   };
 
-  let { items, active = "Home" }: Props = $props();
+  let { items, active = "Home", onNavigate }: Props = $props();
 </script>
 
 <aside class="sidebar" aria-label="Primary navigation">
@@ -20,10 +21,15 @@
 
   <nav>
     {#each items as item}
-      <a class:active={item.label === active} href="/" aria-current={item.label === active ? "page" : undefined}>
+      <button
+        class:active={item.label === active}
+        type="button"
+        aria-current={item.label === active ? "page" : undefined}
+        onclick={() => onNavigate?.(item.label)}
+      >
         <span class="nav-icon" aria-hidden="true">{item.icon}</span>
         <span>{item.label}</span>
-      </a>
+      </button>
     {/each}
   </nav>
 </aside>
@@ -77,25 +83,29 @@
     gap: 6px;
   }
 
-  a {
+  button {
     display: flex;
     align-items: center;
     gap: 12px;
+    width: 100%;
     min-height: 44px;
+    border: 0;
     padding: 0 12px;
     border-radius: 8px;
+    background: transparent;
     color: #b4bdc8;
+    cursor: default;
+    font: inherit;
     font-weight: 650;
-    text-decoration: none;
   }
 
-  a:hover,
-  a.active {
+  button:hover,
+  button.active {
     background: #1b2027;
     color: #ffffff;
   }
 
-  a.active .nav-icon {
+  button.active .nav-icon {
     background: #2f8f83;
     color: #07110f;
   }
@@ -129,7 +139,7 @@
       grid-template-columns: repeat(3, minmax(0, 1fr));
     }
 
-    a {
+    button {
       justify-content: center;
       min-height: 40px;
       padding: 0 8px;
