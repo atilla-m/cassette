@@ -42,6 +42,7 @@ export type NavItem = {
 export type PlaybackStatus = {
   filePath: string | null;
   isPlaying: boolean;
+  hasEnded: boolean;
   positionSeconds: number;
   durationSeconds: number | null;
   volume: number;

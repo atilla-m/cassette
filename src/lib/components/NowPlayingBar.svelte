@@ -2,6 +2,8 @@
   import type { Track } from "$lib/types/library";
   import { localImageSource } from "$lib/utils/localImage";
 
+  type RepeatMode = "off" | "all" | "one";
+
   type Props = {
     track: Track | null;
     isPlaying: boolean;
@@ -12,6 +14,8 @@
     canPlayNext?: boolean;
     queueCount?: number;
     isQueueOpen?: boolean;
+    isShuffleEnabled?: boolean;
+    repeatMode?: RepeatMode;
     onTogglePlayback?: () => void;
     onPrevious?: () => void;
     onNext?: () => void;
@@ -19,6 +23,8 @@
     onVolumeChange?: (volume: number) => void;
     onToggleFavorite?: (track: Track) => void;
     onToggleQueue?: () => void;
+    onToggleShuffle?: () => void;
+    onToggleRepeat?: () => void;
   };
 
   let {
@@ -31,6 +37,8 @@
     canPlayNext = false,
     queueCount = 0,
     isQueueOpen = false,
+    isShuffleEnabled = false,
+    repeatMode = "off",
     onTogglePlayback,
     onPrevious,
     onNext,
@@ -38,6 +46,8 @@
     onVolumeChange,
     onToggleFavorite,
     onToggleQueue,
+    onToggleShuffle,
+    onToggleRepeat,
   }: Props = $props();
 
   let localVolume = $state(1);
@@ -98,6 +108,30 @@
     return queueCount > 0 ? `Queue ${queueCount}` : "Queue";
   }
 
+  function repeatLabel() {
+    if (repeatMode === "all") {
+      return "Repeat All";
+    }
+
+    if (repeatMode === "one") {
+      return "Repeat 1";
+    }
+
+    return "Repeat";
+  }
+
+  function repeatAriaLabel() {
+    if (repeatMode === "all") {
+      return "Repeat all is on";
+    }
+
+    if (repeatMode === "one") {
+      return "Repeat one is on";
+    }
+
+    return "Repeat is off";
+  }
+
   function hideBrokenImage(event: Event) {
     if (event.currentTarget instanceof HTMLImageElement) {
       event.currentTarget.hidden = true;
@@ -135,6 +169,16 @@
   </div>
 
   <div class="transport" aria-label="Playback controls">
+    <button
+      class:active={isShuffleEnabled}
+      class="mode-button"
+      type="button"
+      aria-label={isShuffleEnabled ? "Shuffle is on" : "Shuffle is off"}
+      disabled={!track}
+      onclick={onToggleShuffle}
+    >
+      Shuffle
+    </button>
     <button type="button" aria-label="Previous track" disabled={!canPlayPrevious} onclick={onPrevious}>&lt;&lt;</button>
     <button
       class="play"
@@ -146,6 +190,16 @@
       {isPlaying ? "||" : ">"}
     </button>
     <button type="button" aria-label="Next track" disabled={!canPlayNext} onclick={onNext}>&gt;&gt;</button>
+    <button
+      class:active={repeatMode !== "off"}
+      class="mode-button"
+      type="button"
+      aria-label={repeatAriaLabel()}
+      disabled={!track}
+      onclick={onToggleRepeat}
+    >
+      {repeatLabel()}
+    </button>
   </div>
 
   <div class="progress-area">
@@ -299,6 +353,22 @@
   button.queue-button.active,
   button.queue-button:hover,
   button.queue-button:focus-visible {
+    border-color: #35544f;
+    background: #17332f;
+    color: #d8fffa;
+    outline: none;
+  }
+
+  button.mode-button {
+    width: auto;
+    min-width: 64px;
+    padding: 0 10px;
+    white-space: nowrap;
+  }
+
+  button.mode-button.active,
+  button.mode-button:hover,
+  button.mode-button:focus-visible {
     border-color: #35544f;
     background: #17332f;
     color: #d8fffa;

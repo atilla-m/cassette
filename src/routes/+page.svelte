@@ -22,6 +22,12 @@
   type AlbumSortKey = "title" | "artist" | "year" | "trackCount";
   type ArtistSortKey = "name" | "songCount" | "albumCount";
   type SortDirection = "asc" | "desc";
+  type RepeatMode = "off" | "all" | "one";
+  type QueuePanelEntry = {
+    track: Track;
+    queueIndex: number;
+    offset: number;
+  };
 
   let tracks = $state<Track[]>([]);
   let isScanning = $state(false);
@@ -35,6 +41,9 @@
   let playbackQueue = $state<Track[]>([]);
   let currentQueueIndex = $state<number | null>(null);
   let isQueueOpen = $state(false);
+  let isShuffleEnabled = $state(false);
+  let shuffledQueueOrder = $state<number[]>([]);
+  let repeatMode = $state<RepeatMode>("off");
   let mainElement: HTMLElement | undefined = $state();
   let activeView = $state("Home");
   let selectedAlbumId = $state<string | null>(null);
@@ -49,6 +58,7 @@
   let artistSort = $state<ArtistSortKey>("name");
   let artistSortDirection = $state<SortDirection>("asc");
   let isPlaying = $state(false);
+  let hasCurrentTrackEnded = $state(false);
   let positionSeconds = $state(0);
   let durationSeconds = $state<number | null>(null);
   let volume = $state(1);
@@ -87,13 +97,22 @@
   let selectedArtistAlbums = $derived(
     selectedArtist ? sortedAlbums.filter((album) => album.artist === selectedArtist.name) : [],
   );
-  let queuePanelStartIndex = $derived(currentQueueIndex ?? 0);
-  let queuePanelTracks = $derived(
-    currentQueueIndex === null ? playbackQueue : playbackQueue.slice(currentQueueIndex),
+  let playbackOrder = $derived(
+    isShuffleEnabled
+      ? normalizedQueueOrder(shuffledQueueOrder, playbackQueue.length)
+      : playbackQueue.map((_, index) => index),
   );
-  let canPlayPrevious = $derived(currentQueueIndex !== null && currentQueueIndex > 0);
+  let currentOrderIndex = $derived(queueOrderIndex(playbackOrder, currentQueueIndex));
+  let queuePanelEntries = $derived(buildQueuePanelEntries(playbackQueue, playbackOrder, currentQueueIndex));
+  let canPlayPrevious = $derived(
+    currentQueueIndex !== null
+      && playbackQueue.length > 1
+      && (currentOrderIndex > 0 || repeatMode === "all"),
+  );
   let canPlayNext = $derived(
-    currentQueueIndex !== null && currentQueueIndex < playbackQueue.length - 1,
+    currentQueueIndex !== null
+      && playbackQueue.length > 1
+      && (currentOrderIndex < playbackOrder.length - 1 || repeatMode === "all"),
   );
   let hadSearchQuery = false;
 
@@ -122,7 +141,9 @@
       }
 
       try {
-        applyPlaybackStatus(await getPlaybackStatus());
+        const status = await getPlaybackStatus();
+        applyPlaybackStatus(status);
+        await handlePlaybackStatusUpdate(status);
       } catch (error) {
         playbackError = error instanceof Error ? error.message : String(error);
       }
@@ -203,8 +224,10 @@
       isLikedSongsOpen = false;
       searchQuery = "";
       currentTrackIndex = null;
+      hasCurrentTrackEnded = false;
       playbackQueue = [];
       currentQueueIndex = null;
+      shuffledQueueOrder = [];
       isQueueOpen = false;
       hasLoadedCache = true;
 
@@ -230,6 +253,7 @@
 
     playbackQueue = nextQueue;
     currentQueueIndex = queueIndex;
+    shuffledQueueOrder = isShuffleEnabled ? buildShuffledQueueOrder(nextQueue.length, queueIndex) : [];
     await playQueuedTrackAtIndex(queueIndex);
   }
 
@@ -308,6 +332,7 @@
     durationSeconds = track.durationSeconds;
     positionSeconds = 0;
     isPlaying = false;
+    hasCurrentTrackEnded = false;
 
     try {
       const status = await playTrack(track.filePath);
@@ -316,6 +341,23 @@
     } catch (error) {
       playbackError = error instanceof Error ? error.message : String(error);
     }
+  }
+
+  async function handlePlaybackStatusUpdate(status: PlaybackStatus) {
+    if (!status.hasEnded || !currentTrack || status.filePath !== currentTrack.filePath) {
+      return;
+    }
+
+    hasCurrentTrackEnded = true;
+    const nextQueueIndex = getNextQueueIndex(true);
+
+    if (nextQueueIndex === null) {
+      isPlaying = false;
+      positionSeconds = durationSeconds ?? positionSeconds;
+      return;
+    }
+
+    await playQueuedTrackAtIndex(nextQueueIndex);
   }
 
   async function handleToggleFavorite(track: Track) {
@@ -339,19 +381,23 @@
   }
 
   async function handlePreviousTrack() {
-    if (!canPlayPrevious || currentQueueIndex === null) {
+    const previousQueueIndex = getPreviousQueueIndex();
+
+    if (!canPlayPrevious || previousQueueIndex === null) {
       return;
     }
 
-    await playQueuedTrackAtIndex(currentQueueIndex - 1);
+    await playQueuedTrackAtIndex(previousQueueIndex);
   }
 
   async function handleNextTrack() {
-    if (!canPlayNext || currentQueueIndex === null) {
+    const nextQueueIndex = getNextQueueIndex(false);
+
+    if (!canPlayNext || nextQueueIndex === null) {
       return;
     }
 
-    await playQueuedTrackAtIndex(currentQueueIndex + 1);
+    await playQueuedTrackAtIndex(nextQueueIndex);
   }
 
   function handleToggleQueue() {
@@ -361,7 +407,19 @@
   function handleClearQueue() {
     playbackQueue = [];
     currentQueueIndex = null;
+    shuffledQueueOrder = [];
     isQueueOpen = false;
+  }
+
+  function handleToggleShuffle() {
+    isShuffleEnabled = !isShuffleEnabled;
+    shuffledQueueOrder = !isShuffleEnabled
+      ? []
+      : buildShuffledQueueOrder(playbackQueue.length, currentQueueIndex);
+  }
+
+  function handleToggleRepeat() {
+    repeatMode = nextRepeatMode(repeatMode);
   }
 
   async function handleTogglePlayback() {
@@ -370,6 +428,17 @@
     }
 
     playbackError = null;
+
+    if (!isPlaying && hasCurrentTrackEnded) {
+      if (currentQueueIndex === null) {
+        playbackQueue = [currentTrack];
+        currentQueueIndex = 0;
+        shuffledQueueOrder = isShuffleEnabled ? [0] : [];
+      }
+
+      await playQueuedTrackAtIndex(currentQueueIndex ?? 0);
+      return;
+    }
 
     try {
       const status = isPlaying ? await pausePlayback() : await resumePlayback();
@@ -384,6 +453,7 @@
 
     try {
       applyPlaybackStatus(await seekPlayback(nextPositionSeconds));
+      hasCurrentTrackEnded = false;
     } catch (error) {
       playbackError = error instanceof Error ? error.message : String(error);
     }
@@ -405,6 +475,10 @@
     positionSeconds = status.positionSeconds;
     durationSeconds = status.durationSeconds ?? currentTrack?.durationSeconds ?? null;
     volume = status.volume;
+
+    if (status.isPlaying) {
+      hasCurrentTrackEnded = false;
+    }
   }
 
   function shouldIgnoreShortcut(target: EventTarget | null) {
@@ -482,6 +556,106 @@
 
   function sortDirectionLabel(direction: SortDirection) {
     return direction === "asc" ? "Asc" : "Desc";
+  }
+
+  function nextRepeatMode(mode: RepeatMode): RepeatMode {
+    if (mode === "off") {
+      return "all";
+    }
+
+    if (mode === "all") {
+      return "one";
+    }
+
+    return "off";
+  }
+
+  function getNextQueueIndex(isAutoAdvance: boolean) {
+    if (currentQueueIndex === null || playbackQueue.length === 0) {
+      return null;
+    }
+
+    if (isAutoAdvance && repeatMode === "one") {
+      return currentQueueIndex;
+    }
+
+    const nextOrderIndex = currentOrderIndex + 1;
+
+    if (nextOrderIndex < playbackOrder.length) {
+      return playbackOrder[nextOrderIndex];
+    }
+
+    if (repeatMode === "all") {
+      return playbackOrder[0] ?? null;
+    }
+
+    return null;
+  }
+
+  function getPreviousQueueIndex() {
+    if (currentQueueIndex === null || playbackQueue.length === 0) {
+      return null;
+    }
+
+    const previousOrderIndex = currentOrderIndex - 1;
+
+    if (previousOrderIndex >= 0) {
+      return playbackOrder[previousOrderIndex];
+    }
+
+    if (repeatMode === "all") {
+      return playbackOrder.at(-1) ?? null;
+    }
+
+    return null;
+  }
+
+  function normalizedQueueOrder(order: number[], queueLength: number) {
+    const seen = new Set<number>();
+    const normalized = order.filter((index) => {
+      const isValid = Number.isInteger(index) && index >= 0 && index < queueLength && !seen.has(index);
+      seen.add(index);
+      return isValid;
+    });
+
+    for (let index = 0; index < queueLength; index += 1) {
+      if (!seen.has(index)) {
+        normalized.push(index);
+      }
+    }
+
+    return normalized;
+  }
+
+  function queueOrderIndex(order: number[], queueIndex: number | null) {
+    return queueIndex === null ? -1 : order.indexOf(queueIndex);
+  }
+
+  function buildQueuePanelEntries(queue: Track[], order: number[], queueIndex: number | null): QueuePanelEntry[] {
+    const startOrderIndex = queueIndex === null ? 0 : Math.max(0, order.indexOf(queueIndex));
+
+    return order.slice(startOrderIndex).flatMap((trackIndex, offset) => {
+      const track = queue[trackIndex];
+
+      return track ? [{ track, queueIndex: trackIndex, offset }] : [];
+    });
+  }
+
+  function buildShuffledQueueOrder(queueLength: number, queueIndex: number | null) {
+    if (queueLength === 0) {
+      return [];
+    }
+
+    const currentIndex = queueIndex ?? 0;
+    const remainingIndices = Array.from({ length: queueLength }, (_, index) => index)
+      .filter((index) => index !== currentIndex);
+
+    for (let index = remainingIndices.length - 1; index > 0; index -= 1) {
+      const swapIndex = Math.floor(Math.random() * (index + 1));
+      [remainingIndices[index], remainingIndices[swapIndex]] = [remainingIndices[swapIndex], remainingIndices[index]];
+    }
+
+    return [currentIndex, ...remainingIndices];
   }
 
   function queuePositionLabel(offset: number) {
@@ -1127,25 +1301,25 @@
         </button>
       </div>
 
-      {#if queuePanelTracks.length === 0}
+      {#if queuePanelEntries.length === 0}
         <div class="group-empty">
           <h3>No queued songs</h3>
           <p>Play a song from any list to build an Up Next queue.</p>
         </div>
       {:else}
         <div class="queue-list">
-          {#each queuePanelTracks as queuedTrack, offset (queuedTrack.id)}
+          {#each queuePanelEntries as entry (entry.track.id)}
             <button
-              class:active={queuePanelStartIndex + offset === currentQueueIndex}
+              class:active={entry.queueIndex === currentQueueIndex}
               class="queue-row"
               type="button"
-              title={queuedTrack.filePath}
-              onclick={() => playQueuedTrackAtIndex(queuePanelStartIndex + offset)}
+              title={entry.track.filePath}
+              onclick={() => playQueuedTrackAtIndex(entry.queueIndex)}
             >
-              <span>{queuePositionLabel(offset)}</span>
+              <span>{queuePositionLabel(entry.offset)}</span>
               <div>
-                <p>{queuedTrack.title}</p>
-                <small>{queuedTrack.artist ?? "Unknown Artist"}</small>
+                <p>{entry.track.title}</p>
+                <small>{entry.track.artist ?? "Unknown Artist"}</small>
               </div>
             </button>
           {/each}
@@ -1164,6 +1338,8 @@
     {canPlayNext}
     queueCount={playbackQueue.length}
     {isQueueOpen}
+    {isShuffleEnabled}
+    {repeatMode}
     onTogglePlayback={handleTogglePlayback}
     onPrevious={handlePreviousTrack}
     onNext={handleNextTrack}
@@ -1171,6 +1347,8 @@
     onVolumeChange={handleVolumeChange}
     onToggleFavorite={handleToggleFavorite}
     onToggleQueue={handleToggleQueue}
+    onToggleShuffle={handleToggleShuffle}
+    onToggleRepeat={handleToggleRepeat}
   />
 </div>
 

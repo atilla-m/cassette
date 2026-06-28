@@ -85,6 +85,7 @@ struct FolderCoverArt {
 struct PlaybackStatus {
     file_path: Option<String>,
     is_playing: bool,
+    has_ended: bool,
     position_seconds: u64,
     duration_seconds: Option<u64>,
     volume: f64,
@@ -95,6 +96,7 @@ struct PlaybackState {
     playbin: Option<gst::Element>,
     current_path: Option<String>,
     is_playing: bool,
+    has_ended: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -502,6 +504,7 @@ impl PlaybackState {
 
         self.current_path = Some(file_path.to_owned());
         self.is_playing = true;
+        self.has_ended = false;
 
         Ok(self.status())
     }
@@ -522,6 +525,7 @@ impl PlaybackState {
 
         set_gst_state(playbin, gst::State::Playing)?;
         self.is_playing = self.current_path.is_some();
+        self.has_ended = false;
 
         Ok(self.status())
     }
@@ -540,6 +544,7 @@ impl PlaybackState {
             match message.view() {
                 gst::MessageView::Eos(_) => {
                     self.is_playing = false;
+                    self.has_ended = true;
                     set_gst_state(&playbin, gst::State::Paused)?;
                 }
                 gst::MessageView::Error(error) => {
@@ -564,6 +569,7 @@ impl PlaybackState {
                 gst::ClockTime::from_seconds(position_seconds),
             )
             .map_err(|error| format!("Could not seek track: {error}"))?;
+        self.has_ended = false;
 
         Ok(self.status())
     }
@@ -606,6 +612,7 @@ impl PlaybackState {
         PlaybackStatus {
             file_path: self.current_path.clone(),
             is_playing: self.is_playing,
+            has_ended: self.has_ended,
             position_seconds,
             duration_seconds,
             volume,
