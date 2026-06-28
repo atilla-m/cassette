@@ -4,14 +4,17 @@
   import NowPlayingBar from "$lib/components/NowPlayingBar.svelte";
   import Sidebar from "$lib/components/Sidebar.svelte";
   import TrackList from "$lib/components/TrackList.svelte";
-  import { albums, artists, navItems, nowPlaying } from "$lib/data/mockLibrary";
-  import type { Track } from "$lib/types/library";
+  import { buildAlbums, buildArtists } from "$lib/data/libraryViews";
+  import { albums as mockAlbums, artists as mockArtists, navItems, nowPlaying } from "$lib/data/mockLibrary";
+  import type { Album, Track } from "$lib/types/library";
 
   let tracks = $state<Track[]>([]);
   let isScanning = $state(false);
   let scanError = $state<string | null>(null);
   let scannedFolder = $state<string | null>(null);
   let scanCount = $state<number | null>(null);
+  let displayAlbums = $derived(scanCount === null ? mockAlbums : buildAlbums(tracks));
+  let displayArtists = $derived(scanCount === null ? mockArtists : buildArtists(tracks));
 
   async function handleScanLibrary() {
     scanError = null;
@@ -37,6 +40,13 @@
     } finally {
       isScanning = false;
     }
+  }
+
+  function albumDetail(album: Album) {
+    const year = album.year ? ` · ${album.year}` : "";
+    const trackCount = `${album.trackCount} ${album.trackCount === 1 ? "song" : "songs"}`;
+
+    return `${album.artist}${year} · ${trackCount}`;
   }
 </script>
 
@@ -74,33 +84,47 @@
       </LibrarySection>
 
       <LibrarySection title="Albums">
-        <div class="album-grid">
-          {#each albums as album}
-            <article class="album-card">
-              <div class="album-art" style={`--item-color: ${album.color}`} aria-hidden="true">
-                <span></span>
-              </div>
-              <h3>{album.title}</h3>
-              <p>{album.artist} · {album.year}</p>
-            </article>
-          {/each}
-        </div>
+        {#if displayAlbums.length === 0}
+          <div class="group-empty">
+            <h3>No albums found</h3>
+            <p>Album tags were not found in the scanned tracks.</p>
+          </div>
+        {:else}
+          <div class="album-grid">
+            {#each displayAlbums as album}
+              <article class="album-card">
+                <div class="album-art" style={`--item-color: ${album.color}`} aria-hidden="true">
+                  <span></span>
+                </div>
+                <h3>{album.title}</h3>
+                <p>{albumDetail(album)}</p>
+              </article>
+            {/each}
+          </div>
+        {/if}
       </LibrarySection>
 
       <LibrarySection title="Artists">
-        <div class="artist-grid">
-          {#each artists as artist}
-            <article class="artist-card">
-              <div class="artist-avatar" style={`--item-color: ${artist.color}`} aria-hidden="true">
-                {artist.name.slice(0, 1)}
-              </div>
-              <div>
-                <h3>{artist.name}</h3>
-                <p>{artist.detail}</p>
-              </div>
-            </article>
-          {/each}
-        </div>
+        {#if displayArtists.length === 0}
+          <div class="group-empty">
+            <h3>No artists found</h3>
+            <p>Artist tags were not found in the scanned tracks.</p>
+          </div>
+        {:else}
+          <div class="artist-grid">
+            {#each displayArtists as artist}
+              <article class="artist-card">
+                <div class="artist-avatar" style={`--item-color: ${artist.color}`} aria-hidden="true">
+                  {artist.name.slice(0, 1)}
+                </div>
+                <div>
+                  <h3>{artist.name}</h3>
+                  <p>{artist.detail}</p>
+                </div>
+              </article>
+            {/each}
+          </div>
+        {/if}
       </LibrarySection>
     </main>
   </div>
@@ -222,6 +246,28 @@
 
   .home :global(.library-section + .library-section) {
     margin-top: 30px;
+  }
+
+  .group-empty {
+    display: grid;
+    min-height: 110px;
+    place-content: center;
+    border: 1px dashed #303844;
+    border-radius: 8px;
+    background: rgba(18, 22, 28, 0.74);
+    padding: 20px;
+    text-align: center;
+  }
+
+  .group-empty h3 {
+    margin: 0 0 6px;
+  }
+
+  .group-empty p {
+    margin: 0;
+    color: #929daa;
+    font-size: 0.9rem;
+    font-weight: 650;
   }
 
   .album-card p,

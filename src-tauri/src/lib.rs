@@ -1,3 +1,6 @@
+use lofty::file::{AudioFile, TaggedFileExt};
+use lofty::probe::Probe;
+use lofty::tag::{Accessor, ItemKey, Tag};
 use serde::Serialize;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -8,12 +11,16 @@ const SUPPORTED_EXTENSIONS: &[&str] = &["flac", "mp3", "ogg", "opus", "wav", "m4
 #[serde(rename_all = "camelCase")]
 struct Track {
     id: String,
-    path: String,
+    file_path: String,
     file_name: String,
     extension: String,
     title: String,
     artist: Option<String>,
     album: Option<String>,
+    album_artist: Option<String>,
+    track_number: Option<u32>,
+    disc_number: Option<u32>,
+    year: Option<u16>,
     duration_seconds: Option<u32>,
 }
 
@@ -22,6 +29,10 @@ struct TrackMetadata {
     title: Option<String>,
     artist: Option<String>,
     album: Option<String>,
+    album_artist: Option<String>,
+    track_number: Option<u32>,
+    disc_number: Option<u32>,
+    year: Option<u16>,
     duration_seconds: Option<u32>,
 }
 
@@ -39,7 +50,7 @@ fn scan_library(root: String) -> Result<Vec<Track>, String> {
 
     let mut tracks = Vec::new();
     scan_directory(&root_path, &mut tracks)?;
-    tracks.sort_by(|left, right| left.path.cmp(&right.path));
+    tracks.sort_by(|left, right| left.file_path.cmp(&right.file_path));
 
     Ok(tracks)
 }
@@ -95,18 +106,64 @@ fn track_from_path(path: PathBuf) -> Option<Track> {
 
     Some(Track {
         id: path_string.clone(),
-        path: path_string,
+        file_path: path_string,
         file_name,
         extension,
         title,
         artist: metadata.artist,
         album: metadata.album,
+        album_artist: metadata.album_artist,
+        track_number: metadata.track_number,
+        disc_number: metadata.disc_number,
+        year: metadata.year,
         duration_seconds: metadata.duration_seconds,
     })
 }
 
-fn read_track_metadata(_path: &Path) -> TrackMetadata {
-    TrackMetadata::default()
+fn read_track_metadata(path: &Path) -> TrackMetadata {
+    let tagged_file = match Probe::open(path).and_then(|probe| probe.read()) {
+        Ok(tagged_file) => tagged_file,
+        Err(_) => return TrackMetadata::default(),
+    };
+
+    let mut metadata = TrackMetadata {
+        duration_seconds: duration_seconds(&tagged_file),
+        ..TrackMetadata::default()
+    };
+
+    if let Some(tag) = tagged_file
+        .primary_tag()
+        .or_else(|| tagged_file.first_tag())
+    {
+        metadata.title = clean_text(tag.title().map(|value| value.into_owned()));
+        metadata.artist = clean_text(tag.artist().map(|value| value.into_owned()));
+        metadata.album = clean_text(tag.album().map(|value| value.into_owned()));
+        metadata.album_artist = album_artist(tag);
+        metadata.track_number = tag.track();
+        metadata.disc_number = tag.disk();
+        metadata.year = tag.date().map(|date| date.year);
+    }
+
+    metadata
+}
+
+fn duration_seconds(tagged_file: &lofty::file::TaggedFile) -> Option<u32> {
+    let seconds = tagged_file.properties().duration().as_secs();
+    u32::try_from(seconds).ok().filter(|seconds| *seconds > 0)
+}
+
+fn album_artist(tag: &Tag) -> Option<String> {
+    clean_text(
+        tag.get_string(ItemKey::AlbumArtist)
+            .or_else(|| tag.get_string(ItemKey::AlbumArtists))
+            .map(str::to_owned),
+    )
+}
+
+fn clean_text(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
 }
 
 fn title_from_path(path: &Path) -> String {

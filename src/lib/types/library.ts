@@ -1,18 +1,24 @@
 export type Track = {
   id: string;
-  path: string;
+  filePath: string;
   fileName: string;
   extension: string;
   title: string;
   artist: string | null;
   album: string | null;
+  albumArtist: string | null;
+  trackNumber: number | null;
+  discNumber: number | null;
+  year: number | null;
   durationSeconds: number | null;
 };
 
 export type Album = {
+  id: string;
   title: string;
   artist: string;
-  year: number;
+  year: number | null;
+  trackCount: number;
   color: string;
 };
 

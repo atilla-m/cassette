@@ -30,8 +30,8 @@
 {:else}
   <div class="track-list">
     {#each tracks as track}
-      <article class="track-row" title={track.path}>
-        <div class="mini-cover" aria-hidden="true">{track.extension.slice(0, 3).toUpperCase()}</div>
+      <article class="track-row" title={track.filePath}>
+        <div class="mini-cover" aria-hidden="true">{track.extension.toUpperCase()}</div>
         <div class="track-title">
           <h3>{track.title}</h3>
           <p>{displayArtist(track)}</p>

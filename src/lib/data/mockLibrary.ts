@@ -11,27 +11,35 @@ export const navItems: NavItem[] = [
 
 export const albums: Album[] = [
   {
+    id: "mara-vale-afterimage",
     title: "Afterimage",
     artist: "Mara Vale",
     year: 2026,
+    trackCount: 11,
     color: "#2f8f83",
   },
   {
+    id: "north-arcade-signal-bloom",
     title: "Signal Bloom",
     artist: "North Arcade",
     year: 2025,
+    trackCount: 9,
     color: "#b95f3d",
   },
   {
+    id: "echo-lanes-soft-mechanics",
     title: "Soft Mechanics",
     artist: "Echo Lanes",
     year: 2024,
+    trackCount: 13,
     color: "#8b6bd6",
   },
   {
+    id: "june-circuit-late-service",
     title: "Late Service",
     artist: "June Circuit",
     year: 2023,
+    trackCount: 8,
     color: "#c59b40",
   },
 ];
@@ -61,11 +69,15 @@ export const artists: Artist[] = [
 
 export const nowPlaying: Track = {
   id: "mock-now-playing",
-  path: "",
+  filePath: "",
   fileName: "low-light-runner.flac",
   extension: "flac",
   title: "Low Light Runner",
   artist: "Mara Vale",
   album: "Afterimage",
+  albumArtist: "Mara Vale",
+  trackNumber: 1,
+  discNumber: 1,
+  year: 2026,
   durationSeconds: 252,
 };
