@@ -1,4 +1,4 @@
-import type { Album, Artist, Track } from "$lib/types/library";
+import type { Album, Artist, Genre, Track } from "$lib/types/library";
 
 const palette = ["#2f8f83", "#b95f3d", "#8b6bd6", "#c59b40", "#4d84c4", "#b24f72"];
 
@@ -49,6 +49,49 @@ export function buildArtists(tracks: Track[]): Artist[] {
       color: colorFor(name),
     }))
     .sort((left, right) => left.name.localeCompare(right.name));
+}
+
+export function buildGenres(tracks: Track[]): Genre[] {
+  const genresByName = new Map<string, {
+    name: string;
+    songCount: number;
+    artists: Set<string>;
+    albums: Set<string>;
+  }>();
+
+  for (const track of tracks) {
+    for (const genreName of trackGenres(track)) {
+      const existing = genresByName.get(genreName) ?? {
+        name: genreName,
+        songCount: 0,
+        artists: new Set<string>(),
+        albums: new Set<string>(),
+      };
+      const artist = track.artist ?? track.albumArtist ?? "Unknown Artist";
+      const album = track.album ?? "Unknown Album";
+      const albumArtist = track.albumArtist ?? track.artist ?? "Unknown Artist";
+
+      existing.songCount += 1;
+      existing.artists.add(artist);
+      existing.albums.add(`${albumArtist.toLowerCase()}\u0000${album.toLowerCase()}`);
+      genresByName.set(genreName, existing);
+    }
+  }
+
+  return [...genresByName.values()]
+    .map((genre) => ({
+      name: genre.name,
+      songCount: genre.songCount,
+      artistCount: genre.artists.size,
+      albumCount: genre.albums.size,
+      detail: `${genre.songCount} ${genre.songCount === 1 ? "song" : "songs"}`,
+      color: colorFor(genre.name),
+    }))
+    .sort((left, right) => left.name.localeCompare(right.name));
+}
+
+function trackGenres(track: Track) {
+  return track.genres.length > 0 ? track.genres : ["Unknown Genre"];
 }
 
 function colorFor(value: string) {

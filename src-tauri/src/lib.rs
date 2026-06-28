@@ -30,6 +30,7 @@ struct Track {
     artist: Option<String>,
     album: Option<String>,
     album_artist: Option<String>,
+    genres: Vec<String>,
     track_number: Option<u32>,
     disc_number: Option<u32>,
     year: Option<u16>,
@@ -47,6 +48,7 @@ struct TrackMetadata {
     artist: Option<String>,
     album: Option<String>,
     album_artist: Option<String>,
+    genres: Vec<String>,
     track_number: Option<u32>,
     disc_number: Option<u32>,
     year: Option<u16>,
@@ -199,6 +201,7 @@ impl LibraryDatabase {
                 artist TEXT,
                 album TEXT,
                 album_artist TEXT,
+                genres TEXT NOT NULL DEFAULT '[]',
                 track_number INTEGER,
                 disc_number INTEGER,
                 year INTEGER,
@@ -231,6 +234,11 @@ impl LibraryDatabase {
                     "ALTER TABLE tracks ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0",
                     [],
                 )?;
+        }
+
+        if !self.has_column("tracks", "genres")? {
+            self.connection
+                .execute("ALTER TABLE tracks ADD COLUMN genres TEXT NOT NULL DEFAULT '[]'", [])?;
         }
 
         Ok(())
@@ -273,7 +281,8 @@ impl LibraryDatabase {
                     file_size,
                     scanned_at,
                     cover_art_path,
-                    is_favorite
+                    is_favorite,
+                    genres
                 FROM tracks
                 ORDER BY file_path
                 ",
@@ -322,6 +331,7 @@ impl LibraryDatabase {
                         artist,
                         album,
                         album_artist,
+                        genres,
                         track_number,
                         disc_number,
                         year,
@@ -334,13 +344,15 @@ impl LibraryDatabase {
                         scanned_at,
                         cover_art_path,
                         is_favorite
-                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
                     ",
                 )
                 .map_err(|error| format!("Could not prepare library cache update: {error}"))?;
 
             for track in tracks {
                 track.is_favorite = track.is_favorite || favorite_track_ids.contains(&track.id);
+                let genres_json = serde_json::to_string(&track.genres)
+                    .unwrap_or_else(|_| "[]".to_owned());
                 statement
                     .execute(params![
                         &track.id,
@@ -348,6 +360,7 @@ impl LibraryDatabase {
                         &track.artist,
                         &track.album,
                         &track.album_artist,
+                        &genres_json,
                         track.track_number,
                         track.disc_number,
                         track.year,
@@ -678,7 +691,18 @@ fn row_to_track(row: &rusqlite::Row<'_>) -> rusqlite::Result<Track> {
         scanned_at: row.get(14)?,
         cover_art_path: row.get(15)?,
         is_favorite: row.get(16)?,
+        genres: parse_cached_genres(row.get(17)?),
     })
+}
+
+fn parse_cached_genres(value: String) -> Vec<String> {
+    let genres = serde_json::from_str::<Vec<String>>(&value)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|genre| clean_text(Some(genre)))
+        .collect::<Vec<_>>();
+
+    normalize_genres(genres)
 }
 
 fn favorite_track_ids(connection: &Connection) -> rusqlite::Result<HashSet<String>> {
@@ -815,6 +839,7 @@ fn track_from_path(path: PathBuf, scanned_at: i64) -> Option<(Track, Option<Embe
         artist: metadata.artist,
         album: metadata.album,
         album_artist: metadata.album_artist,
+        genres: normalize_genres(metadata.genres),
         track_number: metadata.track_number,
         disc_number: metadata.disc_number,
         year: metadata.year,
@@ -1084,6 +1109,7 @@ fn read_track_metadata(path: &Path) -> TrackMetadata {
         metadata.year = tag.date().map(|date| date.year);
     }
 
+    metadata.genres = genres(&tagged_file);
     metadata.embedded_cover_art = embedded_cover_art(&tagged_file);
 
     metadata
@@ -1100,6 +1126,44 @@ fn album_artist(tag: &Tag) -> Option<String> {
             .or_else(|| tag.get_string(ItemKey::AlbumArtists))
             .map(str::to_owned),
     )
+}
+
+fn genres(tagged_file: &lofty::file::TaggedFile) -> Vec<String> {
+    let genres = tagged_file
+        .primary_tag()
+        .into_iter()
+        .chain(tagged_file.tags().iter())
+        .flat_map(|tag| tag.get_strings(ItemKey::Genre))
+        .flat_map(split_genres)
+        .collect::<Vec<_>>();
+
+    normalize_genres(genres)
+}
+
+fn split_genres(value: &str) -> Vec<String> {
+    value
+        .split([';', ',', '\0'])
+        .filter_map(|genre| clean_text(Some(genre.to_owned())))
+        .collect()
+}
+
+fn normalize_genres(genres: Vec<String>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut normalized = Vec::new();
+
+    for genre in genres {
+        let key = genre.to_lowercase();
+
+        if seen.insert(key) {
+            normalized.push(genre);
+        }
+    }
+
+    if normalized.is_empty() {
+        normalized.push("Unknown Genre".to_owned());
+    }
+
+    normalized
 }
 
 fn embedded_cover_art(tagged_file: &lofty::file::TaggedFile) -> Option<EmbeddedCoverArt> {

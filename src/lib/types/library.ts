@@ -7,6 +7,7 @@ export type Track = {
   artist: string | null;
   album: string | null;
   albumArtist: string | null;
+  genres: string[];
   trackNumber: number | null;
   discNumber: number | null;
   year: number | null;
@@ -30,6 +31,15 @@ export type Album = {
 
 export type Artist = {
   name: string;
+  detail: string;
+  color: string;
+};
+
+export type Genre = {
+  name: string;
+  songCount: number;
+  artistCount: number;
+  albumCount: number;
   detail: string;
   color: string;
 };

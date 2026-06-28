@@ -1,9 +1,10 @@
-import type { Album, Artist, NavItem, Track } from "$lib/types/library";
+import type { Album, Artist, Genre, NavItem, Track } from "$lib/types/library";
 
 export const navItems: NavItem[] = [
   { label: "Home", icon: "H" },
   { label: "Albums", icon: "A" },
   { label: "Artists", icon: "R" },
+  { label: "Genres", icon: "G" },
   { label: "Songs", icon: "S" },
   { label: "Playlists", icon: "P" },
   { label: "Settings", icon: "T" },
@@ -71,6 +72,33 @@ export const artists: Artist[] = [
   },
 ];
 
+export const genres: Genre[] = [
+  {
+    name: "Electronic",
+    songCount: 28,
+    artistCount: 4,
+    albumCount: 5,
+    detail: "28 songs",
+    color: "#2f8f83",
+  },
+  {
+    name: "Indie",
+    songCount: 18,
+    artistCount: 3,
+    albumCount: 4,
+    detail: "18 songs",
+    color: "#b95f3d",
+  },
+  {
+    name: "Ambient",
+    songCount: 12,
+    artistCount: 2,
+    albumCount: 3,
+    detail: "12 songs",
+    color: "#8b6bd6",
+  },
+];
+
 export const nowPlaying: Track = {
   id: "mock-now-playing",
   filePath: "",
@@ -80,6 +108,7 @@ export const nowPlaying: Track = {
   artist: "Mara Vale",
   album: "Afterimage",
   albumArtist: "Mara Vale",
+  genres: ["Electronic"],
   trackNumber: 1,
   discNumber: 1,
   year: 2026,

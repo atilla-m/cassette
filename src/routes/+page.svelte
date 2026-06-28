@@ -12,15 +12,16 @@
   import NowPlayingBar from "$lib/components/NowPlayingBar.svelte";
   import Sidebar from "$lib/components/Sidebar.svelte";
   import TrackList from "$lib/components/TrackList.svelte";
-  import { buildAlbums, buildArtists } from "$lib/data/libraryViews";
-  import { albums as mockAlbums, artists as mockArtists, navItems } from "$lib/data/mockLibrary";
-  import type { Album, Artist, PlaybackStatus, Track } from "$lib/types/library";
+  import { buildAlbums, buildArtists, buildGenres } from "$lib/data/libraryViews";
+  import { albums as mockAlbums, artists as mockArtists, genres as mockGenres, navItems } from "$lib/data/mockLibrary";
+  import type { Album, Artist, Genre, PlaybackStatus, Track } from "$lib/types/library";
   import { localImageSource } from "$lib/utils/localImage";
   import { onMount } from "svelte";
 
   type SongSortKey = "title" | "artist" | "album" | "duration";
   type AlbumSortKey = "title" | "artist" | "year" | "trackCount";
   type ArtistSortKey = "name" | "songCount" | "albumCount";
+  type GenreSortKey = "name" | "songCount" | "artistCount" | "albumCount";
   type SortDirection = "asc" | "desc";
   type RepeatMode = "off" | "all" | "one";
   type QueuePanelEntry = {
@@ -48,6 +49,7 @@
   let activeView = $state("Home");
   let selectedAlbumId = $state<string | null>(null);
   let selectedArtistName = $state<string | null>(null);
+  let selectedGenreName = $state<string | null>(null);
   let isLikedSongsOpen = $state(false);
   let searchQuery = $state("");
   let songSort = $state<SongSortKey>("title");
@@ -57,6 +59,8 @@
   let albumSortDirection = $state<SortDirection>("asc");
   let artistSort = $state<ArtistSortKey>("name");
   let artistSortDirection = $state<SortDirection>("asc");
+  let genreSort = $state<GenreSortKey>("name");
+  let genreSortDirection = $state<SortDirection>("asc");
   let isPlaying = $state(false);
   let hasCurrentTrackEnded = $state(false);
   let positionSeconds = $state(0);
@@ -64,12 +68,14 @@
   let volume = $state(1);
   let displayAlbums = $derived(!hasLoadedCache ? mockAlbums : buildAlbums(tracks));
   let displayArtists = $derived(!hasLoadedCache ? mockArtists : buildArtists(tracks));
+  let displayGenres = $derived(!hasLoadedCache ? mockGenres : buildGenres(tracks));
   let favoriteTracks = $derived(tracks.filter((track) => track.isFavorite));
   let availableFormats = $derived(availableTrackFormats(tracks));
   let sortedSongTracks = $derived(sortTracks(tracks, songSort, songSortDirection));
   let filteredSongTracks = $derived(filterTracksByFormat(sortedSongTracks, songFormatFilter));
   let sortedAlbums = $derived(sortAlbums(displayAlbums, albumSort, albumSortDirection));
   let sortedArtists = $derived(sortArtists(displayArtists, artistSort, artistSortDirection));
+  let sortedGenres = $derived(sortGenres(displayGenres, genreSort, genreSortDirection));
   let homeTracks = $derived(tracks.slice(0, 8));
   let homeAlbums = $derived(sortedAlbums.slice(0, 4));
   let homeArtists = $derived(sortedArtists.slice(0, 4));
@@ -83,11 +89,15 @@
   let searchArtists = $derived(
     normalizedSearchQuery ? displayArtists.filter((artist) => artistMatchesSearch(artist, normalizedSearchQuery)) : [],
   );
+  let searchGenres = $derived(
+    normalizedSearchQuery ? displayGenres.filter((genre) => genreMatchesSearch(genre, normalizedSearchQuery)) : [],
+  );
   let hasSearchResults = $derived(
-    searchTracks.length > 0 || searchAlbums.length > 0 || searchArtists.length > 0,
+    searchTracks.length > 0 || searchAlbums.length > 0 || searchArtists.length > 0 || searchGenres.length > 0,
   );
   let selectedAlbum = $derived(displayAlbums.find((album) => album.id === selectedAlbumId) ?? null);
   let selectedArtist = $derived(displayArtists.find((artist) => artist.name === selectedArtistName) ?? null);
+  let selectedGenre = $derived(displayGenres.find((genre) => genre.name === selectedGenreName) ?? null);
   let selectedAlbumTracks = $derived(
     selectedAlbum ? tracks.filter((track) => albumIdForTrack(track) === selectedAlbum.id) : [],
   );
@@ -97,6 +107,11 @@
   let selectedArtistAlbums = $derived(
     selectedArtist ? sortedAlbums.filter((album) => album.artist === selectedArtist.name) : [],
   );
+  let selectedGenreTracks = $derived(
+    selectedGenre ? tracks.filter((track) => trackGenres(track).includes(selectedGenre.name)) : [],
+  );
+  let selectedGenreAlbums = $derived(selectedGenre ? albumsForTracks(selectedGenreTracks, sortedAlbums) : []);
+  let selectedGenreArtists = $derived(selectedGenre ? buildArtists(selectedGenreTracks) : []);
   let playbackOrder = $derived(
     isShuffleEnabled
       ? normalizedQueueOrder(shuffledQueueOrder, playbackQueue.length)
@@ -221,6 +236,7 @@
       tracks = [];
       selectedAlbumId = null;
       selectedArtistName = null;
+      selectedGenreName = null;
       isLikedSongsOpen = false;
       searchQuery = "";
       currentTrackIndex = null;
@@ -261,6 +277,7 @@
     activeView = label;
     selectedAlbumId = null;
     selectedArtistName = null;
+    selectedGenreName = null;
     isLikedSongsOpen = false;
     mainElement?.scrollTo({ top: 0 });
   }
@@ -270,6 +287,7 @@
     activeView = "Albums";
     selectedAlbumId = album.id;
     selectedArtistName = null;
+    selectedGenreName = null;
     isLikedSongsOpen = false;
     mainElement?.scrollTo({ top: 0 });
   }
@@ -279,6 +297,17 @@
     activeView = "Artists";
     selectedArtistName = artist.name;
     selectedAlbumId = null;
+    selectedGenreName = null;
+    isLikedSongsOpen = false;
+    mainElement?.scrollTo({ top: 0 });
+  }
+
+  function handleGenreSelect(genre: Genre) {
+    searchQuery = "";
+    activeView = "Genres";
+    selectedGenreName = genre.name;
+    selectedAlbumId = null;
+    selectedArtistName = null;
     isLikedSongsOpen = false;
     mainElement?.scrollTo({ top: 0 });
   }
@@ -287,6 +316,7 @@
     activeView = "Playlists";
     selectedAlbumId = null;
     selectedArtistName = null;
+    selectedGenreName = null;
     isLikedSongsOpen = true;
     searchQuery = "";
     mainElement?.scrollTo({ top: 0 });
@@ -299,6 +329,11 @@
 
   function handleBackToArtists() {
     selectedArtistName = null;
+    mainElement?.scrollTo({ top: 0 });
+  }
+
+  function handleBackToGenres() {
+    selectedGenreName = null;
     mainElement?.scrollTo({ top: 0 });
   }
 
@@ -398,6 +433,19 @@
     }
 
     await playQueuedTrackAtIndex(nextQueueIndex);
+  }
+
+  async function handleShuffleGenre() {
+    if (selectedGenreTracks.length === 0) {
+      return;
+    }
+
+    const startIndex = Math.floor(Math.random() * selectedGenreTracks.length);
+    playbackQueue = [...selectedGenreTracks];
+    currentQueueIndex = startIndex;
+    isShuffleEnabled = true;
+    shuffledQueueOrder = buildShuffledQueueOrder(selectedGenreTracks.length, startIndex);
+    await playQueuedTrackAtIndex(startIndex);
   }
 
   function handleToggleQueue() {
@@ -525,6 +573,24 @@
 
   function artistAlbumCount(artist: Artist) {
     return displayAlbums.filter((album) => album.artist === artist.name).length;
+  }
+
+  function genreDetail(genre: Genre) {
+    return `${genre.songCount} ${genre.songCount === 1 ? "song" : "songs"} · ${genre.artistCount} ${genre.artistCount === 1 ? "artist" : "artists"} · ${genre.albumCount} ${genre.albumCount === 1 ? "album" : "albums"}`;
+  }
+
+  function trackGenres(track: Track) {
+    return track.genres.length > 0 ? track.genres : ["Unknown Genre"];
+  }
+
+  function albumIdsForTracks(libraryTracks: Track[]) {
+    return new Set(libraryTracks.map(albumIdForTrack));
+  }
+
+  function albumsForTracks(libraryTracks: Track[], albums: Album[]) {
+    const albumIds = albumIdsForTracks(libraryTracks);
+
+    return albums.filter((album) => albumIds.has(album.id));
   }
 
   function availableTrackFormats(libraryTracks: Track[]) {
@@ -740,6 +806,30 @@
     });
   }
 
+  function sortGenres(genres: Genre[], sortKey: GenreSortKey, direction: SortDirection) {
+    return [...genres].sort((left, right) => {
+      let result = 0;
+
+      if (sortKey === "songCount") {
+        result = left.songCount - right.songCount || compareText(left.name, right.name);
+        return applySortDirection(result, direction);
+      }
+
+      if (sortKey === "artistCount") {
+        result = left.artistCount - right.artistCount || compareText(left.name, right.name);
+        return applySortDirection(result, direction);
+      }
+
+      if (sortKey === "albumCount") {
+        result = left.albumCount - right.albumCount || compareText(left.name, right.name);
+        return applySortDirection(result, direction);
+      }
+
+      result = compareText(left.name, right.name);
+      return applySortDirection(result, direction);
+    });
+  }
+
   function normalizeSearch(value: string) {
     return value.trim().normalize("NFKC").toLocaleLowerCase();
   }
@@ -759,6 +849,7 @@
       track.album,
       track.albumArtist,
       track.fileName,
+      ...trackGenres(track),
     ]);
   }
 
@@ -768,6 +859,10 @@
 
   function artistMatchesSearch(artist: Artist, query: string) {
     return matchesSearch(query, [artist.name]);
+  }
+
+  function genreMatchesSearch(genre: Genre, query: string) {
+    return matchesSearch(query, [genre.name]);
   }
 
   function viewTitle() {
@@ -792,7 +887,7 @@
 
   function viewStatus() {
     if (normalizedSearchQuery) {
-      const total = searchTracks.length + searchAlbums.length + searchArtists.length;
+      const total = searchTracks.length + searchAlbums.length + searchArtists.length + searchGenres.length;
       return `${total} ${total === 1 ? "match" : "matches"} for "${searchQuery.trim()}"`;
     }
 
@@ -854,8 +949,8 @@
         <input
           type="search"
           bind:value={searchQuery}
-          placeholder="Search songs, albums, artists..."
-          aria-label="Search songs, albums, artists"
+          placeholder="Search songs, albums, artists, genres..."
+          aria-label="Search songs, albums, artists, genres"
           onkeydown={handleSearchKeydown}
         />
         {#if searchQuery}
@@ -941,10 +1036,33 @@
               </div>
             {/if}
           </LibrarySection>
+
+          <LibrarySection title="Genres" viewAllLabel={`${searchGenres.length} ${searchGenres.length === 1 ? "match" : "matches"}`}>
+            {#if searchGenres.length === 0}
+              <div class="group-empty">
+                <h3>No genres matched</h3>
+                <p>Try a different genre name.</p>
+              </div>
+            {:else}
+              <div class="genre-grid">
+                {#each searchGenres as genre}
+                  <button class="genre-card" type="button" onclick={() => handleGenreSelect(genre)}>
+                    <div class="genre-mark" style={`--item-color: ${genre.color}`} aria-hidden="true">
+                      {genre.name.slice(0, 1)}
+                    </div>
+                    <div>
+                      <h3>{genre.name}</h3>
+                      <p>{genreDetail(genre)}</p>
+                    </div>
+                  </button>
+                {/each}
+              </div>
+            {/if}
+          </LibrarySection>
         {:else}
           <div class="group-empty">
             <h3>No matches found</h3>
-            <p>Search looks at song titles, artists, albums, album artists, and file names.</p>
+            <p>Search looks at song titles, artists, albums, album artists, genres, and file names.</p>
           </div>
         {/if}
       {:else if activeView === "Home"}
@@ -1183,6 +1301,137 @@
                     <div>
                       <h3>{artist.name}</h3>
                       <p>{artistSongCount(artist)}</p>
+                    </div>
+                  </button>
+                {/each}
+              </div>
+            {/if}
+          </LibrarySection>
+        {/if}
+      {:else if activeView === "Genres"}
+        {#if selectedGenre}
+          <section class="detail-view" aria-labelledby="genre-detail-title">
+            <div class="detail-actions">
+              <button class="back-button" type="button" onclick={handleBackToGenres}>Back to Genres</button>
+              <button
+                class="back-button accent"
+                type="button"
+                disabled={selectedGenreTracks.length === 0}
+                onclick={handleShuffleGenre}
+              >
+                Shuffle Genre
+              </button>
+            </div>
+            <div class="genre-detail-header">
+              <div class="genre-mark detail-avatar" style={`--item-color: ${selectedGenre.color}`} aria-hidden="true">
+                {selectedGenre.name.slice(0, 1)}
+              </div>
+              <div class="detail-copy">
+                <p class="eyebrow">Genre</p>
+                <h3 id="genre-detail-title">{selectedGenre.name}</h3>
+                <p>{genreDetail(selectedGenre)}</p>
+              </div>
+            </div>
+
+            <LibrarySection title="Albums" viewAllLabel={`${selectedGenreAlbums.length} total`}>
+              {#if selectedGenreAlbums.length === 0}
+                <div class="group-empty">
+                  <h3>No albums found</h3>
+                  <p>No album tags were found for this genre.</p>
+                </div>
+              {:else}
+                <div class="album-grid">
+                  {#each selectedGenreAlbums as album}
+                    <button class="album-card" type="button" onclick={() => handleAlbumSelect(album)}>
+                      <div class="album-art" style={`--item-color: ${album.color}`} aria-hidden="true">
+                        {#if album.coverArtPath}
+                          <img
+                            src={localImageSource(album.coverArtPath) ?? ""}
+                            alt=""
+                            loading="lazy"
+                            onload={showLoadedImage}
+                            onerror={hideBrokenImage}
+                          />
+                        {/if}
+                        <span></span>
+                      </div>
+                      <h3>{album.title}</h3>
+                      <p>{albumDetail(album)}</p>
+                    </button>
+                  {/each}
+                </div>
+              {/if}
+            </LibrarySection>
+
+            <LibrarySection title="Artists" viewAllLabel={`${selectedGenreArtists.length} total`}>
+              {#if selectedGenreArtists.length === 0}
+                <div class="group-empty">
+                  <h3>No artists found</h3>
+                  <p>No artist tags were found for this genre.</p>
+                </div>
+              {:else}
+                <div class="artist-grid">
+                  {#each selectedGenreArtists as artist}
+                    <button class="artist-card" type="button" onclick={() => handleArtistSelect(artist)}>
+                      <div class="artist-avatar" style={`--item-color: ${artist.color}`} aria-hidden="true">
+                        {artist.name.slice(0, 1)}
+                      </div>
+                      <div>
+                        <h3>{artist.name}</h3>
+                        <p>{artistSongCount(artist)}</p>
+                      </div>
+                    </button>
+                  {/each}
+                </div>
+              {/if}
+            </LibrarySection>
+
+            <LibrarySection title="Songs" viewAllLabel={`${selectedGenreTracks.length} total`}>
+              <TrackList
+                tracks={selectedGenreTracks}
+                isScanning={false}
+                selectedTrackId={currentTrack?.id}
+                onTrackSelect={handleTrackSelect}
+                onToggleFavorite={handleToggleFavorite}
+              />
+            </LibrarySection>
+          </section>
+        {:else}
+          <LibrarySection title="All Genres" viewAllLabel={`${sortedGenres.length} total`}>
+            <div class="control-bar">
+              <label>
+                <span>Sort</span>
+                <select bind:value={genreSort}>
+                  <option value="name">Genre name</option>
+                  <option value="songCount">Song count</option>
+                  <option value="artistCount">Artist count</option>
+                  <option value="albumCount">Album count</option>
+                </select>
+              </label>
+              <button
+                class="direction-toggle"
+                type="button"
+                aria-label={`Genre sort direction: ${sortDirectionLabel(genreSortDirection)}`}
+                onclick={() => genreSortDirection = nextSortDirection(genreSortDirection)}
+              >
+                {sortDirectionLabel(genreSortDirection)}
+              </button>
+            </div>
+            {#if sortedGenres.length === 0}
+              <div class="group-empty">
+                <h3>No genres found</h3>
+                <p>Scan a music folder to build your local genre library.</p>
+              </div>
+            {:else}
+              <div class="genre-grid">
+                {#each sortedGenres as genre}
+                  <button class="genre-card" type="button" onclick={() => handleGenreSelect(genre)}>
+                    <div class="genre-mark" style={`--item-color: ${genre.color}`} aria-hidden="true">
+                      {genre.name.slice(0, 1)}
+                    </div>
+                    <div>
+                      <h3>{genre.name}</h3>
+                      <p>{genreDetail(genre)}</p>
                     </div>
                   </button>
                 {/each}
@@ -1608,7 +1857,8 @@
   }
 
   .album-card p,
-  .artist-card p {
+  .artist-card p,
+  .genre-card p {
     margin: 0;
     color: #8f9aa8;
     font-size: 0.9rem;
@@ -1616,14 +1866,17 @@
   }
 
   .album-card,
-  .artist-card > div:last-child {
+  .artist-card > div:last-child,
+  .genre-card > div:last-child {
     min-width: 0;
   }
 
   .album-card h3,
   .album-card p,
   .artist-card h3,
-  .artist-card p {
+  .artist-card p,
+  .genre-card h3,
+  .genre-card p {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -1638,6 +1891,7 @@
 
   .album-grid,
   .artist-grid,
+  .genre-grid,
   .playlist-grid {
     display: grid;
     grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -1645,7 +1899,8 @@
   }
 
   .album-card,
-  .artist-card {
+  .artist-card,
+  .genre-card {
     width: 100%;
     border: 1px solid #242b35;
     border-radius: 8px;
@@ -1659,7 +1914,9 @@
   .album-card:hover,
   .album-card:focus-visible,
   .artist-card:hover,
-  .artist-card:focus-visible {
+  .artist-card:focus-visible,
+  .genre-card:hover,
+  .genre-card:focus-visible {
     border-color: #35544f;
     background: #1b2027;
     outline: none;
@@ -1705,7 +1962,8 @@
     margin-top: 5px;
   }
 
-  .artist-card {
+  .artist-card,
+  .genre-card {
     display: flex;
     align-items: center;
     gap: 12px;
@@ -1726,7 +1984,21 @@
     font-weight: 900;
   }
 
-  .artist-card p {
+  .genre-mark {
+    display: grid;
+    width: 52px;
+    height: 52px;
+    flex: 0 0 auto;
+    place-items: center;
+    border-radius: 8px;
+    background: var(--item-color);
+    color: #0d0f13;
+    font-size: 1.15rem;
+    font-weight: 900;
+  }
+
+  .artist-card p,
+  .genre-card p {
     margin-top: 4px;
   }
 
@@ -1801,8 +2073,27 @@
     outline: none;
   }
 
+  .back-button.accent {
+    border-color: #35544f;
+    background: #17332f;
+    color: #d8fffa;
+  }
+
+  .back-button:disabled {
+    border-color: #303844;
+    background: #151a21;
+    color: #626c79;
+  }
+
+  .detail-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+
   .album-detail-header,
   .artist-detail-header,
+  .genre-detail-header,
   .playlist-detail-header {
     display: flex;
     align-items: center;
@@ -2035,6 +2326,7 @@
   @media (max-width: 1020px) {
     .album-grid,
     .artist-grid,
+    .genre-grid,
     .playlist-grid {
       grid-template-columns: repeat(2, minmax(0, 1fr));
     }
@@ -2069,6 +2361,7 @@
 
     .album-detail-header,
     .artist-detail-header,
+    .genre-detail-header,
     .playlist-detail-header {
       align-items: flex-start;
       flex-direction: column;
@@ -2087,6 +2380,7 @@
   @media (max-width: 520px) {
     .album-grid,
     .artist-grid,
+    .genre-grid,
     .playlist-grid,
     .settings-grid {
       grid-template-columns: 1fr;
