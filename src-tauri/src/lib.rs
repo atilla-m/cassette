@@ -3,11 +3,14 @@ use gstreamer as gst;
 use lofty::file::{AudioFile, TaggedFileExt};
 use lofty::probe::Probe;
 use lofty::tag::{Accessor, ItemKey, Tag};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use tauri::State;
+use std::time::{SystemTime, UNIX_EPOCH};
+use tauri::{Manager, State};
 
 const SUPPORTED_EXTENSIONS: &[&str] = &["flac", "mp3", "ogg", "opus", "wav", "m4a"];
 
@@ -26,6 +29,9 @@ struct Track {
     disc_number: Option<u32>,
     year: Option<u16>,
     duration_seconds: Option<u32>,
+    modified_time: Option<i64>,
+    file_size: Option<i64>,
+    scanned_at: Option<i64>,
 }
 
 #[derive(Debug, Default)]
@@ -57,8 +63,32 @@ struct PlaybackState {
     is_playing: bool,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LibraryCache {
+    tracks: Vec<Track>,
+    last_scanned_folder: Option<String>,
+    last_scanned_at: Option<i64>,
+}
+
+struct LibraryDatabase {
+    connection: Connection,
+}
+
 #[tauri::command]
-fn scan_library(root: String) -> Result<Vec<Track>, String> {
+fn get_library_cache(library: State<'_, Mutex<LibraryDatabase>>) -> Result<LibraryCache, String> {
+    let library = library
+        .lock()
+        .map_err(|_| "Library cache is unavailable.".to_owned())?;
+
+    library.load_cache()
+}
+
+#[tauri::command]
+fn scan_library(
+    root: String,
+    library: State<'_, Mutex<LibraryDatabase>>,
+) -> Result<Vec<Track>, String> {
     let root_path = PathBuf::from(root);
 
     if !root_path.exists() {
@@ -70,10 +100,193 @@ fn scan_library(root: String) -> Result<Vec<Track>, String> {
     }
 
     let mut tracks = Vec::new();
-    scan_directory(&root_path, &mut tracks)?;
+    let scanned_at = unix_timestamp();
+    scan_directory(&root_path, scanned_at, &mut tracks)?;
     tracks.sort_by(|left, right| left.file_path.cmp(&right.file_path));
 
+    let mut library = library
+        .lock()
+        .map_err(|_| "Library cache is unavailable.".to_owned())?;
+    library.replace_library(&root_path, &tracks, scanned_at)?;
+
     Ok(tracks)
+}
+
+impl LibraryDatabase {
+    fn open(path: PathBuf) -> Result<Self, String> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|error| format!("Could not create app data directory: {error}"))?;
+        }
+
+        let connection = Connection::open(path)
+            .map_err(|error| format!("Could not open library cache: {error}"))?;
+        let database = Self { connection };
+        database
+            .migrate()
+            .map_err(|error| format!("Could not initialize library cache: {error}"))?;
+
+        Ok(database)
+    }
+
+    fn migrate(&self) -> rusqlite::Result<()> {
+        self.connection.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS tracks (
+                id TEXT PRIMARY KEY NOT NULL,
+                title TEXT NOT NULL,
+                artist TEXT,
+                album TEXT,
+                album_artist TEXT,
+                track_number INTEGER,
+                disc_number INTEGER,
+                year INTEGER,
+                duration_seconds INTEGER,
+                file_path TEXT NOT NULL,
+                file_name TEXT NOT NULL,
+                extension TEXT NOT NULL,
+                modified_time INTEGER,
+                file_size INTEGER,
+                scanned_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS library_meta (
+                key TEXT PRIMARY KEY NOT NULL,
+                value TEXT NOT NULL
+            );
+            ",
+        )
+    }
+
+    fn load_cache(&self) -> Result<LibraryCache, String> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "
+                SELECT
+                    id,
+                    title,
+                    artist,
+                    album,
+                    album_artist,
+                    track_number,
+                    disc_number,
+                    year,
+                    duration_seconds,
+                    file_path,
+                    file_name,
+                    extension,
+                    modified_time,
+                    file_size,
+                    scanned_at
+                FROM tracks
+                ORDER BY file_path
+                ",
+            )
+            .map_err(|error| format!("Could not read library cache: {error}"))?;
+
+        let tracks = statement
+            .query_map([], row_to_track)
+            .map_err(|error| format!("Could not read library cache: {error}"))?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|error| format!("Could not read cached tracks: {error}"))?;
+
+        Ok(LibraryCache {
+            tracks,
+            last_scanned_folder: self.meta_value("last_scanned_folder")?,
+            last_scanned_at: self
+                .meta_value("last_scanned_at")?
+                .and_then(|value| value.parse::<i64>().ok()),
+        })
+    }
+
+    fn replace_library(
+        &mut self,
+        root_path: &Path,
+        tracks: &[Track],
+        scanned_at: i64,
+    ) -> Result<(), String> {
+        let transaction = self
+            .connection
+            .transaction()
+            .map_err(|error| format!("Could not update library cache: {error}"))?;
+
+        transaction
+            .execute("DELETE FROM tracks", [])
+            .map_err(|error| format!("Could not clear library cache: {error}"))?;
+
+        {
+            let mut statement = transaction
+                .prepare(
+                    "
+                    INSERT INTO tracks (
+                        id,
+                        title,
+                        artist,
+                        album,
+                        album_artist,
+                        track_number,
+                        disc_number,
+                        year,
+                        duration_seconds,
+                        file_path,
+                        file_name,
+                        extension,
+                        modified_time,
+                        file_size,
+                        scanned_at
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+                    ",
+                )
+                .map_err(|error| format!("Could not prepare library cache update: {error}"))?;
+
+            for track in tracks {
+                statement
+                    .execute(params![
+                        &track.id,
+                        &track.title,
+                        &track.artist,
+                        &track.album,
+                        &track.album_artist,
+                        track.track_number,
+                        track.disc_number,
+                        track.year,
+                        track.duration_seconds,
+                        &track.file_path,
+                        &track.file_name,
+                        &track.extension,
+                        track.modified_time,
+                        track.file_size,
+                        track.scanned_at,
+                    ])
+                    .map_err(|error| format!("Could not cache scanned track: {error}"))?;
+            }
+        }
+
+        upsert_meta(
+            &transaction,
+            "last_scanned_folder",
+            &root_path.to_string_lossy(),
+        )
+        .map_err(|error| format!("Could not cache scanned folder: {error}"))?;
+        upsert_meta(&transaction, "last_scanned_at", &scanned_at.to_string())
+            .map_err(|error| format!("Could not cache scan time: {error}"))?;
+
+        transaction
+            .commit()
+            .map_err(|error| format!("Could not save library cache: {error}"))
+    }
+
+    fn meta_value(&self, key: &str) -> Result<Option<String>, String> {
+        self.connection
+            .query_row(
+                "SELECT value FROM library_meta WHERE key = ?1",
+                [key],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|error| format!("Could not read library metadata: {error}"))
+    }
 }
 
 #[tauri::command]
@@ -318,7 +531,44 @@ fn check_for_playback_error(playbin: &gst::Element) -> Result<(), String> {
     }
 }
 
-fn scan_directory(directory: &Path, tracks: &mut Vec<Track>) -> Result<(), String> {
+fn row_to_track(row: &rusqlite::Row<'_>) -> rusqlite::Result<Track> {
+    Ok(Track {
+        id: row.get(0)?,
+        title: row.get(1)?,
+        artist: row.get(2)?,
+        album: row.get(3)?,
+        album_artist: row.get(4)?,
+        track_number: row.get(5)?,
+        disc_number: row.get(6)?,
+        year: row.get(7)?,
+        duration_seconds: row.get(8)?,
+        file_path: row.get(9)?,
+        file_name: row.get(10)?,
+        extension: row.get(11)?,
+        modified_time: row.get(12)?,
+        file_size: row.get(13)?,
+        scanned_at: row.get(14)?,
+    })
+}
+
+fn upsert_meta(connection: &Connection, key: &str, value: &str) -> rusqlite::Result<()> {
+    connection.execute(
+        "
+        INSERT INTO library_meta (key, value)
+        VALUES (?1, ?2)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        ",
+        params![key, value],
+    )?;
+
+    Ok(())
+}
+
+fn scan_directory(
+    directory: &Path,
+    scanned_at: i64,
+    tracks: &mut Vec<Track>,
+) -> Result<(), String> {
     let entries = match fs::read_dir(directory) {
         Ok(entries) => entries,
         Err(_) => return Ok(()),
@@ -338,9 +588,9 @@ fn scan_directory(directory: &Path, tracks: &mut Vec<Track>) -> Result<(), Strin
         let path = entry.path();
 
         if file_type.is_dir() {
-            scan_directory(&path, tracks)?;
+            scan_directory(&path, scanned_at, tracks)?;
         } else if file_type.is_file() && is_supported_audio_file(&path) {
-            if let Some(track) = track_from_path(path) {
+            if let Some(track) = track_from_path(path, scanned_at) {
                 tracks.push(track);
             }
         }
@@ -360,8 +610,9 @@ fn is_supported_audio_file(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-fn track_from_path(path: PathBuf) -> Option<Track> {
+fn track_from_path(path: PathBuf, scanned_at: i64) -> Option<Track> {
     let metadata = read_track_metadata(&path);
+    let file_info = file_info(&path);
     let path_string = path.to_string_lossy().into_owned();
     let file_name = path.file_name()?.to_string_lossy().into_owned();
     let extension = path.extension()?.to_string_lossy().to_ascii_lowercase();
@@ -380,7 +631,37 @@ fn track_from_path(path: PathBuf) -> Option<Track> {
         disc_number: metadata.disc_number,
         year: metadata.year,
         duration_seconds: metadata.duration_seconds,
+        modified_time: file_info.modified_time,
+        file_size: file_info.file_size,
+        scanned_at: Some(scanned_at),
     })
+}
+
+#[derive(Debug, Default)]
+struct FileInfo {
+    modified_time: Option<i64>,
+    file_size: Option<i64>,
+}
+
+fn file_info(path: &Path) -> FileInfo {
+    let Ok(metadata) = fs::metadata(path) else {
+        return FileInfo::default();
+    };
+
+    FileInfo {
+        modified_time: metadata.modified().ok().and_then(system_time_to_unix),
+        file_size: i64::try_from(metadata.len()).ok(),
+    }
+}
+
+fn unix_timestamp() -> i64 {
+    system_time_to_unix(SystemTime::now()).unwrap_or(0)
+}
+
+fn system_time_to_unix(time: SystemTime) -> Option<i64> {
+    time.duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| i64::try_from(duration.as_secs()).ok())
 }
 
 fn read_track_metadata(path: &Path) -> TrackMetadata {
@@ -441,9 +722,24 @@ fn title_from_path(path: &Path) -> String {
 pub fn run() {
     tauri::Builder::default()
         .manage(Mutex::new(PlaybackState::default()))
+        .setup(|app| {
+            let db_path = app
+                .path()
+                .app_data_dir()
+                .map_err(|error| {
+                    io::Error::other(format!("Could not resolve app data dir: {error}"))
+                })?
+                .join("library.sqlite3");
+            let library = LibraryDatabase::open(db_path).map_err(io::Error::other)?;
+
+            app.manage(Mutex::new(library));
+
+            Ok(())
+        })
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
+            get_library_cache,
             scan_library,
             play_track,
             pause_playback,

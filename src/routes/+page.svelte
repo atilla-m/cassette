@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { chooseLibraryFolder, scanLibrary } from "$lib/api/library";
+  import { chooseLibraryFolder, getLibraryCache, scanLibrary } from "$lib/api/library";
   import {
     getPlaybackStatus,
     pausePlayback,
@@ -23,18 +23,21 @@
   let playbackError = $state<string | null>(null);
   let scannedFolder = $state<string | null>(null);
   let scanCount = $state<number | null>(null);
+  let hasLoadedCache = $state(false);
   let currentTrack = $state<Track | null>(null);
   let currentTrackIndex = $state<number | null>(null);
   let isPlaying = $state(false);
   let positionSeconds = $state(0);
   let durationSeconds = $state<number | null>(null);
   let volume = $state(1);
-  let displayAlbums = $derived(scanCount === null ? mockAlbums : buildAlbums(tracks));
-  let displayArtists = $derived(scanCount === null ? mockArtists : buildArtists(tracks));
+  let displayAlbums = $derived(!hasLoadedCache ? mockAlbums : buildAlbums(tracks));
+  let displayArtists = $derived(!hasLoadedCache ? mockArtists : buildArtists(tracks));
   let canPlayPrevious = $derived(currentTrackIndex !== null && currentTrackIndex > 0);
   let canPlayNext = $derived(currentTrackIndex !== null && currentTrackIndex < tracks.length - 1);
 
   onMount(() => {
+    void loadLibraryCache();
+
     const statusIntervalId = window.setInterval(async () => {
       if (!currentTrack || !isPlaying) {
         return;
@@ -83,6 +86,20 @@
     };
   });
 
+  async function loadLibraryCache() {
+    try {
+      const cache = await getLibraryCache();
+      tracks = cache.tracks;
+      scannedFolder = cache.lastScannedFolder;
+      scanCount = cache.tracks.length;
+      hasLoadedCache = true;
+    } catch (error) {
+      scanError = error instanceof Error ? error.message : String(error);
+      hasLoadedCache = true;
+      scanCount = 0;
+    }
+  }
+
   async function handleScanLibrary() {
     scanError = null;
 
@@ -98,6 +115,7 @@
       scanCount = null;
       tracks = [];
       currentTrackIndex = null;
+      hasLoadedCache = true;
 
       const scannedTracks = await scanLibrary(folder);
       tracks = scannedTracks;
@@ -227,11 +245,15 @@
           <p class="eyebrow">Home</p>
           <h2>Your music, on this machine.</h2>
           {#if scanCount !== null && !isScanning}
-            <p class="scan-status">
-              Found {scanCount} {scanCount === 1 ? "track" : "tracks"} in {scannedFolder}
-            </p>
+            {#if scannedFolder}
+              <p class="scan-status">
+                Found {scanCount} {scanCount === 1 ? "track" : "tracks"} in {scannedFolder}
+              </p>
+            {:else}
+              <p class="scan-status">No cached tracks yet. Pick a folder to scan your local music files.</p>
+            {/if}
           {:else}
-            <p class="scan-status">Pick a folder to scan your local music files.</p>
+            <p class="scan-status">{hasLoadedCache ? "Pick a folder to scan your local music files." : "Loading cached library..."}</p>
           {/if}
         </div>
         <button type="button" disabled={isScanning} onclick={handleScanLibrary}>

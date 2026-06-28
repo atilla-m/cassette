@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import type { Track } from "$lib/types/library";
+import type { LibraryCache, Track } from "$lib/types/library";
 
 export async function chooseLibraryFolder(): Promise<string | null> {
   const selected = await open({
@@ -15,4 +15,8 @@ export async function chooseLibraryFolder(): Promise<string | null> {
 
 export async function scanLibrary(root: string): Promise<Track[]> {
   return invoke<Track[]>("scan_library", { root });
+}
+
+export async function getLibraryCache(): Promise<LibraryCache> {
+  return invoke<LibraryCache>("get_library_cache");
 }

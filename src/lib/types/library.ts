@@ -11,6 +11,9 @@ export type Track = {
   discNumber: number | null;
   year: number | null;
   durationSeconds: number | null;
+  modifiedTime: number | null;
+  fileSize: number | null;
+  scannedAt: number | null;
 };
 
 export type Album = {
@@ -39,4 +42,10 @@ export type PlaybackStatus = {
   positionSeconds: number;
   durationSeconds: number | null;
   volume: number;
+};
+
+export type LibraryCache = {
+  tracks: Track[];
+  lastScannedFolder: string | null;
+  lastScannedAt: number | null;
 };

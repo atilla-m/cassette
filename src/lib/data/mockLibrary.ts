@@ -80,4 +80,7 @@ export const nowPlaying: Track = {
   discNumber: 1,
   year: 2026,
   durationSeconds: 252,
+  modifiedTime: null,
+  fileSize: null,
+  scannedAt: null,
 };
