@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { NavItem } from "$lib/data/mockLibrary";
+  import type { NavItem } from "$lib/types/library";
 
   type Props = {
     items: NavItem[];

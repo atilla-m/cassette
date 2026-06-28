@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { Track } from "$lib/data/mockLibrary";
+  import type { Track } from "$lib/types/library";
 
   type Props = {
     track: Track;
@@ -10,10 +10,10 @@
 
 <footer class="player" aria-label="Now playing">
   <div class="track">
-    <div class="cover" style={`--cover-color: ${track.color}`} aria-hidden="true"></div>
+    <div class="cover" aria-hidden="true"></div>
     <div class="track-copy">
       <p>{track.title}</p>
-      <span>{track.artist}</span>
+      <span>{track.artist ?? "Unknown Artist"}</span>
     </div>
   </div>
 
@@ -28,7 +28,7 @@
     <div class="progress" aria-label="Playback progress">
       <div></div>
     </div>
-    <span>{track.duration}</span>
+    <span>4:12</span>
   </div>
 
   <div class="volume" aria-label="Volume">
@@ -64,8 +64,8 @@
     flex: 0 0 auto;
     border-radius: 8px;
     background:
-      linear-gradient(135deg, color-mix(in srgb, var(--cover-color), white 18%), transparent 58%),
-      var(--cover-color);
+      linear-gradient(135deg, rgba(255, 255, 255, 0.18), transparent 58%),
+      #2f8f83;
     box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.12);
   }
 

@@ -1,8 +1,43 @@
 <script lang="ts">
+  import { chooseLibraryFolder, scanLibrary } from "$lib/api/library";
   import LibrarySection from "$lib/components/LibrarySection.svelte";
   import NowPlayingBar from "$lib/components/NowPlayingBar.svelte";
   import Sidebar from "$lib/components/Sidebar.svelte";
-  import { albums, artists, navItems, nowPlaying, recentlyAdded } from "$lib/data/mockLibrary";
+  import TrackList from "$lib/components/TrackList.svelte";
+  import { albums, artists, navItems, nowPlaying } from "$lib/data/mockLibrary";
+  import type { Track } from "$lib/types/library";
+
+  let tracks = $state<Track[]>([]);
+  let isScanning = $state(false);
+  let scanError = $state<string | null>(null);
+  let scannedFolder = $state<string | null>(null);
+  let scanCount = $state<number | null>(null);
+
+  async function handleScanLibrary() {
+    scanError = null;
+
+    try {
+      const folder = await chooseLibraryFolder();
+
+      if (!folder) {
+        return;
+      }
+
+      isScanning = true;
+      scannedFolder = folder;
+      scanCount = null;
+      tracks = [];
+
+      const scannedTracks = await scanLibrary(folder);
+      tracks = scannedTracks;
+      scanCount = scannedTracks.length;
+    } catch (error) {
+      scanError = error instanceof Error ? error.message : String(error);
+      scanCount = null;
+    } finally {
+      isScanning = false;
+    }
+  }
 </script>
 
 <svelte:head>
@@ -18,24 +53,24 @@
         <div>
           <p class="eyebrow">Home</p>
           <h2>Your music, on this machine.</h2>
+          {#if scanCount !== null && !isScanning}
+            <p class="scan-status">
+              Found {scanCount} {scanCount === 1 ? "track" : "tracks"} in {scannedFolder}
+            </p>
+          {:else}
+            <p class="scan-status">Pick a folder to scan your local music files.</p>
+          {/if}
         </div>
-        <button type="button">Scan Library</button>
+        <button type="button" disabled={isScanning} onclick={handleScanLibrary}>
+          {isScanning ? "Scanning..." : "Scan Library"}
+        </button>
       </header>
 
       <LibrarySection title="Recently Added">
-        <div class="track-list">
-          {#each recentlyAdded as track}
-            <article class="track-row">
-              <div class="mini-cover" style={`--item-color: ${track.color}`} aria-hidden="true"></div>
-              <div class="track-title">
-                <h3>{track.title}</h3>
-                <p>{track.artist}</p>
-              </div>
-              <p>{track.album}</p>
-              <span>{track.duration}</span>
-            </article>
-          {/each}
-        </div>
+        {#if scanError}
+          <div class="scan-error" role="alert">{scanError}</div>
+        {/if}
+        <TrackList {tracks} {isScanning} />
       </LibrarySection>
 
       <LibrarySection title="Albums">
@@ -160,29 +195,35 @@
     padding: 0 14px;
   }
 
+  .home-header button:disabled {
+    border-color: #303844;
+    background: #1a2028;
+    color: #8d96a3;
+  }
+
+  .scan-status {
+    max-width: 720px;
+    margin: 14px 0 0;
+    overflow-wrap: anywhere;
+    color: #9aa4b1;
+    font-size: 0.95rem;
+    font-weight: 650;
+  }
+
+  .scan-error {
+    border: 1px solid #6e3333;
+    border-radius: 8px;
+    background: #241719;
+    color: #ffcbc8;
+    font-size: 0.9rem;
+    font-weight: 650;
+    padding: 12px 14px;
+  }
+
   .home :global(.library-section + .library-section) {
     margin-top: 30px;
   }
 
-  .track-list {
-    display: grid;
-    gap: 8px;
-  }
-
-  .track-row {
-    display: grid;
-    grid-template-columns: auto minmax(160px, 1.2fr) minmax(140px, 0.9fr) auto;
-    align-items: center;
-    gap: 14px;
-    min-height: 64px;
-    border: 1px solid #242b35;
-    border-radius: 8px;
-    background: rgba(22, 26, 32, 0.86);
-    padding: 10px 14px;
-  }
-
-  .track-row > p,
-  .track-row > span,
   .album-card p,
   .artist-card p {
     margin: 0;
@@ -191,16 +232,11 @@
     font-weight: 620;
   }
 
-  .track-row > p,
-  .track-title,
   .album-card,
   .artist-card > div:last-child {
     min-width: 0;
   }
 
-  .track-row > p,
-  .track-title h3,
-  .track-title p,
   .album-card h3,
   .album-card p,
   .artist-card h3,
@@ -210,26 +246,11 @@
     white-space: nowrap;
   }
 
-  .mini-cover {
-    width: 42px;
-    height: 42px;
-    border-radius: 7px;
-    background: var(--item-color);
-    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.16);
-  }
-
   h3 {
     margin: 0;
     color: #f4f7fb;
     font-size: 0.98rem;
     line-height: 1.25;
-  }
-
-  .track-title p {
-    margin: 3px 0 0;
-    color: #929daa;
-    font-size: 0.86rem;
-    font-weight: 650;
   }
 
   .album-grid,
@@ -332,14 +353,6 @@
 
     .home-header button {
       align-self: flex-start;
-    }
-
-    .track-row {
-      grid-template-columns: auto minmax(0, 1fr) auto;
-    }
-
-    .track-row > p {
-      display: none;
     }
   }
 

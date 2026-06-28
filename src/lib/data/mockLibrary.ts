@@ -1,28 +1,4 @@
-export type NavItem = {
-  label: string;
-  icon: string;
-};
-
-export type Album = {
-  title: string;
-  artist: string;
-  year: number;
-  color: string;
-};
-
-export type Artist = {
-  name: string;
-  detail: string;
-  color: string;
-};
-
-export type Track = {
-  title: string;
-  artist: string;
-  album: string;
-  duration: string;
-  color: string;
-};
+import type { Album, Artist, NavItem, Track } from "$lib/types/library";
 
 export const navItems: NavItem[] = [
   { label: "Home", icon: "H" },
@@ -31,37 +7,6 @@ export const navItems: NavItem[] = [
   { label: "Songs", icon: "S" },
   { label: "Playlists", icon: "P" },
   { label: "Settings", icon: "T" },
-];
-
-export const recentlyAdded: Track[] = [
-  {
-    title: "Low Light Runner",
-    artist: "Mara Vale",
-    album: "Afterimage",
-    duration: "4:12",
-    color: "#2f8f83",
-  },
-  {
-    title: "Ceramic Sky",
-    artist: "North Arcade",
-    album: "Signal Bloom",
-    duration: "3:38",
-    color: "#b95f3d",
-  },
-  {
-    title: "Tape Return",
-    artist: "Echo Lanes",
-    album: "Soft Mechanics",
-    duration: "5:04",
-    color: "#8b6bd6",
-  },
-  {
-    title: "Night Bus Static",
-    artist: "June Circuit",
-    album: "Late Service",
-    duration: "2:57",
-    color: "#c59b40",
-  },
 ];
 
 export const albums: Album[] = [
@@ -115,9 +60,12 @@ export const artists: Artist[] = [
 ];
 
 export const nowPlaying: Track = {
+  id: "mock-now-playing",
+  path: "",
+  fileName: "low-light-runner.flac",
+  extension: "flac",
   title: "Low Light Runner",
   artist: "Mara Vale",
   album: "Afterimage",
-  duration: "4:12",
-  color: "#2f8f83",
+  durationSeconds: 252,
 };
