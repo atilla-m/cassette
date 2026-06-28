@@ -1,20 +1,87 @@
 <script lang="ts">
   import { chooseLibraryFolder, scanLibrary } from "$lib/api/library";
+  import {
+    getPlaybackStatus,
+    pausePlayback,
+    playTrack,
+    resumePlayback,
+    seekPlayback,
+    setPlaybackVolume,
+  } from "$lib/api/playback";
   import LibrarySection from "$lib/components/LibrarySection.svelte";
   import NowPlayingBar from "$lib/components/NowPlayingBar.svelte";
   import Sidebar from "$lib/components/Sidebar.svelte";
   import TrackList from "$lib/components/TrackList.svelte";
   import { buildAlbums, buildArtists } from "$lib/data/libraryViews";
-  import { albums as mockAlbums, artists as mockArtists, navItems, nowPlaying } from "$lib/data/mockLibrary";
-  import type { Album, Track } from "$lib/types/library";
+  import { albums as mockAlbums, artists as mockArtists, navItems } from "$lib/data/mockLibrary";
+  import type { Album, PlaybackStatus, Track } from "$lib/types/library";
+  import { onMount } from "svelte";
 
   let tracks = $state<Track[]>([]);
   let isScanning = $state(false);
   let scanError = $state<string | null>(null);
+  let playbackError = $state<string | null>(null);
   let scannedFolder = $state<string | null>(null);
   let scanCount = $state<number | null>(null);
+  let currentTrack = $state<Track | null>(null);
+  let currentTrackIndex = $state<number | null>(null);
+  let isPlaying = $state(false);
+  let positionSeconds = $state(0);
+  let durationSeconds = $state<number | null>(null);
+  let volume = $state(1);
   let displayAlbums = $derived(scanCount === null ? mockAlbums : buildAlbums(tracks));
   let displayArtists = $derived(scanCount === null ? mockArtists : buildArtists(tracks));
+  let canPlayPrevious = $derived(currentTrackIndex !== null && currentTrackIndex > 0);
+  let canPlayNext = $derived(currentTrackIndex !== null && currentTrackIndex < tracks.length - 1);
+
+  onMount(() => {
+    const statusIntervalId = window.setInterval(async () => {
+      if (!currentTrack || !isPlaying) {
+        return;
+      }
+
+      try {
+        applyPlaybackStatus(await getPlaybackStatus());
+      } catch (error) {
+        playbackError = error instanceof Error ? error.message : String(error);
+      }
+    }, 1000);
+
+    const progressIntervalId = window.setInterval(() => {
+      if (!currentTrack || !isPlaying) {
+        return;
+      }
+
+      const duration = durationSeconds ?? currentTrack.durationSeconds;
+      const nextPosition = positionSeconds + 0.25;
+      positionSeconds = duration ? Math.min(nextPosition, duration) : nextPosition;
+    }, 250);
+
+    function handleKeydown(event: KeyboardEvent) {
+      if (shouldIgnoreShortcut(event.target)) {
+        return;
+      }
+
+      if (event.code === "Space") {
+        event.preventDefault();
+        void handleTogglePlayback();
+      } else if (event.key === "ArrowRight") {
+        event.preventDefault();
+        void handleNextTrack();
+      } else if (event.key === "ArrowLeft") {
+        event.preventDefault();
+        void handlePreviousTrack();
+      }
+    }
+
+    window.addEventListener("keydown", handleKeydown);
+
+    return () => {
+      window.clearInterval(statusIntervalId);
+      window.clearInterval(progressIntervalId);
+      window.removeEventListener("keydown", handleKeydown);
+    };
+  });
 
   async function handleScanLibrary() {
     scanError = null;
@@ -30,6 +97,7 @@
       scannedFolder = folder;
       scanCount = null;
       tracks = [];
+      currentTrackIndex = null;
 
       const scannedTracks = await scanLibrary(folder);
       tracks = scannedTracks;
@@ -40,6 +108,101 @@
     } finally {
       isScanning = false;
     }
+  }
+
+  async function handleTrackSelect(track: Track) {
+    const trackIndex = tracks.findIndex((candidate) => candidate.id === track.id);
+    await playTrackAtIndex(trackIndex);
+  }
+
+  async function playTrackAtIndex(trackIndex: number) {
+    if (trackIndex < 0 || trackIndex >= tracks.length) {
+      return;
+    }
+
+    const track = tracks[trackIndex];
+    playbackError = null;
+
+    try {
+      const status = await playTrack(track.filePath);
+      currentTrack = track;
+      currentTrackIndex = trackIndex;
+      applyPlaybackStatus(status);
+      durationSeconds = status.durationSeconds ?? track.durationSeconds;
+    } catch (error) {
+      playbackError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  async function handlePreviousTrack() {
+    if (!canPlayPrevious || currentTrackIndex === null) {
+      return;
+    }
+
+    await playTrackAtIndex(currentTrackIndex - 1);
+  }
+
+  async function handleNextTrack() {
+    if (!canPlayNext || currentTrackIndex === null) {
+      return;
+    }
+
+    await playTrackAtIndex(currentTrackIndex + 1);
+  }
+
+  async function handleTogglePlayback() {
+    if (!currentTrack) {
+      return;
+    }
+
+    playbackError = null;
+
+    try {
+      const status = isPlaying ? await pausePlayback() : await resumePlayback();
+      applyPlaybackStatus(status);
+    } catch (error) {
+      playbackError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  async function handleSeek(nextPositionSeconds: number) {
+    playbackError = null;
+
+    try {
+      applyPlaybackStatus(await seekPlayback(nextPositionSeconds));
+    } catch (error) {
+      playbackError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  async function handleVolumeChange(nextVolume: number) {
+    playbackError = null;
+    volume = nextVolume;
+
+    try {
+      applyPlaybackStatus(await setPlaybackVolume(nextVolume));
+    } catch (error) {
+      playbackError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  function applyPlaybackStatus(status: PlaybackStatus) {
+    isPlaying = status.isPlaying;
+    positionSeconds = status.positionSeconds;
+    durationSeconds = status.durationSeconds ?? currentTrack?.durationSeconds ?? null;
+    volume = status.volume;
+  }
+
+  function shouldIgnoreShortcut(target: EventTarget | null) {
+    if (!(target instanceof HTMLElement)) {
+      return false;
+    }
+
+    if (target.isContentEditable) {
+      return true;
+    }
+
+    return ["INPUT", "TEXTAREA", "SELECT", "BUTTON"].includes(target.tagName);
   }
 
   function albumDetail(album: Album) {
@@ -80,7 +243,15 @@
         {#if scanError}
           <div class="scan-error" role="alert">{scanError}</div>
         {/if}
-        <TrackList {tracks} {isScanning} />
+        {#if playbackError}
+          <div class="scan-error" role="alert">{playbackError}</div>
+        {/if}
+        <TrackList
+          {tracks}
+          {isScanning}
+          selectedTrackId={currentTrack?.id}
+          onTrackSelect={handleTrackSelect}
+        />
       </LibrarySection>
 
       <LibrarySection title="Albums">
@@ -129,7 +300,20 @@
     </main>
   </div>
 
-  <NowPlayingBar track={nowPlaying} />
+  <NowPlayingBar
+    track={currentTrack}
+    {isPlaying}
+    {positionSeconds}
+    {durationSeconds}
+    {volume}
+    {canPlayPrevious}
+    {canPlayNext}
+    onTogglePlayback={handleTogglePlayback}
+    onPrevious={handlePreviousTrack}
+    onNext={handleNextTrack}
+    onSeek={handleSeek}
+    onVolumeChange={handleVolumeChange}
+  />
 </div>
 
 <style>
@@ -138,6 +322,7 @@
   }
 
   :global(html) {
+    height: 100%;
     background: #0d0f13;
     color: #eef3f8;
     font-family:
@@ -152,8 +337,9 @@
 
   :global(body) {
     min-width: 320px;
-    min-height: 100vh;
+    height: 100vh;
     margin: 0;
+    overflow: hidden;
     background: #0d0f13;
   }
 
@@ -164,7 +350,9 @@
   .app-shell {
     display: grid;
     grid-template-rows: minmax(0, 1fr) auto;
-    min-height: 100vh;
+    width: 100vw;
+    height: 100vh;
+    overflow: hidden;
     background:
       radial-gradient(circle at top right, rgba(47, 143, 131, 0.16), transparent 30rem),
       #0d0f13;
@@ -173,6 +361,7 @@
   .workspace {
     display: flex;
     min-height: 0;
+    overflow: hidden;
   }
 
   .home {
@@ -376,7 +565,7 @@
 
   @media (max-width: 760px) {
     .app-shell {
-      min-height: 100dvh;
+      height: 100dvh;
     }
 
     .workspace {

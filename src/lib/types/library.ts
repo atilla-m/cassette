@@ -32,3 +32,11 @@ export type NavItem = {
   label: string;
   icon: string;
 };
+
+export type PlaybackStatus = {
+  filePath: string | null;
+  isPlaying: boolean;
+  positionSeconds: number;
+  durationSeconds: number | null;
+  volume: number;
+};

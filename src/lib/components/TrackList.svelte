@@ -4,9 +4,11 @@
   type Props = {
     tracks: Track[];
     isScanning: boolean;
+    selectedTrackId?: string | null;
+    onTrackSelect?: (track: Track) => void;
   };
 
-  let { tracks, isScanning }: Props = $props();
+  let { tracks, isScanning, selectedTrackId = null, onTrackSelect }: Props = $props();
 
   function displayArtist(track: Track) {
     return track.artist ?? "Unknown Artist";
@@ -14,6 +16,10 @@
 
   function displayAlbum(track: Track) {
     return track.album ?? track.fileName;
+  }
+
+  function selectTrack(track: Track) {
+    onTrackSelect?.(track);
   }
 </script>
 
@@ -30,15 +36,21 @@
 {:else}
   <div class="track-list">
     {#each tracks as track}
-      <article class="track-row" title={track.filePath}>
+      <button
+        class:active={track.id === selectedTrackId}
+        class="track-row"
+        type="button"
+        title={track.filePath}
+        onclick={() => selectTrack(track)}
+      >
         <div class="mini-cover" aria-hidden="true">{track.extension.toUpperCase()}</div>
         <div class="track-title">
-          <h3>{track.title}</h3>
+          <span class="track-name">{track.title}</span>
           <p>{displayArtist(track)}</p>
         </div>
         <p>{displayAlbum(track)}</p>
         <span>{track.extension.toUpperCase()}</span>
-      </article>
+      </button>
     {/each}
   </div>
 {/if}
@@ -83,7 +95,19 @@
     border: 1px solid #242b35;
     border-radius: 8px;
     background: rgba(22, 26, 32, 0.86);
+    color: inherit;
+    font: inherit;
+    text-align: left;
     padding: 10px 14px;
+    cursor: default;
+    outline: none;
+  }
+
+  .track-row:hover,
+  .track-row.active,
+  .track-row:focus-visible {
+    border-color: #35544f;
+    background: #1b2027;
   }
 
   .track-row > p,
@@ -100,7 +124,7 @@
   }
 
   .track-row > p,
-  .track-title h3,
+  .track-name,
   .track-title p {
     overflow: hidden;
     text-overflow: ellipsis;
@@ -120,10 +144,11 @@
     font-weight: 900;
   }
 
-  h3 {
-    margin: 0;
+  .track-name {
+    display: block;
     color: #f4f7fb;
     font-size: 0.98rem;
+    font-weight: 700;
     line-height: 1.25;
   }
 

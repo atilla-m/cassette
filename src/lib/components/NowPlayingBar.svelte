@@ -2,40 +2,136 @@
   import type { Track } from "$lib/types/library";
 
   type Props = {
-    track: Track;
+    track: Track | null;
+    isPlaying: boolean;
+    positionSeconds: number;
+    durationSeconds: number | null;
+    volume: number;
+    canPlayPrevious?: boolean;
+    canPlayNext?: boolean;
+    onTogglePlayback?: () => void;
+    onPrevious?: () => void;
+    onNext?: () => void;
+    onSeek?: (positionSeconds: number) => void;
+    onVolumeChange?: (volume: number) => void;
   };
 
-  let { track }: Props = $props();
+  let {
+    track,
+    isPlaying,
+    positionSeconds,
+    durationSeconds,
+    volume,
+    canPlayPrevious = false,
+    canPlayNext = false,
+    onTogglePlayback,
+    onPrevious,
+    onNext,
+    onSeek,
+    onVolumeChange,
+  }: Props = $props();
+
+  let localVolume = $state(1);
+  let localPosition = $state(0);
+  let isSeeking = $state(false);
+
+  $effect(() => {
+    localVolume = volume;
+  });
+
+  $effect(() => {
+    if (!isSeeking) {
+      localPosition = positionSeconds;
+    }
+  });
+
+  function displayArtist(track: Track | null) {
+    return track?.artist ?? "Unknown Artist";
+  }
+
+  function displayAlbum(track: Track | null) {
+    return track?.album ? ` · ${track.album}` : "";
+  }
+
+  function formatDuration(seconds: number | null | undefined) {
+    if (!seconds) {
+      return "--:--";
+    }
+
+    const wholeSeconds = Math.floor(seconds);
+    const minutes = Math.floor(wholeSeconds / 60);
+    const remainingSeconds = wholeSeconds % 60;
+
+    return `${minutes}:${remainingSeconds.toString().padStart(2, "0")}`;
+  }
+
+  function handleSeek() {
+    isSeeking = false;
+    onSeek?.(localPosition);
+  }
+
+  function handleSeekInput() {
+    isSeeking = true;
+  }
+
+  function handleVolumeInput() {
+    onVolumeChange?.(localVolume);
+  }
 </script>
 
 <footer class="player" aria-label="Now playing">
   <div class="track">
     <div class="cover" aria-hidden="true"></div>
     <div class="track-copy">
-      <p>{track.title}</p>
-      <span>{track.artist ?? "Unknown Artist"}</span>
+      <p>{track?.title ?? "No track selected"}</p>
+      <span>{displayArtist(track)}{displayAlbum(track)}</span>
     </div>
   </div>
 
   <div class="transport" aria-label="Playback controls">
-    <button type="button" aria-label="Previous track">&lt;&lt;</button>
-    <button class="play" type="button" aria-label="Pause">||</button>
-    <button type="button" aria-label="Next track">&gt;&gt;</button>
+    <button type="button" aria-label="Previous track" disabled={!canPlayPrevious} onclick={onPrevious}>&lt;&lt;</button>
+    <button
+      class="play"
+      type="button"
+      aria-label={isPlaying ? "Pause" : "Play"}
+      disabled={!track}
+      onclick={onTogglePlayback}
+    >
+      {isPlaying ? "||" : ">"}
+    </button>
+    <button type="button" aria-label="Next track" disabled={!canPlayNext} onclick={onNext}>&gt;&gt;</button>
   </div>
 
   <div class="progress-area">
-    <span>1:28</span>
-    <div class="progress" aria-label="Playback progress">
-      <div></div>
-    </div>
-    <span>4:12</span>
+    <span>{formatDuration(localPosition)}</span>
+    <input
+      class="progress"
+      type="range"
+      min="0"
+      max={durationSeconds ?? 0}
+      step="0.1"
+      bind:value={localPosition}
+      disabled={!track || !durationSeconds}
+      aria-label="Playback progress"
+      oninput={handleSeekInput}
+      onchange={handleSeek}
+    />
+    <span>{formatDuration(durationSeconds ?? track?.durationSeconds)}</span>
   </div>
 
   <div class="volume" aria-label="Volume">
     <span>Vol</span>
-    <div class="volume-bar">
-      <div></div>
-    </div>
+    <input
+      class="volume-bar"
+      type="range"
+      min="0"
+      max="1"
+      step="0.01"
+      bind:value={localVolume}
+      disabled={!track}
+      aria-label="Volume"
+      oninput={handleVolumeInput}
+    />
   </div>
 </footer>
 
@@ -117,12 +213,23 @@
     cursor: default;
   }
 
+  button:disabled {
+    color: #626c79;
+    background: #151a21;
+  }
+
   button.play {
     width: 44px;
     height: 44px;
     border-color: #2f8f83;
     background: #2f8f83;
     color: #07110f;
+  }
+
+  button.play:disabled {
+    border-color: #303844;
+    background: #151a21;
+    color: #626c79;
   }
 
   .progress-area,
@@ -135,27 +242,44 @@
 
   .progress,
   .volume-bar {
+    appearance: none;
     height: 7px;
     min-width: 0;
     flex: 1;
     overflow: hidden;
+    border: 0;
     border-radius: 999px;
     background: #2a313c;
+    accent-color: #2f8f83;
   }
 
-  .progress div,
-  .volume-bar div {
-    height: 100%;
-    border-radius: inherit;
+  .progress:disabled,
+  .volume-bar:disabled {
+    opacity: 0.55;
+  }
+
+  .progress::-webkit-slider-thumb,
+  .volume-bar::-webkit-slider-thumb {
+    appearance: none;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: #d8dde4;
+    box-shadow: -220px 0 0 214px #d8dde4;
+  }
+
+  .progress::-moz-range-thumb,
+  .volume-bar::-moz-range-thumb {
+    width: 12px;
+    height: 12px;
+    border: 0;
+    border-radius: 50%;
     background: #d8dde4;
   }
 
-  .progress div {
-    width: 36%;
-  }
-
-  .volume-bar div {
-    width: 68%;
+  .progress::-moz-range-progress,
+  .volume-bar::-moz-range-progress {
+    height: 7px;
     background: #2f8f83;
   }
 
