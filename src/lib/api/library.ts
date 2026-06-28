@@ -20,3 +20,7 @@ export async function scanLibrary(root: string): Promise<Track[]> {
 export async function getLibraryCache(): Promise<LibraryCache> {
   return invoke<LibraryCache>("get_library_cache");
 }
+
+export async function toggleTrackFavorite(id: string): Promise<boolean> {
+  return invoke<boolean>("toggle_track_favorite", { id });
+}

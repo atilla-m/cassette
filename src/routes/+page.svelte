@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { chooseLibraryFolder, getLibraryCache, scanLibrary } from "$lib/api/library";
+  import { chooseLibraryFolder, getLibraryCache, scanLibrary, toggleTrackFavorite } from "$lib/api/library";
   import {
     getPlaybackStatus,
     pausePlayback,
@@ -18,6 +18,11 @@
   import { localImageSource } from "$lib/utils/localImage";
   import { onMount } from "svelte";
 
+  type SongSortKey = "title" | "artist" | "album" | "duration";
+  type AlbumSortKey = "title" | "artist" | "year" | "trackCount";
+  type ArtistSortKey = "name" | "songCount" | "albumCount";
+  type SortDirection = "asc" | "desc";
+
   let tracks = $state<Track[]>([]);
   let isScanning = $state(false);
   let scanError = $state<string | null>(null);
@@ -31,16 +36,30 @@
   let activeView = $state("Home");
   let selectedAlbumId = $state<string | null>(null);
   let selectedArtistName = $state<string | null>(null);
+  let isLikedSongsOpen = $state(false);
   let searchQuery = $state("");
+  let songSort = $state<SongSortKey>("title");
+  let songSortDirection = $state<SortDirection>("asc");
+  let songFormatFilter = $state("All");
+  let albumSort = $state<AlbumSortKey>("title");
+  let albumSortDirection = $state<SortDirection>("asc");
+  let artistSort = $state<ArtistSortKey>("name");
+  let artistSortDirection = $state<SortDirection>("asc");
   let isPlaying = $state(false);
   let positionSeconds = $state(0);
   let durationSeconds = $state<number | null>(null);
   let volume = $state(1);
   let displayAlbums = $derived(!hasLoadedCache ? mockAlbums : buildAlbums(tracks));
   let displayArtists = $derived(!hasLoadedCache ? mockArtists : buildArtists(tracks));
+  let favoriteTracks = $derived(tracks.filter((track) => track.isFavorite));
+  let availableFormats = $derived(availableTrackFormats(tracks));
+  let sortedSongTracks = $derived(sortTracks(tracks, songSort, songSortDirection));
+  let filteredSongTracks = $derived(filterTracksByFormat(sortedSongTracks, songFormatFilter));
+  let sortedAlbums = $derived(sortAlbums(displayAlbums, albumSort, albumSortDirection));
+  let sortedArtists = $derived(sortArtists(displayArtists, artistSort, artistSortDirection));
   let homeTracks = $derived(tracks.slice(0, 8));
-  let homeAlbums = $derived(displayAlbums.slice(0, 4));
-  let homeArtists = $derived(displayArtists.slice(0, 4));
+  let homeAlbums = $derived(sortedAlbums.slice(0, 4));
+  let homeArtists = $derived(sortedArtists.slice(0, 4));
   let normalizedSearchQuery = $derived(normalizeSearch(searchQuery));
   let searchTracks = $derived(
     normalizedSearchQuery ? tracks.filter((track) => trackMatchesSearch(track, normalizedSearchQuery)) : [],
@@ -63,7 +82,7 @@
     selectedArtist ? tracks.filter((track) => artistNameForTrack(track) === selectedArtist.name) : [],
   );
   let selectedArtistAlbums = $derived(
-    selectedArtist ? displayAlbums.filter((album) => album.artist === selectedArtist.name) : [],
+    selectedArtist ? sortedAlbums.filter((album) => album.artist === selectedArtist.name) : [],
   );
   let canPlayPrevious = $derived(currentTrackIndex !== null && currentTrackIndex > 0);
   let canPlayNext = $derived(currentTrackIndex !== null && currentTrackIndex < tracks.length - 1);
@@ -77,6 +96,12 @@
     }
 
     hadSearchQuery = hasSearchQuery;
+  });
+
+  $effect(() => {
+    if (!availableFormats.includes(songFormatFilter)) {
+      songFormatFilter = "All";
+    }
   });
 
   onMount(() => {
@@ -166,6 +191,7 @@
       tracks = [];
       selectedAlbumId = null;
       selectedArtistName = null;
+      isLikedSongsOpen = false;
       searchQuery = "";
       currentTrackIndex = null;
       hasLoadedCache = true;
@@ -190,6 +216,7 @@
     activeView = label;
     selectedAlbumId = null;
     selectedArtistName = null;
+    isLikedSongsOpen = false;
     mainElement?.scrollTo({ top: 0 });
   }
 
@@ -198,6 +225,7 @@
     activeView = "Albums";
     selectedAlbumId = album.id;
     selectedArtistName = null;
+    isLikedSongsOpen = false;
     mainElement?.scrollTo({ top: 0 });
   }
 
@@ -206,6 +234,16 @@
     activeView = "Artists";
     selectedArtistName = artist.name;
     selectedAlbumId = null;
+    isLikedSongsOpen = false;
+    mainElement?.scrollTo({ top: 0 });
+  }
+
+  function handleLikedSongsSelect() {
+    activeView = "Playlists";
+    selectedAlbumId = null;
+    selectedArtistName = null;
+    isLikedSongsOpen = true;
+    searchQuery = "";
     mainElement?.scrollTo({ top: 0 });
   }
 
@@ -216,6 +254,11 @@
 
   function handleBackToArtists() {
     selectedArtistName = null;
+    mainElement?.scrollTo({ top: 0 });
+  }
+
+  function handleBackToPlaylists() {
+    isLikedSongsOpen = false;
     mainElement?.scrollTo({ top: 0 });
   }
 
@@ -249,6 +292,25 @@
       durationSeconds = status.durationSeconds ?? track.durationSeconds;
     } catch (error) {
       playbackError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  async function handleToggleFavorite(track: Track) {
+    playbackError = null;
+
+    try {
+      const isFavorite = await toggleTrackFavorite(track.id);
+      applyTrackFavorite(track.id, isFavorite);
+    } catch (error) {
+      playbackError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  function applyTrackFavorite(trackId: string, isFavorite: boolean) {
+    tracks = tracks.map((track) => (track.id === trackId ? { ...track, isFavorite } : track));
+
+    if (currentTrack?.id === trackId) {
+      currentTrack = { ...currentTrack, isFavorite };
     }
   }
 
@@ -343,6 +405,123 @@
 
   function artistSongCount(artist: Artist) {
     return artist.detail;
+  }
+
+  function artistTrackCount(artist: Artist) {
+    if (tracks.length > 0) {
+      return tracks.filter((track) => artistNameForTrack(track) === artist.name).length;
+    }
+
+    return Number.parseInt(artist.detail, 10) || 0;
+  }
+
+  function artistAlbumCount(artist: Artist) {
+    return displayAlbums.filter((album) => album.artist === artist.name).length;
+  }
+
+  function availableTrackFormats(libraryTracks: Track[]) {
+    const formats = new Set(libraryTracks.map((track) => track.extension.toUpperCase()));
+    const order = ["FLAC", "MP3", "OGG", "OPUS", "WAV", "M4A"];
+
+    return ["All", ...order.filter((format) => formats.has(format))];
+  }
+
+  function filterTracksByFormat(libraryTracks: Track[], format: string) {
+    if (format === "All") {
+      return libraryTracks;
+    }
+
+    return libraryTracks.filter((track) => track.extension.toUpperCase() === format);
+  }
+
+  function compareText(left: string | null | undefined, right: string | null | undefined) {
+    return (left ?? "").localeCompare(right ?? "", undefined, { sensitivity: "base" });
+  }
+
+  function applySortDirection(value: number, direction: SortDirection) {
+    return direction === "asc" ? value : -value;
+  }
+
+  function nextSortDirection(direction: SortDirection) {
+    return direction === "asc" ? "desc" : "asc";
+  }
+
+  function sortDirectionLabel(direction: SortDirection) {
+    return direction === "asc" ? "Asc" : "Desc";
+  }
+
+  function sortTracks(libraryTracks: Track[], sortKey: SongSortKey, direction: SortDirection) {
+    return [...libraryTracks].sort((left, right) => {
+      let result = 0;
+
+      if (sortKey === "artist") {
+        result = compareText(left.artist ?? left.albumArtist, right.artist ?? right.albumArtist)
+          || compareText(left.title, right.title);
+        return applySortDirection(result, direction);
+      }
+
+      if (sortKey === "album") {
+        result = compareText(left.album, right.album)
+          || compareText(left.discNumber?.toString(), right.discNumber?.toString())
+          || (left.trackNumber ?? 0) - (right.trackNumber ?? 0)
+          || compareText(left.title, right.title);
+        return applySortDirection(result, direction);
+      }
+
+      if (sortKey === "duration") {
+        result = (left.durationSeconds ?? Number.MAX_SAFE_INTEGER)
+          - (right.durationSeconds ?? Number.MAX_SAFE_INTEGER)
+          || compareText(left.title, right.title);
+        return applySortDirection(result, direction);
+      }
+
+      result = compareText(left.title, right.title);
+      return applySortDirection(result, direction);
+    });
+  }
+
+  function sortAlbums(albums: Album[], sortKey: AlbumSortKey, direction: SortDirection) {
+    return [...albums].sort((left, right) => {
+      let result = 0;
+
+      if (sortKey === "artist") {
+        result = compareText(left.artist, right.artist) || compareText(left.title, right.title);
+        return applySortDirection(result, direction);
+      }
+
+      if (sortKey === "year") {
+        result = (left.year ?? Number.MAX_SAFE_INTEGER) - (right.year ?? Number.MAX_SAFE_INTEGER)
+          || compareText(left.title, right.title);
+        return applySortDirection(result, direction);
+      }
+
+      if (sortKey === "trackCount") {
+        result = left.trackCount - right.trackCount || compareText(left.title, right.title);
+        return applySortDirection(result, direction);
+      }
+
+      result = compareText(left.title, right.title);
+      return applySortDirection(result, direction);
+    });
+  }
+
+  function sortArtists(artists: Artist[], sortKey: ArtistSortKey, direction: SortDirection) {
+    return [...artists].sort((left, right) => {
+      let result = 0;
+
+      if (sortKey === "songCount") {
+        result = artistTrackCount(left) - artistTrackCount(right) || compareText(left.name, right.name);
+        return applySortDirection(result, direction);
+      }
+
+      if (sortKey === "albumCount") {
+        result = artistAlbumCount(left) - artistAlbumCount(right) || compareText(left.name, right.name);
+        return applySortDirection(result, direction);
+      }
+
+      result = compareText(left.name, right.name);
+      return applySortDirection(result, direction);
+    });
   }
 
   function normalizeSearch(value: string) {
@@ -489,6 +668,7 @@
                 isScanning={false}
                 selectedTrackId={currentTrack?.id}
                 onTrackSelect={handleTrackSelect}
+                onToggleFavorite={handleToggleFavorite}
               />
             {/if}
           </LibrarySection>
@@ -558,6 +738,7 @@
             {isScanning}
             selectedTrackId={currentTrack?.id}
             onTrackSelect={handleTrackSelect}
+            onToggleFavorite={handleToggleFavorite}
           />
         </LibrarySection>
 
@@ -642,19 +823,39 @@
                 isScanning={false}
                 selectedTrackId={currentTrack?.id}
                 onTrackSelect={handleTrackSelect}
+                onToggleFavorite={handleToggleFavorite}
               />
             </LibrarySection>
           </section>
         {:else}
-          <LibrarySection title="All Albums" viewAllLabel={`${displayAlbums.length} total`}>
-            {#if displayAlbums.length === 0}
+          <LibrarySection title="All Albums" viewAllLabel={`${sortedAlbums.length} total`}>
+            <div class="control-bar">
+              <label>
+                <span>Sort</span>
+                <select bind:value={albumSort}>
+                  <option value="title">Album title</option>
+                  <option value="artist">Artist</option>
+                  <option value="year">Year</option>
+                  <option value="trackCount">Song count</option>
+                </select>
+              </label>
+              <button
+                class="direction-toggle"
+                type="button"
+                aria-label={`Album sort direction: ${sortDirectionLabel(albumSortDirection)}`}
+                onclick={() => albumSortDirection = nextSortDirection(albumSortDirection)}
+              >
+                {sortDirectionLabel(albumSortDirection)}
+              </button>
+            </div>
+            {#if sortedAlbums.length === 0}
               <div class="group-empty">
                 <h3>No albums found</h3>
                 <p>Scan a music folder to build your local album library.</p>
               </div>
             {:else}
               <div class="album-grid">
-                {#each displayAlbums as album}
+                {#each sortedAlbums as album}
                   <button class="album-card" type="button" onclick={() => handleAlbumSelect(album)}>
                     <div class="album-art" style={`--item-color: ${album.color}`} aria-hidden="true">
                       {#if album.coverArtPath}
@@ -727,19 +928,38 @@
                 isScanning={false}
                 selectedTrackId={currentTrack?.id}
                 onTrackSelect={handleTrackSelect}
+                onToggleFavorite={handleToggleFavorite}
               />
             </LibrarySection>
           </section>
         {:else}
-          <LibrarySection title="All Artists" viewAllLabel={`${displayArtists.length} total`}>
-            {#if displayArtists.length === 0}
+          <LibrarySection title="All Artists" viewAllLabel={`${sortedArtists.length} total`}>
+            <div class="control-bar">
+              <label>
+                <span>Sort</span>
+                <select bind:value={artistSort}>
+                  <option value="name">Artist name</option>
+                  <option value="songCount">Song count</option>
+                  <option value="albumCount">Album count</option>
+                </select>
+              </label>
+              <button
+                class="direction-toggle"
+                type="button"
+                aria-label={`Artist sort direction: ${sortDirectionLabel(artistSortDirection)}`}
+                onclick={() => artistSortDirection = nextSortDirection(artistSortDirection)}
+              >
+                {sortDirectionLabel(artistSortDirection)}
+              </button>
+            </div>
+            {#if sortedArtists.length === 0}
               <div class="group-empty">
                 <h3>No artists found</h3>
                 <p>Scan a music folder to build your local artist library.</p>
               </div>
             {:else}
               <div class="artist-grid">
-                {#each displayArtists as artist}
+                {#each sortedArtists as artist}
                   <button class="artist-card" type="button" onclick={() => handleArtistSelect(artist)}>
                     <div class="artist-avatar" style={`--item-color: ${artist.color}`} aria-hidden="true">
                       {artist.name.slice(0, 1)}
@@ -755,20 +975,84 @@
           </LibrarySection>
         {/if}
       {:else if activeView === "Songs"}
-        <LibrarySection title="All Songs" viewAllLabel={`${tracks.length} total`}>
+        <LibrarySection title="All Songs" viewAllLabel={`${filteredSongTracks.length} shown`}>
+          <div class="control-bar">
+            <label>
+              <span>Sort</span>
+              <select bind:value={songSort}>
+                <option value="title">Title</option>
+                <option value="artist">Artist</option>
+                <option value="album">Album</option>
+                <option value="duration">Duration</option>
+              </select>
+            </label>
+            <button
+              class="direction-toggle"
+              type="button"
+              aria-label={`Song sort direction: ${sortDirectionLabel(songSortDirection)}`}
+              onclick={() => songSortDirection = nextSortDirection(songSortDirection)}
+            >
+              {sortDirectionLabel(songSortDirection)}
+            </button>
+            <label>
+              <span>Format</span>
+              <select bind:value={songFormatFilter}>
+                {#each availableFormats as format}
+                  <option value={format}>{format}</option>
+                {/each}
+              </select>
+            </label>
+          </div>
           <TrackList
-            {tracks}
+            tracks={filteredSongTracks}
             {isScanning}
             selectedTrackId={currentTrack?.id}
             onTrackSelect={handleTrackSelect}
+            onToggleFavorite={handleToggleFavorite}
           />
         </LibrarySection>
       {:else if activeView === "Playlists"}
-        <section class="placeholder-panel" aria-labelledby="playlists-title">
-          <p class="eyebrow">Coming Later</p>
-          <h3 id="playlists-title">Playlists</h3>
-          <p>Playlist management is not wired up yet. Your scanned library and playback controls are ready here when that feature lands.</p>
-        </section>
+        {#if isLikedSongsOpen}
+          <section class="detail-view" aria-labelledby="liked-songs-title">
+            <button class="back-button" type="button" onclick={handleBackToPlaylists}>Back to Playlists</button>
+            <div class="playlist-detail-header">
+              <div class="liked-mark" aria-hidden="true">★</div>
+              <div class="detail-copy">
+                <p class="eyebrow">Smart Playlist</p>
+                <h3 id="liked-songs-title">Liked Songs</h3>
+                <p>{favoriteTracks.length} {favoriteTracks.length === 1 ? "song" : "songs"}</p>
+              </div>
+            </div>
+
+            <LibrarySection title="Songs" viewAllLabel={`${favoriteTracks.length} total`}>
+              {#if favoriteTracks.length === 0}
+                <div class="group-empty">
+                  <h3>No liked songs yet</h3>
+                  <p>Use the star button on any song row or in the player to add it here.</p>
+                </div>
+              {:else}
+                <TrackList
+                  tracks={favoriteTracks}
+                  isScanning={false}
+                  selectedTrackId={currentTrack?.id}
+                  onTrackSelect={handleTrackSelect}
+                  onToggleFavorite={handleToggleFavorite}
+                />
+              {/if}
+            </LibrarySection>
+          </section>
+        {:else}
+          <section class="playlist-grid" aria-labelledby="playlists-title">
+            <button class="playlist-card" type="button" onclick={handleLikedSongsSelect}>
+              <div class="liked-mark" aria-hidden="true">★</div>
+              <div>
+                <p class="eyebrow">Smart Playlist</p>
+                <h3 id="playlists-title">Liked Songs</h3>
+                <p>{favoriteTracks.length} {favoriteTracks.length === 1 ? "song" : "songs"}</p>
+              </div>
+            </button>
+          </section>
+        {/if}
       {:else if activeView === "Settings"}
         <section class="placeholder-panel" aria-labelledby="settings-title">
           <p class="eyebrow">Library</p>
@@ -802,6 +1086,7 @@
     onNext={handleNextTrack}
     onSeek={handleSeek}
     onVolumeChange={handleVolumeChange}
+    onToggleFavorite={handleToggleFavorite}
   />
 </div>
 
@@ -954,6 +1239,62 @@
     outline: none;
   }
 
+  .control-bar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: center;
+  }
+
+  .control-bar label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 36px;
+    color: #8f9aa8;
+    font-size: 0.82rem;
+    font-weight: 800;
+  }
+
+  .control-bar select {
+    min-height: 36px;
+    border: 1px solid #303844;
+    border-radius: 8px;
+    background: #12161c;
+    color: #f4f7fb;
+    font: inherit;
+    font-size: 0.86rem;
+    font-weight: 750;
+    outline: none;
+    padding: 0 10px;
+  }
+
+  .control-bar select:focus {
+    border-color: #2f8f83;
+    box-shadow: 0 0 0 2px rgba(47, 143, 131, 0.18);
+  }
+
+  .direction-toggle {
+    min-height: 36px;
+    min-width: 58px;
+    border: 1px solid #35544f;
+    border-radius: 8px;
+    background: #17332f;
+    color: #d8fffa;
+    cursor: default;
+    font: inherit;
+    font-size: 0.82rem;
+    font-weight: 900;
+    padding: 0 10px;
+  }
+
+  .direction-toggle:hover,
+  .direction-toggle:focus-visible {
+    border-color: #2f8f83;
+    background: #1b403a;
+    outline: none;
+  }
+
   .scan-status {
     max-width: 720px;
     margin: 14px 0 0;
@@ -1034,7 +1375,8 @@
   }
 
   .album-grid,
-  .artist-grid {
+  .artist-grid,
+  .playlist-grid {
     display: grid;
     grid-template-columns: repeat(4, minmax(0, 1fr));
     gap: 14px;
@@ -1126,6 +1468,51 @@
     margin-top: 4px;
   }
 
+  .playlist-card {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    min-height: 112px;
+    border: 1px solid #242b35;
+    border-radius: 8px;
+    background: #151a21;
+    color: inherit;
+    cursor: default;
+    font: inherit;
+    padding: 18px;
+    text-align: left;
+  }
+
+  .playlist-card:hover,
+  .playlist-card:focus-visible {
+    border-color: #35544f;
+    background: #1b2027;
+    outline: none;
+  }
+
+  .playlist-card h3 {
+    margin-bottom: 5px;
+  }
+
+  .playlist-card p:not(.eyebrow) {
+    margin: 0;
+    color: #8f9aa8;
+    font-weight: 650;
+  }
+
+  .liked-mark {
+    display: grid;
+    width: 58px;
+    height: 58px;
+    flex: 0 0 auto;
+    place-items: center;
+    border-radius: 8px;
+    background: #262214;
+    color: #f0c85a;
+    font-size: 1.45rem;
+    font-weight: 900;
+  }
+
   .detail-view {
     display: grid;
     gap: 22px;
@@ -1153,7 +1540,8 @@
   }
 
   .album-detail-header,
-  .artist-detail-header {
+  .artist-detail-header,
+  .playlist-detail-header {
     display: flex;
     align-items: center;
     gap: 22px;
@@ -1257,7 +1645,8 @@
 
   @media (max-width: 1020px) {
     .album-grid,
-    .artist-grid {
+    .artist-grid,
+    .playlist-grid {
       grid-template-columns: repeat(2, minmax(0, 1fr));
     }
   }
@@ -1290,7 +1679,8 @@
     }
 
     .album-detail-header,
-    .artist-detail-header {
+    .artist-detail-header,
+    .playlist-detail-header {
       align-items: flex-start;
       flex-direction: column;
     }
@@ -1303,6 +1693,7 @@
   @media (max-width: 520px) {
     .album-grid,
     .artist-grid,
+    .playlist-grid,
     .settings-grid {
       grid-template-columns: 1fr;
     }

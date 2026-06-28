@@ -88,4 +88,5 @@ export const nowPlaying: Track = {
   fileSize: null,
   scannedAt: null,
   coverArtPath: null,
+  isFavorite: false,
 };

@@ -15,6 +15,7 @@ export type Track = {
   fileSize: number | null;
   scannedAt: number | null;
   coverArtPath: string | null;
+  isFavorite: boolean;
 };
 
 export type Album = {

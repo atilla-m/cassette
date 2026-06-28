@@ -15,6 +15,7 @@
     onNext?: () => void;
     onSeek?: (positionSeconds: number) => void;
     onVolumeChange?: (volume: number) => void;
+    onToggleFavorite?: (track: Track) => void;
   };
 
   let {
@@ -30,6 +31,7 @@
     onNext,
     onSeek,
     onVolumeChange,
+    onToggleFavorite,
   }: Props = $props();
 
   let localVolume = $state(1);
@@ -80,6 +82,12 @@
     onVolumeChange?.(localVolume);
   }
 
+  function handleFavoriteClick() {
+    if (track) {
+      onToggleFavorite?.(track);
+    }
+  }
+
   function hideBrokenImage(event: Event) {
     if (event.currentTarget instanceof HTMLImageElement) {
       event.currentTarget.hidden = true;
@@ -104,6 +112,16 @@
       <p>{track?.title ?? "No track selected"}</p>
       <span>{displayArtist(track)}{displayAlbum(track)}</span>
     </div>
+    <button
+      class:active={track?.isFavorite}
+      class="favorite"
+      type="button"
+      aria-label={track?.isFavorite ? "Remove from liked songs" : "Add to liked songs"}
+      disabled={!track}
+      onclick={handleFavoriteClick}
+    >
+      {track?.isFavorite ? "★" : "☆"}
+    </button>
   </div>
 
   <div class="transport" aria-label="Playback controls">
@@ -225,6 +243,30 @@
     align-items: center;
     justify-content: center;
     gap: 8px;
+  }
+
+  button.favorite {
+    width: 34px;
+    height: 34px;
+    flex: 0 0 auto;
+    border-color: #303844;
+    background: #171c23;
+    color: #8f9aa8;
+    font-size: 0.95rem;
+  }
+
+  button.favorite:hover,
+  button.favorite:focus-visible,
+  button.favorite.active {
+    border-color: #6d5b2a;
+    background: #262214;
+    color: #f0c85a;
+  }
+
+  button.favorite:disabled {
+    border-color: #303844;
+    background: #151a21;
+    color: #626c79;
   }
 
   button {

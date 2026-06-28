@@ -6,7 +6,7 @@ use lofty::probe::Probe;
 use lofty::tag::{Accessor, ItemKey, Tag};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
@@ -38,6 +38,7 @@ struct Track {
     file_size: Option<i64>,
     scanned_at: Option<i64>,
     cover_art_path: Option<String>,
+    is_favorite: bool,
 }
 
 #[derive(Debug, Default)]
@@ -153,9 +154,21 @@ fn scan_library(
     let mut library = library
         .lock()
         .map_err(|_| "Library cache is unavailable.".to_owned())?;
-    library.replace_library(&root_path, &tracks, scanned_at)?;
+    library.replace_library(&root_path, &mut tracks, scanned_at)?;
 
     Ok(tracks)
+}
+
+#[tauri::command]
+fn toggle_track_favorite(
+    id: String,
+    library: State<'_, Mutex<LibraryDatabase>>,
+) -> Result<bool, String> {
+    let library = library
+        .lock()
+        .map_err(|_| "Library cache is unavailable.".to_owned())?;
+
+    library.toggle_favorite(&id)
 }
 
 impl LibraryDatabase {
@@ -194,7 +207,8 @@ impl LibraryDatabase {
                 modified_time INTEGER,
                 file_size INTEGER,
                 scanned_at INTEGER NOT NULL,
-                cover_art_path TEXT
+                cover_art_path TEXT,
+                is_favorite INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS library_meta (
@@ -207,6 +221,14 @@ impl LibraryDatabase {
         if !self.has_column("tracks", "cover_art_path")? {
             self.connection
                 .execute("ALTER TABLE tracks ADD COLUMN cover_art_path TEXT", [])?;
+        }
+
+        if !self.has_column("tracks", "is_favorite")? {
+            self.connection
+                .execute(
+                    "ALTER TABLE tracks ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0",
+                    [],
+                )?;
         }
 
         Ok(())
@@ -248,7 +270,8 @@ impl LibraryDatabase {
                     modified_time,
                     file_size,
                     scanned_at,
-                    cover_art_path
+                    cover_art_path,
+                    is_favorite
                 FROM tracks
                 ORDER BY file_path
                 ",
@@ -273,13 +296,15 @@ impl LibraryDatabase {
     fn replace_library(
         &mut self,
         root_path: &Path,
-        tracks: &[Track],
+        tracks: &mut [Track],
         scanned_at: i64,
     ) -> Result<(), String> {
         let transaction = self
             .connection
             .transaction()
             .map_err(|error| format!("Could not update library cache: {error}"))?;
+        let favorite_track_ids = favorite_track_ids(&transaction)
+            .map_err(|error| format!("Could not read favorite tracks: {error}"))?;
 
         transaction
             .execute("DELETE FROM tracks", [])
@@ -305,13 +330,15 @@ impl LibraryDatabase {
                         modified_time,
                         file_size,
                         scanned_at,
-                        cover_art_path
-                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+                        cover_art_path,
+                        is_favorite
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
                     ",
                 )
                 .map_err(|error| format!("Could not prepare library cache update: {error}"))?;
 
             for track in tracks {
+                track.is_favorite = track.is_favorite || favorite_track_ids.contains(&track.id);
                 statement
                     .execute(params![
                         &track.id,
@@ -330,6 +357,7 @@ impl LibraryDatabase {
                         track.file_size,
                         track.scanned_at,
                         &track.cover_art_path,
+                        track.is_favorite,
                     ])
                     .map_err(|error| format!("Could not cache scanned track: {error}"))?;
             }
@@ -358,6 +386,27 @@ impl LibraryDatabase {
             )
             .optional()
             .map_err(|error| format!("Could not read library metadata: {error}"))
+    }
+
+    fn toggle_favorite(&self, id: &str) -> Result<bool, String> {
+        let current = self
+            .connection
+            .query_row("SELECT is_favorite FROM tracks WHERE id = ?1", [id], |row| {
+                row.get::<_, bool>(0)
+            })
+            .optional()
+            .map_err(|error| format!("Could not read favorite state: {error}"))?
+            .ok_or_else(|| "Track is not in the library cache.".to_owned())?;
+        let next = !current;
+
+        self.connection
+            .execute(
+                "UPDATE tracks SET is_favorite = ?2 WHERE id = ?1",
+                params![id, next],
+            )
+            .map_err(|error| format!("Could not update favorite state: {error}"))?;
+
+        Ok(next)
     }
 }
 
@@ -621,7 +670,17 @@ fn row_to_track(row: &rusqlite::Row<'_>) -> rusqlite::Result<Track> {
         file_size: row.get(13)?,
         scanned_at: row.get(14)?,
         cover_art_path: row.get(15)?,
+        is_favorite: row.get(16)?,
     })
+}
+
+fn favorite_track_ids(connection: &Connection) -> rusqlite::Result<HashSet<String>> {
+    let mut statement = connection.prepare("SELECT id FROM tracks WHERE is_favorite = 1")?;
+    let ids = statement
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<HashSet<_>>>()?;
+
+    Ok(ids)
 }
 
 fn upsert_meta(connection: &Connection, key: &str, value: &str) -> rusqlite::Result<()> {
@@ -757,6 +816,7 @@ fn track_from_path(path: PathBuf, scanned_at: i64) -> Option<(Track, Option<Embe
         file_size: file_info.file_size,
         scanned_at: Some(scanned_at),
         cover_art_path: None,
+        is_favorite: false,
     };
 
     Some((track, metadata.embedded_cover_art))
@@ -1120,6 +1180,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_library_cache,
             scan_library,
+            toggle_track_favorite,
             play_track,
             pause_playback,
             resume_playback,

@@ -7,9 +7,16 @@
     isScanning: boolean;
     selectedTrackId?: string | null;
     onTrackSelect?: (track: Track) => void;
+    onToggleFavorite?: (track: Track) => void;
   };
 
-  let { tracks, isScanning, selectedTrackId = null, onTrackSelect }: Props = $props();
+  let {
+    tracks,
+    isScanning,
+    selectedTrackId = null,
+    onTrackSelect,
+    onToggleFavorite,
+  }: Props = $props();
 
   function displayArtist(track: Track) {
     return track.artist ?? "Unknown Artist";
@@ -21,6 +28,23 @@
 
   function selectTrack(track: Track) {
     onTrackSelect?.(track);
+  }
+
+  function handleRowKeydown(event: KeyboardEvent, track: Track) {
+    if (event.target !== event.currentTarget) {
+      return;
+    }
+
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      event.stopPropagation();
+      selectTrack(track);
+    }
+  }
+
+  function toggleFavorite(event: MouseEvent, track: Track) {
+    event.stopPropagation();
+    onToggleFavorite?.(track);
   }
 
   function hideBrokenImage(event: Event) {
@@ -49,12 +73,14 @@
 {:else}
   <div class="track-list">
     {#each tracks as track}
-      <button
+      <div
         class:active={track.id === selectedTrackId}
         class="track-row"
-        type="button"
+        role="button"
+        tabindex="0"
         title={track.filePath}
         onclick={() => selectTrack(track)}
+        onkeydown={(event) => handleRowKeydown(event, track)}
       >
         <div class="mini-cover" aria-hidden="true">
           <span>{track.extension.toUpperCase()}</span>
@@ -73,8 +99,17 @@
           <p>{displayArtist(track)}</p>
         </div>
         <p>{displayAlbum(track)}</p>
+        <button
+          class:active={track.isFavorite}
+          class="favorite-button"
+          type="button"
+          aria-label={track.isFavorite ? "Remove from liked songs" : "Add to liked songs"}
+          onclick={(event) => toggleFavorite(event, track)}
+        >
+          {track.isFavorite ? "★" : "☆"}
+        </button>
         <span>{track.extension.toUpperCase()}</span>
-      </button>
+      </div>
     {/each}
   </div>
 {/if}
@@ -112,7 +147,7 @@
 
   .track-row {
     display: grid;
-    grid-template-columns: auto minmax(160px, 1.2fr) minmax(140px, 0.9fr) auto;
+    grid-template-columns: auto minmax(160px, 1.2fr) minmax(140px, 0.9fr) auto auto;
     align-items: center;
     gap: 14px;
     min-height: 64px;
@@ -140,6 +175,31 @@
     color: #8f9aa8;
     font-size: 0.9rem;
     font-weight: 620;
+  }
+
+  .favorite-button {
+    display: grid;
+    width: 32px;
+    height: 32px;
+    place-items: center;
+    border: 1px solid #303844;
+    border-radius: 8px;
+    background: #171c23;
+    color: #8f9aa8;
+    cursor: default;
+    font: inherit;
+    font-size: 0.95rem;
+    font-weight: 900;
+    line-height: 1;
+  }
+
+  .favorite-button:hover,
+  .favorite-button:focus-visible,
+  .favorite-button.active {
+    border-color: #6d5b2a;
+    background: #262214;
+    color: #f0c85a;
+    outline: none;
   }
 
   .track-row > p,
@@ -196,7 +256,7 @@
 
   @media (max-width: 760px) {
     .track-row {
-      grid-template-columns: auto minmax(0, 1fr) auto;
+      grid-template-columns: auto minmax(0, 1fr) auto auto;
     }
 
     .track-row > p {
