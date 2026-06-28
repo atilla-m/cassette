@@ -10,12 +10,15 @@
     volume: number;
     canPlayPrevious?: boolean;
     canPlayNext?: boolean;
+    queueCount?: number;
+    isQueueOpen?: boolean;
     onTogglePlayback?: () => void;
     onPrevious?: () => void;
     onNext?: () => void;
     onSeek?: (positionSeconds: number) => void;
     onVolumeChange?: (volume: number) => void;
     onToggleFavorite?: (track: Track) => void;
+    onToggleQueue?: () => void;
   };
 
   let {
@@ -26,12 +29,15 @@
     volume,
     canPlayPrevious = false,
     canPlayNext = false,
+    queueCount = 0,
+    isQueueOpen = false,
     onTogglePlayback,
     onPrevious,
     onNext,
     onSeek,
     onVolumeChange,
     onToggleFavorite,
+    onToggleQueue,
   }: Props = $props();
 
   let localVolume = $state(1);
@@ -86,6 +92,10 @@
     if (track) {
       onToggleFavorite?.(track);
     }
+  }
+
+  function queueLabel() {
+    return queueCount > 0 ? `Queue ${queueCount}` : "Queue";
   }
 
   function hideBrokenImage(event: Event) {
@@ -156,6 +166,16 @@
   </div>
 
   <div class="volume" aria-label="Volume">
+    <button
+      class:active={isQueueOpen}
+      class="queue-button"
+      type="button"
+      aria-label="Show Up Next"
+      disabled={!track && queueCount === 0}
+      onclick={onToggleQueue}
+    >
+      {queueLabel()}
+    </button>
     <span>Vol</span>
     <input
       class="volume-bar"
@@ -267,6 +287,22 @@
     border-color: #303844;
     background: #151a21;
     color: #626c79;
+  }
+
+  button.queue-button {
+    width: auto;
+    min-width: 74px;
+    padding: 0 10px;
+    white-space: nowrap;
+  }
+
+  button.queue-button.active,
+  button.queue-button:hover,
+  button.queue-button:focus-visible {
+    border-color: #35544f;
+    background: #17332f;
+    color: #d8fffa;
+    outline: none;
   }
 
   button {

@@ -6,7 +6,7 @@
     tracks: Track[];
     isScanning: boolean;
     selectedTrackId?: string | null;
-    onTrackSelect?: (track: Track) => void;
+    onTrackSelect?: (track: Track, queue: Track[]) => void;
     onToggleFavorite?: (track: Track) => void;
   };
 
@@ -27,7 +27,7 @@
   }
 
   function selectTrack(track: Track) {
-    onTrackSelect?.(track);
+    onTrackSelect?.(track, tracks);
   }
 
   function handleRowKeydown(event: KeyboardEvent, track: Track) {

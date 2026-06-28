@@ -32,6 +32,9 @@
   let hasLoadedCache = $state(false);
   let currentTrack = $state<Track | null>(null);
   let currentTrackIndex = $state<number | null>(null);
+  let playbackQueue = $state<Track[]>([]);
+  let currentQueueIndex = $state<number | null>(null);
+  let isQueueOpen = $state(false);
   let mainElement: HTMLElement | undefined = $state();
   let activeView = $state("Home");
   let selectedAlbumId = $state<string | null>(null);
@@ -84,8 +87,14 @@
   let selectedArtistAlbums = $derived(
     selectedArtist ? sortedAlbums.filter((album) => album.artist === selectedArtist.name) : [],
   );
-  let canPlayPrevious = $derived(currentTrackIndex !== null && currentTrackIndex > 0);
-  let canPlayNext = $derived(currentTrackIndex !== null && currentTrackIndex < tracks.length - 1);
+  let queuePanelStartIndex = $derived(currentQueueIndex ?? 0);
+  let queuePanelTracks = $derived(
+    currentQueueIndex === null ? playbackQueue : playbackQueue.slice(currentQueueIndex),
+  );
+  let canPlayPrevious = $derived(currentQueueIndex !== null && currentQueueIndex > 0);
+  let canPlayNext = $derived(
+    currentQueueIndex !== null && currentQueueIndex < playbackQueue.length - 1,
+  );
   let hadSearchQuery = false;
 
   $effect(() => {
@@ -194,6 +203,9 @@
       isLikedSongsOpen = false;
       searchQuery = "";
       currentTrackIndex = null;
+      playbackQueue = [];
+      currentQueueIndex = null;
+      isQueueOpen = false;
       hasLoadedCache = true;
 
       const scannedTracks = await scanLibrary(folder);
@@ -207,9 +219,18 @@
     }
   }
 
-  async function handleTrackSelect(track: Track) {
-    const trackIndex = tracks.findIndex((candidate) => candidate.id === track.id);
-    await playTrackAtIndex(trackIndex);
+  async function handleTrackSelect(track: Track, queue: Track[] = tracks) {
+    let nextQueue = queue.length > 0 ? [...queue] : [track];
+    let queueIndex = nextQueue.findIndex((candidate) => candidate.id === track.id);
+
+    if (queueIndex === -1) {
+      nextQueue = [track, ...nextQueue];
+      queueIndex = 0;
+    }
+
+    playbackQueue = nextQueue;
+    currentQueueIndex = queueIndex;
+    await playQueuedTrackAtIndex(queueIndex);
   }
 
   function handleNavigate(label: string) {
@@ -273,15 +294,17 @@
     }
   }
 
-  async function playTrackAtIndex(trackIndex: number) {
-    if (trackIndex < 0 || trackIndex >= tracks.length) {
+  async function playQueuedTrackAtIndex(queueIndex: number) {
+    if (queueIndex < 0 || queueIndex >= playbackQueue.length) {
       return;
     }
 
-    const track = tracks[trackIndex];
+    const track = playbackQueue[queueIndex];
+    const trackIndex = tracks.findIndex((candidate) => candidate.id === track.id);
     playbackError = null;
     currentTrack = track;
-    currentTrackIndex = trackIndex;
+    currentTrackIndex = trackIndex >= 0 ? trackIndex : null;
+    currentQueueIndex = queueIndex;
     durationSeconds = track.durationSeconds;
     positionSeconds = 0;
     isPlaying = false;
@@ -308,6 +331,7 @@
 
   function applyTrackFavorite(trackId: string, isFavorite: boolean) {
     tracks = tracks.map((track) => (track.id === trackId ? { ...track, isFavorite } : track));
+    playbackQueue = playbackQueue.map((track) => (track.id === trackId ? { ...track, isFavorite } : track));
 
     if (currentTrack?.id === trackId) {
       currentTrack = { ...currentTrack, isFavorite };
@@ -315,19 +339,29 @@
   }
 
   async function handlePreviousTrack() {
-    if (!canPlayPrevious || currentTrackIndex === null) {
+    if (!canPlayPrevious || currentQueueIndex === null) {
       return;
     }
 
-    await playTrackAtIndex(currentTrackIndex - 1);
+    await playQueuedTrackAtIndex(currentQueueIndex - 1);
   }
 
   async function handleNextTrack() {
-    if (!canPlayNext || currentTrackIndex === null) {
+    if (!canPlayNext || currentQueueIndex === null) {
       return;
     }
 
-    await playTrackAtIndex(currentTrackIndex + 1);
+    await playQueuedTrackAtIndex(currentQueueIndex + 1);
+  }
+
+  function handleToggleQueue() {
+    isQueueOpen = !isQueueOpen;
+  }
+
+  function handleClearQueue() {
+    playbackQueue = [];
+    currentQueueIndex = null;
+    isQueueOpen = false;
   }
 
   async function handleTogglePlayback() {
@@ -448,6 +482,14 @@
 
   function sortDirectionLabel(direction: SortDirection) {
     return direction === "asc" ? "Asc" : "Desc";
+  }
+
+  function queuePositionLabel(offset: number) {
+    if (currentQueueIndex !== null && offset === 0) {
+      return "Now";
+    }
+
+    return currentQueueIndex === null ? `${offset + 1}` : `+${offset}`;
   }
 
   function sortTracks(libraryTracks: Track[], sortKey: SongSortKey, direction: SortDirection) {
@@ -1073,6 +1115,45 @@
     </main>
   </div>
 
+  {#if isQueueOpen}
+    <aside class="queue-panel" aria-label="Up Next">
+      <div class="queue-panel-header">
+        <div>
+          <p class="eyebrow">Playback</p>
+          <h3>Up Next</h3>
+        </div>
+        <button type="button" disabled={playbackQueue.length === 0} onclick={handleClearQueue}>
+          Clear
+        </button>
+      </div>
+
+      {#if queuePanelTracks.length === 0}
+        <div class="group-empty">
+          <h3>No queued songs</h3>
+          <p>Play a song from any list to build an Up Next queue.</p>
+        </div>
+      {:else}
+        <div class="queue-list">
+          {#each queuePanelTracks as queuedTrack, offset (queuedTrack.id)}
+            <button
+              class:active={queuePanelStartIndex + offset === currentQueueIndex}
+              class="queue-row"
+              type="button"
+              title={queuedTrack.filePath}
+              onclick={() => playQueuedTrackAtIndex(queuePanelStartIndex + offset)}
+            >
+              <span>{queuePositionLabel(offset)}</span>
+              <div>
+                <p>{queuedTrack.title}</p>
+                <small>{queuedTrack.artist ?? "Unknown Artist"}</small>
+              </div>
+            </button>
+          {/each}
+        </div>
+      {/if}
+    </aside>
+  {/if}
+
   <NowPlayingBar
     track={currentTrack}
     {isPlaying}
@@ -1081,12 +1162,15 @@
     {volume}
     {canPlayPrevious}
     {canPlayNext}
+    queueCount={playbackQueue.length}
+    {isQueueOpen}
     onTogglePlayback={handleTogglePlayback}
     onPrevious={handlePreviousTrack}
     onNext={handleNextTrack}
     onSeek={handleSeek}
     onVolumeChange={handleVolumeChange}
     onToggleFavorite={handleToggleFavorite}
+    onToggleQueue={handleToggleQueue}
   />
 </div>
 
@@ -1643,6 +1727,133 @@
     white-space: nowrap;
   }
 
+  .queue-panel {
+    position: fixed;
+    right: 24px;
+    bottom: 104px;
+    z-index: 4;
+    display: grid;
+    gap: 14px;
+    width: min(420px, calc(100vw - 32px));
+    max-height: min(60vh, 520px);
+    overflow: hidden;
+    border: 1px solid #2a313c;
+    border-radius: 8px;
+    background: #12161c;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.34);
+    padding: 16px;
+  }
+
+  .queue-panel-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 14px;
+  }
+
+  .queue-panel-header h3 {
+    font-size: 1.1rem;
+  }
+
+  .queue-panel-header button {
+    min-height: 34px;
+    border: 1px solid #303844;
+    border-radius: 8px;
+    background: #171c23;
+    color: #d5dce5;
+    cursor: default;
+    font: inherit;
+    font-size: 0.82rem;
+    font-weight: 850;
+    padding: 0 11px;
+  }
+
+  .queue-panel-header button:hover,
+  .queue-panel-header button:focus-visible {
+    border-color: #35544f;
+    background: #1b2027;
+    outline: none;
+  }
+
+  .queue-panel-header button:disabled {
+    color: #626c79;
+    background: #151a21;
+  }
+
+  .queue-list {
+    display: grid;
+    gap: 8px;
+    min-height: 0;
+    overflow: auto;
+    padding-right: 2px;
+  }
+
+  .queue-row {
+    display: grid;
+    grid-template-columns: 44px minmax(0, 1fr);
+    align-items: center;
+    gap: 10px;
+    min-height: 54px;
+    border: 1px solid #242b35;
+    border-radius: 8px;
+    background: #151a21;
+    color: inherit;
+    cursor: default;
+    font: inherit;
+    padding: 9px 10px;
+    text-align: left;
+  }
+
+  .queue-row:hover,
+  .queue-row:focus-visible,
+  .queue-row.active {
+    border-color: #35544f;
+    background: #1b2027;
+    outline: none;
+  }
+
+  .queue-row > span {
+    display: grid;
+    min-height: 30px;
+    place-items: center;
+    border-radius: 7px;
+    background: #1d252e;
+    color: #8f9aa8;
+    font-size: 0.76rem;
+    font-weight: 900;
+  }
+
+  .queue-row.active > span {
+    background: #17332f;
+    color: #d8fffa;
+  }
+
+  .queue-row div {
+    min-width: 0;
+  }
+
+  .queue-row p,
+  .queue-row small {
+    display: block;
+    overflow: hidden;
+    margin: 0;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .queue-row p {
+    color: #f4f7fb;
+    font-size: 0.92rem;
+    font-weight: 750;
+  }
+
+  .queue-row small {
+    margin-top: 2px;
+    color: #929daa;
+    font-size: 0.8rem;
+    font-weight: 650;
+  }
+
   @media (max-width: 1020px) {
     .album-grid,
     .artist-grid,
@@ -1687,6 +1898,11 @@
 
     .detail-cover {
       width: min(100%, 220px);
+    }
+
+    .queue-panel {
+      right: 16px;
+      bottom: 150px;
     }
   }
 
