@@ -31,6 +31,7 @@
   let activeView = $state("Home");
   let selectedAlbumId = $state<string | null>(null);
   let selectedArtistName = $state<string | null>(null);
+  let searchQuery = $state("");
   let isPlaying = $state(false);
   let positionSeconds = $state(0);
   let durationSeconds = $state<number | null>(null);
@@ -40,6 +41,19 @@
   let homeTracks = $derived(tracks.slice(0, 8));
   let homeAlbums = $derived(displayAlbums.slice(0, 4));
   let homeArtists = $derived(displayArtists.slice(0, 4));
+  let normalizedSearchQuery = $derived(normalizeSearch(searchQuery));
+  let searchTracks = $derived(
+    normalizedSearchQuery ? tracks.filter((track) => trackMatchesSearch(track, normalizedSearchQuery)) : [],
+  );
+  let searchAlbums = $derived(
+    normalizedSearchQuery ? displayAlbums.filter((album) => albumMatchesSearch(album, normalizedSearchQuery)) : [],
+  );
+  let searchArtists = $derived(
+    normalizedSearchQuery ? displayArtists.filter((artist) => artistMatchesSearch(artist, normalizedSearchQuery)) : [],
+  );
+  let hasSearchResults = $derived(
+    searchTracks.length > 0 || searchAlbums.length > 0 || searchArtists.length > 0,
+  );
   let selectedAlbum = $derived(displayAlbums.find((album) => album.id === selectedAlbumId) ?? null);
   let selectedArtist = $derived(displayArtists.find((artist) => artist.name === selectedArtistName) ?? null);
   let selectedAlbumTracks = $derived(
@@ -53,6 +67,17 @@
   );
   let canPlayPrevious = $derived(currentTrackIndex !== null && currentTrackIndex > 0);
   let canPlayNext = $derived(currentTrackIndex !== null && currentTrackIndex < tracks.length - 1);
+  let hadSearchQuery = false;
+
+  $effect(() => {
+    const hasSearchQuery = normalizedSearchQuery.length > 0;
+
+    if (hasSearchQuery && !hadSearchQuery) {
+      mainElement?.scrollTo({ top: 0 });
+    }
+
+    hadSearchQuery = hasSearchQuery;
+  });
 
   onMount(() => {
     void loadLibraryCache();
@@ -80,6 +105,12 @@
     }, 250);
 
     function handleKeydown(event: KeyboardEvent) {
+      if (event.key === "Escape" && normalizedSearchQuery) {
+        event.preventDefault();
+        clearSearch();
+        return;
+      }
+
       if (shouldIgnoreShortcut(event.target)) {
         return;
       }
@@ -135,6 +166,7 @@
       tracks = [];
       selectedAlbumId = null;
       selectedArtistName = null;
+      searchQuery = "";
       currentTrackIndex = null;
       hasLoadedCache = true;
 
@@ -162,6 +194,7 @@
   }
 
   function handleAlbumSelect(album: Album) {
+    searchQuery = "";
     activeView = "Albums";
     selectedAlbumId = album.id;
     selectedArtistName = null;
@@ -169,6 +202,7 @@
   }
 
   function handleArtistSelect(artist: Artist) {
+    searchQuery = "";
     activeView = "Artists";
     selectedArtistName = artist.name;
     selectedAlbumId = null;
@@ -183,6 +217,17 @@
   function handleBackToArtists() {
     selectedArtistName = null;
     mainElement?.scrollTo({ top: 0 });
+  }
+
+  function clearSearch() {
+    searchQuery = "";
+  }
+
+  function handleSearchKeydown(event: KeyboardEvent) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      clearSearch();
+    }
   }
 
   async function playTrackAtIndex(trackIndex: number) {
@@ -300,7 +345,41 @@
     return artist.detail;
   }
 
+  function normalizeSearch(value: string) {
+    return value.trim().normalize("NFKC").toLocaleLowerCase();
+  }
+
+  function searchableValue(value: string | null | undefined) {
+    return normalizeSearch(value ?? "");
+  }
+
+  function matchesSearch(query: string, values: Array<string | null | undefined>) {
+    return values.some((value) => searchableValue(value).includes(query));
+  }
+
+  function trackMatchesSearch(track: Track, query: string) {
+    return matchesSearch(query, [
+      track.title,
+      track.artist,
+      track.album,
+      track.albumArtist,
+      track.fileName,
+    ]);
+  }
+
+  function albumMatchesSearch(album: Album, query: string) {
+    return matchesSearch(query, [album.title, album.artist]);
+  }
+
+  function artistMatchesSearch(artist: Artist, query: string) {
+    return matchesSearch(query, [artist.name]);
+  }
+
   function viewTitle() {
+    if (normalizedSearchQuery) {
+      return "Search Results";
+    }
+
     if (activeView === "Home") {
       return "Your music, on this machine.";
     }
@@ -309,10 +388,19 @@
   }
 
   function viewEyebrow() {
+    if (normalizedSearchQuery) {
+      return "Search";
+    }
+
     return activeView;
   }
 
   function viewStatus() {
+    if (normalizedSearchQuery) {
+      const total = searchTracks.length + searchAlbums.length + searchArtists.length;
+      return `${total} ${total === 1 ? "match" : "matches"} for "${searchQuery.trim()}"`;
+    }
+
     if (isScanning) {
       return "Scanning your local music files...";
     }
@@ -367,6 +455,19 @@
         </button>
       </header>
 
+      <div class="search-bar">
+        <input
+          type="search"
+          bind:value={searchQuery}
+          placeholder="Search songs, albums, artists..."
+          aria-label="Search songs, albums, artists"
+          onkeydown={handleSearchKeydown}
+        />
+        {#if searchQuery}
+          <button type="button" aria-label="Clear search" onclick={clearSearch}>Clear</button>
+        {/if}
+      </div>
+
       {#if scanError}
         <div class="scan-error" role="alert">{scanError}</div>
       {/if}
@@ -374,7 +475,83 @@
         <div class="scan-error" role="alert">{playbackError}</div>
       {/if}
 
-      {#if activeView === "Home"}
+      {#if normalizedSearchQuery}
+        {#if hasSearchResults}
+          <LibrarySection title="Songs" viewAllLabel={`${searchTracks.length} ${searchTracks.length === 1 ? "match" : "matches"}`}>
+            {#if searchTracks.length === 0}
+              <div class="group-empty">
+                <h3>No songs matched</h3>
+                <p>Try a track title, artist, album, or file name.</p>
+              </div>
+            {:else}
+              <TrackList
+                tracks={searchTracks}
+                isScanning={false}
+                selectedTrackId={currentTrack?.id}
+                onTrackSelect={handleTrackSelect}
+              />
+            {/if}
+          </LibrarySection>
+
+          <LibrarySection title="Albums" viewAllLabel={`${searchAlbums.length} ${searchAlbums.length === 1 ? "match" : "matches"}`}>
+            {#if searchAlbums.length === 0}
+              <div class="group-empty">
+                <h3>No albums matched</h3>
+                <p>Try an album title or artist name.</p>
+              </div>
+            {:else}
+              <div class="album-grid">
+                {#each searchAlbums as album}
+                  <button class="album-card" type="button" onclick={() => handleAlbumSelect(album)}>
+                    <div class="album-art" style={`--item-color: ${album.color}`} aria-hidden="true">
+                      {#if album.coverArtPath}
+                        <img
+                          src={localImageSource(album.coverArtPath) ?? ""}
+                          alt=""
+                          loading="lazy"
+                          onload={showLoadedImage}
+                          onerror={hideBrokenImage}
+                        />
+                      {/if}
+                      <span></span>
+                    </div>
+                    <h3>{album.title}</h3>
+                    <p>{albumDetail(album)}</p>
+                  </button>
+                {/each}
+              </div>
+            {/if}
+          </LibrarySection>
+
+          <LibrarySection title="Artists" viewAllLabel={`${searchArtists.length} ${searchArtists.length === 1 ? "match" : "matches"}`}>
+            {#if searchArtists.length === 0}
+              <div class="group-empty">
+                <h3>No artists matched</h3>
+                <p>Try a different artist name.</p>
+              </div>
+            {:else}
+              <div class="artist-grid">
+                {#each searchArtists as artist}
+                  <button class="artist-card" type="button" onclick={() => handleArtistSelect(artist)}>
+                    <div class="artist-avatar" style={`--item-color: ${artist.color}`} aria-hidden="true">
+                      {artist.name.slice(0, 1)}
+                    </div>
+                    <div>
+                      <h3>{artist.name}</h3>
+                      <p>{artistSongCount(artist)}</p>
+                    </div>
+                  </button>
+                {/each}
+              </div>
+            {/if}
+          </LibrarySection>
+        {:else}
+          <div class="group-empty">
+            <h3>No matches found</h3>
+            <p>Search looks at song titles, artists, albums, album artists, and file names.</p>
+          </div>
+        {/if}
+      {:else if activeView === "Home"}
         <LibrarySection title="Recently Added">
           <TrackList
             tracks={homeTracks}
@@ -724,6 +901,57 @@
     border-color: #303844;
     background: #1a2028;
     color: #8d96a3;
+  }
+
+  .search-bar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    max-width: 720px;
+    margin: -12px 0 24px;
+  }
+
+  .search-bar input {
+    width: 100%;
+    min-width: 0;
+    min-height: 42px;
+    border: 1px solid #303844;
+    border-radius: 8px;
+    background: #12161c;
+    color: #f4f7fb;
+    font: inherit;
+    font-weight: 650;
+    outline: none;
+    padding: 0 14px;
+  }
+
+  .search-bar input::placeholder {
+    color: #727d8a;
+  }
+
+  .search-bar input:focus {
+    border-color: #2f8f83;
+    box-shadow: 0 0 0 2px rgba(47, 143, 131, 0.18);
+  }
+
+  .search-bar button {
+    min-height: 42px;
+    border: 1px solid #303844;
+    border-radius: 8px;
+    background: #161a20;
+    color: #d5dce5;
+    cursor: default;
+    font: inherit;
+    font-size: 0.86rem;
+    font-weight: 800;
+    padding: 0 13px;
+  }
+
+  .search-bar button:hover,
+  .search-bar button:focus-visible {
+    border-color: #35544f;
+    background: #1b2027;
+    outline: none;
   }
 
   .scan-status {
