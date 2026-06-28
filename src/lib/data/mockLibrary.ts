@@ -17,6 +17,7 @@ export const albums: Album[] = [
     year: 2026,
     trackCount: 11,
     color: "#2f8f83",
+    coverArtPath: null,
   },
   {
     id: "north-arcade-signal-bloom",
@@ -25,6 +26,7 @@ export const albums: Album[] = [
     year: 2025,
     trackCount: 9,
     color: "#b95f3d",
+    coverArtPath: null,
   },
   {
     id: "echo-lanes-soft-mechanics",
@@ -33,6 +35,7 @@ export const albums: Album[] = [
     year: 2024,
     trackCount: 13,
     color: "#8b6bd6",
+    coverArtPath: null,
   },
   {
     id: "june-circuit-late-service",
@@ -41,6 +44,7 @@ export const albums: Album[] = [
     year: 2023,
     trackCount: 8,
     color: "#c59b40",
+    coverArtPath: null,
   },
 ];
 
@@ -83,4 +87,5 @@ export const nowPlaying: Track = {
   modifiedTime: null,
   fileSize: null,
   scannedAt: null,
+  coverArtPath: null,
 };

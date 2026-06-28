@@ -14,6 +14,7 @@ export function buildAlbums(tracks: Track[]): Album[] {
     if (existing) {
       existing.trackCount += 1;
       existing.year ??= track.year;
+      existing.coverArtPath ??= track.coverArtPath;
       continue;
     }
 
@@ -24,6 +25,7 @@ export function buildAlbums(tracks: Track[]): Album[] {
       year: track.year,
       trackCount: 1,
       color: colorFor(key),
+      coverArtPath: track.coverArtPath,
     });
   }
 

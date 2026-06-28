@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { Track } from "$lib/types/library";
+  import { localImageSource } from "$lib/utils/localImage";
 
   type Props = {
     track: Track | null;
@@ -34,6 +35,7 @@
   let localVolume = $state(1);
   let localPosition = $state(0);
   let isSeeking = $state(false);
+  let coverArtSrc = $derived(localImageSource(track?.coverArtPath));
 
   $effect(() => {
     localVolume = volume;
@@ -77,11 +79,27 @@
   function handleVolumeInput() {
     onVolumeChange?.(localVolume);
   }
+
+  function hideBrokenImage(event: Event) {
+    if (event.currentTarget instanceof HTMLImageElement) {
+      event.currentTarget.hidden = true;
+    }
+  }
+
+  function showLoadedImage(event: Event) {
+    if (event.currentTarget instanceof HTMLImageElement) {
+      event.currentTarget.hidden = false;
+    }
+  }
 </script>
 
 <footer class="player" aria-label="Now playing">
   <div class="track">
-    <div class="cover" aria-hidden="true"></div>
+    <div class="cover" aria-hidden="true">
+      {#if coverArtSrc}
+        <img src={coverArtSrc} alt="" onload={showLoadedImage} onerror={hideBrokenImage} />
+      {/if}
+    </div>
     <div class="track-copy">
       <p>{track?.title ?? "No track selected"}</p>
       <span>{displayArtist(track)}{displayAlbum(track)}</span>
@@ -155,14 +173,25 @@
   }
 
   .cover {
+    position: relative;
     width: 54px;
     height: 54px;
     flex: 0 0 auto;
+    overflow: hidden;
     border-radius: 8px;
     background:
       linear-gradient(135deg, rgba(255, 255, 255, 0.18), transparent 58%),
       #2f8f83;
     box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.12);
+  }
+
+  .cover img {
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
   }
 
   .track-copy {

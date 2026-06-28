@@ -15,6 +15,7 @@
   import { buildAlbums, buildArtists } from "$lib/data/libraryViews";
   import { albums as mockAlbums, artists as mockArtists, navItems } from "$lib/data/mockLibrary";
   import type { Album, PlaybackStatus, Track } from "$lib/types/library";
+  import { localImageSource } from "$lib/utils/localImage";
   import { onMount } from "svelte";
 
   let tracks = $state<Track[]>([]);
@@ -140,11 +141,14 @@
 
     const track = tracks[trackIndex];
     playbackError = null;
+    currentTrack = track;
+    currentTrackIndex = trackIndex;
+    durationSeconds = track.durationSeconds;
+    positionSeconds = 0;
+    isPlaying = false;
 
     try {
       const status = await playTrack(track.filePath);
-      currentTrack = track;
-      currentTrackIndex = trackIndex;
       applyPlaybackStatus(status);
       durationSeconds = status.durationSeconds ?? track.durationSeconds;
     } catch (error) {
@@ -229,6 +233,18 @@
 
     return `${album.artist}${year} · ${trackCount}`;
   }
+
+  function hideBrokenImage(event: Event) {
+    if (event.currentTarget instanceof HTMLImageElement) {
+      event.currentTarget.hidden = true;
+    }
+  }
+
+  function showLoadedImage(event: Event) {
+    if (event.currentTarget instanceof HTMLImageElement) {
+      event.currentTarget.hidden = false;
+    }
+  }
 </script>
 
 <svelte:head>
@@ -287,6 +303,15 @@
             {#each displayAlbums as album}
               <article class="album-card">
                 <div class="album-art" style={`--item-color: ${album.color}`} aria-hidden="true">
+                  {#if album.coverArtPath}
+                    <img
+                      src={localImageSource(album.coverArtPath) ?? ""}
+                      alt=""
+                      loading="lazy"
+                      onload={showLoadedImage}
+                      onerror={hideBrokenImage}
+                    />
+                  {/if}
                   <span></span>
                 </div>
                 <h3>{album.title}</h3>
@@ -529,8 +554,10 @@
   }
 
   .album-art {
+    position: relative;
     display: grid;
     aspect-ratio: 1;
+    overflow: hidden;
     place-items: center;
     margin-bottom: 12px;
     border-radius: 8px;
@@ -538,6 +565,15 @@
       linear-gradient(135deg, rgba(255, 255, 255, 0.18), transparent 42%),
       var(--item-color);
     box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.14);
+  }
+
+  .album-art img {
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
   }
 
   .album-art span {

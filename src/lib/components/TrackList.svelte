@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { Track } from "$lib/types/library";
+  import { localImageSource } from "$lib/utils/localImage";
 
   type Props = {
     tracks: Track[];
@@ -20,6 +21,18 @@
 
   function selectTrack(track: Track) {
     onTrackSelect?.(track);
+  }
+
+  function hideBrokenImage(event: Event) {
+    if (event.currentTarget instanceof HTMLImageElement) {
+      event.currentTarget.hidden = true;
+    }
+  }
+
+  function showLoadedImage(event: Event) {
+    if (event.currentTarget instanceof HTMLImageElement) {
+      event.currentTarget.hidden = false;
+    }
   }
 </script>
 
@@ -43,7 +56,18 @@
         title={track.filePath}
         onclick={() => selectTrack(track)}
       >
-        <div class="mini-cover" aria-hidden="true">{track.extension.toUpperCase()}</div>
+        <div class="mini-cover" aria-hidden="true">
+          <span>{track.extension.toUpperCase()}</span>
+          {#if track.coverArtPath}
+            <img
+              src={localImageSource(track.coverArtPath) ?? ""}
+              alt=""
+              loading="lazy"
+              onload={showLoadedImage}
+              onerror={hideBrokenImage}
+            />
+          {/if}
+        </div>
         <div class="track-title">
           <span class="track-name">{track.title}</span>
           <p>{displayArtist(track)}</p>
@@ -132,9 +156,11 @@
   }
 
   .mini-cover {
+    position: relative;
     display: grid;
     width: 42px;
     height: 42px;
+    overflow: hidden;
     place-items: center;
     border-radius: 7px;
     background: #2f8f83;
@@ -142,6 +168,15 @@
     color: #07110f;
     font-size: 0.7rem;
     font-weight: 900;
+  }
+
+  .mini-cover img {
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
   }
 
   .track-name {

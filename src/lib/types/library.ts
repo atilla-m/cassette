@@ -14,6 +14,7 @@ export type Track = {
   modifiedTime: number | null;
   fileSize: number | null;
   scannedAt: number | null;
+  coverArtPath: string | null;
 };
 
 export type Album = {
@@ -23,6 +24,7 @@ export type Album = {
   year: number | null;
   trackCount: number;
   color: string;
+  coverArtPath: string | null;
 };
 
 export type Artist = {

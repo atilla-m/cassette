@@ -1,18 +1,23 @@
 use gst::prelude::*;
 use gstreamer as gst;
 use lofty::file::{AudioFile, TaggedFileExt};
+use lofty::picture::Picture;
 use lofty::probe::Probe;
 use lofty::tag::{Accessor, ItemKey, Tag};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
+use std::collections::HashMap;
 use std::fs;
-use std::io;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tauri::{Manager, State};
+use tauri::{AppHandle, Manager, State};
 
 const SUPPORTED_EXTENSIONS: &[&str] = &["flac", "mp3", "ogg", "opus", "wav", "m4a"];
+const COVER_IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "webp"];
+const PREFERRED_COVER_NAMES: &[&str] = &["cover", "folder", "front", "album"];
+const MAX_FOLDER_COVER_BYTES: u64 = 25 * 1024 * 1024;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -32,6 +37,7 @@ struct Track {
     modified_time: Option<i64>,
     file_size: Option<i64>,
     scanned_at: Option<i64>,
+    cover_art_path: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -44,6 +50,33 @@ struct TrackMetadata {
     disc_number: Option<u32>,
     year: Option<u16>,
     duration_seconds: Option<u32>,
+    embedded_cover_art: Option<EmbeddedCoverArt>,
+}
+
+#[derive(Debug)]
+struct EmbeddedCoverArt {
+    extension: &'static str,
+    data: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+struct CachedCoverArt {
+    path: String,
+    priority: CoverArtPriority,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum CoverArtPriority {
+    FolderFallback,
+    FolderNamed,
+    Embedded,
+}
+
+#[derive(Debug)]
+struct FolderCoverArt {
+    path: PathBuf,
+    extension: &'static str,
+    priority: CoverArtPriority,
 }
 
 #[derive(Debug, Serialize)]
@@ -87,6 +120,7 @@ fn get_library_cache(library: State<'_, Mutex<LibraryDatabase>>) -> Result<Libra
 #[tauri::command]
 fn scan_library(
     root: String,
+    app: AppHandle,
     library: State<'_, Mutex<LibraryDatabase>>,
 ) -> Result<Vec<Track>, String> {
     let root_path = PathBuf::from(root);
@@ -100,8 +134,20 @@ fn scan_library(
     }
 
     let mut tracks = Vec::new();
+    let mut album_art_paths = HashMap::<String, CachedCoverArt>::new();
+    let cover_art_dir = app
+        .path()
+        .app_data_dir()
+        .ok()
+        .map(|path| path.join("cover-art"));
     let scanned_at = unix_timestamp();
-    scan_directory(&root_path, scanned_at, &mut tracks)?;
+    scan_directory(
+        &root_path,
+        scanned_at,
+        cover_art_dir.as_deref(),
+        &mut album_art_paths,
+        &mut tracks,
+    )?;
     tracks.sort_by(|left, right| left.file_path.cmp(&right.file_path));
 
     let mut library = library
@@ -147,7 +193,8 @@ impl LibraryDatabase {
                 extension TEXT NOT NULL,
                 modified_time INTEGER,
                 file_size INTEGER,
-                scanned_at INTEGER NOT NULL
+                scanned_at INTEGER NOT NULL,
+                cover_art_path TEXT
             );
 
             CREATE TABLE IF NOT EXISTS library_meta (
@@ -155,7 +202,29 @@ impl LibraryDatabase {
                 value TEXT NOT NULL
             );
             ",
-        )
+        )?;
+
+        if !self.has_column("tracks", "cover_art_path")? {
+            self.connection
+                .execute("ALTER TABLE tracks ADD COLUMN cover_art_path TEXT", [])?;
+        }
+
+        Ok(())
+    }
+
+    fn has_column(&self, table: &str, column: &str) -> rusqlite::Result<bool> {
+        let mut statement = self
+            .connection
+            .prepare(&format!("PRAGMA table_info({table})"))?;
+        let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
+
+        for name in columns {
+            if name? == column {
+                return Ok(true);
+            }
+        }
+
+        Ok(false)
     }
 
     fn load_cache(&self) -> Result<LibraryCache, String> {
@@ -178,7 +247,8 @@ impl LibraryDatabase {
                     extension,
                     modified_time,
                     file_size,
-                    scanned_at
+                    scanned_at,
+                    cover_art_path
                 FROM tracks
                 ORDER BY file_path
                 ",
@@ -234,8 +304,9 @@ impl LibraryDatabase {
                         extension,
                         modified_time,
                         file_size,
-                        scanned_at
-                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+                        scanned_at,
+                        cover_art_path
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
                     ",
                 )
                 .map_err(|error| format!("Could not prepare library cache update: {error}"))?;
@@ -258,6 +329,7 @@ impl LibraryDatabase {
                         track.modified_time,
                         track.file_size,
                         track.scanned_at,
+                        &track.cover_art_path,
                     ])
                     .map_err(|error| format!("Could not cache scanned track: {error}"))?;
             }
@@ -548,6 +620,7 @@ fn row_to_track(row: &rusqlite::Row<'_>) -> rusqlite::Result<Track> {
         modified_time: row.get(12)?,
         file_size: row.get(13)?,
         scanned_at: row.get(14)?,
+        cover_art_path: row.get(15)?,
     })
 }
 
@@ -567,19 +640,18 @@ fn upsert_meta(connection: &Connection, key: &str, value: &str) -> rusqlite::Res
 fn scan_directory(
     directory: &Path,
     scanned_at: i64,
+    cover_art_dir: Option<&Path>,
+    album_art_paths: &mut HashMap<String, CachedCoverArt>,
     tracks: &mut Vec<Track>,
 ) -> Result<(), String> {
     let entries = match fs::read_dir(directory) {
         Ok(entries) => entries,
         Err(_) => return Ok(()),
     };
+    let mut entries = entries.filter_map(Result::ok).collect::<Vec<_>>();
+    entries.sort_by_key(|entry| entry.path());
 
     for entry in entries {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(_) => continue,
-        };
-
         let file_type = match entry.file_type() {
             Ok(file_type) => file_type,
             Err(_) => continue,
@@ -588,9 +660,56 @@ fn scan_directory(
         let path = entry.path();
 
         if file_type.is_dir() {
-            scan_directory(&path, scanned_at, tracks)?;
+            scan_directory(
+                &path,
+                scanned_at,
+                cover_art_dir,
+                album_art_paths,
+                tracks,
+            )?;
         } else if file_type.is_file() && is_supported_audio_file(&path) {
-            if let Some(track) = track_from_path(path, scanned_at) {
+            if let Some((mut track, embedded_cover_art)) = track_from_path(path.clone(), scanned_at)
+            {
+                let album_art_key = album_art_key_for_track(&track, &path);
+                let existing_priority = album_art_paths
+                    .get(&album_art_key)
+                    .map(|cover_art| cover_art.priority);
+                let should_check_cover_art = !matches!(
+                    existing_priority,
+                    Some(CoverArtPriority::Embedded)
+                ) && (existing_priority.is_none() || embedded_cover_art.is_some());
+
+                if should_check_cover_art {
+                    if let Some(candidate) = cover_art_candidate(
+                        cover_art_dir,
+                        &album_art_key,
+                        &path,
+                        embedded_cover_art.as_ref(),
+                    ) {
+                        let should_update = album_art_paths
+                            .get(&album_art_key)
+                            .map(|current| candidate.priority > current.priority)
+                            .unwrap_or(true);
+
+                        if should_update {
+                            for existing_track in tracks.iter_mut() {
+                                let existing_path = PathBuf::from(&existing_track.file_path);
+                                if album_art_key_for_track(existing_track, &existing_path)
+                                    == album_art_key
+                                {
+                                    existing_track.cover_art_path = Some(candidate.path.clone());
+                                }
+                            }
+
+                            album_art_paths.insert(album_art_key.clone(), candidate);
+                        }
+                    }
+                }
+
+                if let Some(cover_art) = album_art_paths.get(&album_art_key) {
+                    track.cover_art_path = Some(cover_art.path.clone());
+                }
+
                 tracks.push(track);
             }
         }
@@ -610,15 +729,18 @@ fn is_supported_audio_file(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-fn track_from_path(path: PathBuf, scanned_at: i64) -> Option<Track> {
+fn track_from_path(path: PathBuf, scanned_at: i64) -> Option<(Track, Option<EmbeddedCoverArt>)> {
     let metadata = read_track_metadata(&path);
     let file_info = file_info(&path);
     let path_string = path.to_string_lossy().into_owned();
     let file_name = path.file_name()?.to_string_lossy().into_owned();
     let extension = path.extension()?.to_string_lossy().to_ascii_lowercase();
-    let title = metadata.title.unwrap_or_else(|| title_from_path(&path));
+    let title = metadata
+        .title
+        .clone()
+        .unwrap_or_else(|| title_from_path(&path));
 
-    Some(Track {
+    let track = Track {
         id: path_string.clone(),
         file_path: path_string,
         file_name,
@@ -634,7 +756,10 @@ fn track_from_path(path: PathBuf, scanned_at: i64) -> Option<Track> {
         modified_time: file_info.modified_time,
         file_size: file_info.file_size,
         scanned_at: Some(scanned_at),
-    })
+        cover_art_path: None,
+    };
+
+    Some((track, metadata.embedded_cover_art))
 }
 
 #[derive(Debug, Default)]
@@ -652,6 +777,210 @@ fn file_info(path: &Path) -> FileInfo {
         modified_time: metadata.modified().ok().and_then(system_time_to_unix),
         file_size: i64::try_from(metadata.len()).ok(),
     }
+}
+
+fn album_key_for_track(track: &Track) -> String {
+    let title = track.album.as_deref().unwrap_or("Unknown Album");
+    let artist = track
+        .album_artist
+        .as_deref()
+        .or(track.artist.as_deref())
+        .unwrap_or("Unknown Artist");
+
+    format!("{}\0{}", artist.to_lowercase(), title.to_lowercase())
+}
+
+fn album_art_key_for_track(track: &Track, path: &Path) -> String {
+    let folder = path
+        .parent()
+        .map(|parent| parent.to_string_lossy())
+        .unwrap_or_default();
+
+    format!("{}\0{}", album_key_for_track(track), folder)
+}
+
+fn cover_art_candidate(
+    cover_art_dir: Option<&Path>,
+    album_art_key: &str,
+    track_path: &Path,
+    embedded_cover_art: Option<&EmbeddedCoverArt>,
+) -> Option<CachedCoverArt> {
+    if let Some(path) = embedded_cover_art
+        .and_then(|cover_art| save_embedded_album_cover(cover_art_dir, album_art_key, cover_art))
+    {
+        return Some(CachedCoverArt {
+            path,
+            priority: CoverArtPriority::Embedded,
+        });
+    }
+
+    let folder_cover_art = folder_cover_art(track_path)?;
+    let priority = folder_cover_art.priority;
+    let path = save_folder_album_cover(cover_art_dir, album_art_key, &folder_cover_art)?;
+
+    Some(CachedCoverArt { path, priority })
+}
+
+fn save_embedded_album_cover(
+    cover_art_dir: Option<&Path>,
+    album_art_key: &str,
+    cover_art: &EmbeddedCoverArt,
+) -> Option<String> {
+    let cover_art_dir = cover_art_dir?;
+    fs::create_dir_all(cover_art_dir).ok()?;
+
+    let file_name = format!(
+        "{:016x}-{:016x}.{}",
+        stable_hash(album_art_key),
+        stable_hash_bytes(&cover_art.data),
+        cover_art.extension
+    );
+    let cover_art_path = cover_art_dir.join(file_name);
+    fs::write(&cover_art_path, &cover_art.data).ok()?;
+
+    Some(cover_art_path.to_string_lossy().into_owned())
+}
+
+fn save_folder_album_cover(
+    cover_art_dir: Option<&Path>,
+    album_art_key: &str,
+    cover_art: &FolderCoverArt,
+) -> Option<String> {
+    let cover_art_dir = cover_art_dir?;
+    fs::create_dir_all(cover_art_dir).ok()?;
+
+    let metadata = fs::metadata(&cover_art.path).ok()?;
+    let modified_time = metadata
+        .modified()
+        .ok()
+        .and_then(system_time_to_unix)
+        .unwrap_or(0);
+    let source_key = format!(
+        "{}\0{}\0{}\0{}",
+        album_art_key,
+        cover_art.path.to_string_lossy(),
+        metadata.len(),
+        modified_time
+    );
+    let file_name = format!(
+        "{:016x}-{:016x}.{}",
+        stable_hash(album_art_key),
+        stable_hash(&source_key),
+        cover_art.extension
+    );
+    let cover_art_path = cover_art_dir.join(file_name);
+    fs::copy(&cover_art.path, &cover_art_path).ok()?;
+
+    Some(cover_art_path.to_string_lossy().into_owned())
+}
+
+fn folder_cover_art(track_path: &Path) -> Option<FolderCoverArt> {
+    let directory = track_path.parent()?;
+    let entries = folder_image_candidates(directory)?;
+
+    for preferred_name in PREFERRED_COVER_NAMES {
+        for preferred_extension in COVER_IMAGE_EXTENSIONS {
+            if let Some(cover_art) = entries.iter().find_map(|path| {
+                let stem_matches = path
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .map(|stem| stem.eq_ignore_ascii_case(preferred_name))
+                    .unwrap_or(false);
+                let extension_matches = path
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .map(|extension| extension.eq_ignore_ascii_case(preferred_extension))
+                    .unwrap_or(false);
+
+                if stem_matches && extension_matches {
+                    valid_folder_cover_art(path, CoverArtPriority::FolderNamed)
+                } else {
+                    None
+                }
+            }) {
+                return Some(cover_art);
+            }
+        }
+    }
+
+    entries
+        .iter()
+        .find_map(|path| valid_folder_cover_art(path, CoverArtPriority::FolderFallback))
+}
+
+fn folder_image_candidates(directory: &Path) -> Option<Vec<PathBuf>> {
+    let entries = fs::read_dir(directory).ok()?;
+    let mut paths = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let path = entry.path();
+            let file_type = entry.file_type().ok()?;
+
+            if file_type.is_file() && is_supported_cover_image_file(&path) {
+                Some(path)
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+
+    paths.sort();
+
+    Some(paths)
+}
+
+fn is_supported_cover_image_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| {
+            COVER_IMAGE_EXTENSIONS
+                .iter()
+                .any(|supported| extension.eq_ignore_ascii_case(supported))
+        })
+        .unwrap_or(false)
+}
+
+fn valid_folder_cover_art(path: &Path, priority: CoverArtPriority) -> Option<FolderCoverArt> {
+    let metadata = fs::metadata(path).ok()?;
+
+    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_FOLDER_COVER_BYTES {
+        return None;
+    }
+
+    let mut file = fs::File::open(path).ok()?;
+    let mut header = [0u8; 16];
+    let bytes_read = file.read(&mut header).ok()?;
+    let extension = folder_image_extension(&header[..bytes_read])?;
+
+    Some(FolderCoverArt {
+        path: path.to_path_buf(),
+        extension,
+        priority,
+    })
+}
+
+fn folder_image_extension(data: &[u8]) -> Option<&'static str> {
+    match image_extension(data)? {
+        "jpg" => Some("jpg"),
+        "png" => Some("png"),
+        "webp" => Some("webp"),
+        _ => None,
+    }
+}
+
+fn stable_hash(value: &str) -> u64 {
+    stable_hash_bytes(value.as_bytes())
+}
+
+fn stable_hash_bytes(value: &[u8]) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+
+    for byte in value {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+
+    hash
 }
 
 fn unix_timestamp() -> i64 {
@@ -688,6 +1017,8 @@ fn read_track_metadata(path: &Path) -> TrackMetadata {
         metadata.year = tag.date().map(|date| date.year);
     }
 
+    metadata.embedded_cover_art = embedded_cover_art(&tagged_file);
+
     metadata
 }
 
@@ -702,6 +1033,54 @@ fn album_artist(tag: &Tag) -> Option<String> {
             .or_else(|| tag.get_string(ItemKey::AlbumArtists))
             .map(str::to_owned),
     )
+}
+
+fn embedded_cover_art(tagged_file: &lofty::file::TaggedFile) -> Option<EmbeddedCoverArt> {
+    tagged_file
+        .primary_tag()
+        .into_iter()
+        .chain(tagged_file.tags().iter())
+        .flat_map(Tag::pictures)
+        .find_map(cover_art_from_picture)
+}
+
+fn cover_art_from_picture(picture: &Picture) -> Option<EmbeddedCoverArt> {
+    let data = picture.data();
+    let extension = image_extension(data)?;
+
+    Some(EmbeddedCoverArt {
+        extension,
+        data: data.to_vec(),
+    })
+}
+
+fn image_extension(data: &[u8]) -> Option<&'static str> {
+    if data.starts_with(&[0xff, 0xd8, 0xff]) {
+        return Some("jpg");
+    }
+
+    if data.starts_with(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]) {
+        return Some("png");
+    }
+
+    if data.len() >= 12 && data.starts_with(b"RIFF") && &data[8..12] == b"WEBP" {
+        return Some("webp");
+    }
+
+    if data.starts_with(b"GIF87a") || data.starts_with(b"GIF89a") {
+        return Some("gif");
+    }
+
+    if data.starts_with(b"BM") {
+        return Some("bmp");
+    }
+
+    if data.starts_with(&[b'I', b'I', 0x2a, 0x00]) || data.starts_with(&[b'M', b'M', 0x00, 0x2a])
+    {
+        return Some("tif");
+    }
+
+    None
 }
 
 fn clean_text(value: Option<String>) -> Option<String> {
