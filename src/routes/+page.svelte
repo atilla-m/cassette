@@ -23,6 +23,7 @@
   import { albums as mockAlbums, artists as mockArtists, genres as mockGenres, navItems } from "$lib/data/mockLibrary";
   import type { Album, Artist, Genre, PlaybackStatus, Track } from "$lib/types/library";
   import { localImageSource } from "$lib/utils/localImage";
+  import { listen } from "@tauri-apps/api/event";
   import { onMount } from "svelte";
 
   type SongSortKey = "title" | "artist" | "album" | "duration";
@@ -37,6 +38,25 @@
     offset: number;
   };
   type MixCategory = "genre" | "artist" | "album";
+  type DuplicateAlbumGroup = {
+    title: string;
+    albums: Album[];
+    folders: string[];
+    trackCount: number;
+  };
+  type LibraryDiagnostics = {
+    totalTracks: number;
+    totalAlbums: number;
+    totalArtists: number;
+    missingGenreTracks: Track[];
+    missingCoverTracks: Track[];
+    missingCoverAlbums: Album[];
+    unknownArtistTracks: Track[];
+    unknownAlbumTracks: Track[];
+    missingTrackNumberTracks: Track[];
+    missingYearTracks: Track[];
+    duplicateAlbumGroups: DuplicateAlbumGroup[];
+  };
 
   const mixFormatOptions = ["All", "FLAC", "MP3", "OGG", "OPUS", "WAV", "M4A"];
 
@@ -64,6 +84,7 @@
   let selectedGenreName = $state<string | null>(null);
   let isLikedSongsOpen = $state(false);
   let isMixBuilderOpen = $state(false);
+  let isLibraryHealthOpen = $state(false);
   let searchQuery = $state("");
   let songSort = $state<SongSortKey>("title");
   let songSortDirection = $state<SortDirection>("asc");
@@ -136,6 +157,8 @@
   let selectedGenreArtists = $derived(selectedGenre ? buildArtists(selectedGenreTracks) : []);
   let selectedAlbumGenreText = $derived(genreDisplayForTracks(selectedAlbumTracks));
   let selectedArtistGenreText = $derived(genreDisplayForTracks(selectedArtistTracks));
+  let libraryDiagnostics = $derived(buildLibraryDiagnostics(tracks, displayAlbums, displayArtists));
+  let libraryHealthIssueCount = $derived(libraryHealthTotalIssueCount(libraryDiagnostics));
   let mixSelectedGenreSet = $derived(new Set(mixSelectedGenres));
   let mixSelectedArtistSet = $derived(new Set(mixSelectedArtists));
   let mixSelectedAlbumSet = $derived(new Set(mixSelectedAlbums));
@@ -181,6 +204,15 @@
 
   onMount(() => {
     void loadLibraryCache();
+    const mprisUnlisteners = [
+      listen("mpris-play-pause", () => void handleTogglePlayback()),
+      listen("mpris-play", () => void handleMprisPlay()),
+      listen("mpris-pause", () => void handleMprisPause()),
+      listen("mpris-stop", () => void handleMprisStop()),
+      listen("mpris-next", () => void handleNextTrack()),
+      listen("mpris-previous", () => void handlePreviousTrack()),
+      listen<number>("mpris-seek", (event) => void handleSeek(event.payload)),
+    ];
 
     const statusIntervalId = window.setInterval(async () => {
       if (!currentTrack || !isPlaying) {
@@ -235,6 +267,9 @@
       window.clearInterval(statusIntervalId);
       window.clearInterval(progressIntervalId);
       window.removeEventListener("keydown", handleKeydown);
+      for (const unlisten of mprisUnlisteners) {
+        void unlisten.then((cleanup) => cleanup());
+      }
     };
   });
 
@@ -272,6 +307,7 @@
       clearGenreEditState();
       isLikedSongsOpen = false;
       isMixBuilderOpen = false;
+      isLibraryHealthOpen = false;
       clearMixSelection();
       searchQuery = "";
       currentTrackIndex = null;
@@ -316,6 +352,7 @@
     clearGenreEditState();
     isLikedSongsOpen = false;
     isMixBuilderOpen = false;
+    isLibraryHealthOpen = false;
     mainElement?.scrollTo({ top: 0 });
   }
 
@@ -329,6 +366,7 @@
     albumGenreDraft = genreDraftForTracks(tracks.filter((track) => albumIdForTrack(track) === album.id));
     isLikedSongsOpen = false;
     isMixBuilderOpen = false;
+    isLibraryHealthOpen = false;
     mainElement?.scrollTo({ top: 0 });
   }
 
@@ -342,6 +380,7 @@
     artistGenreDraft = genreDraftForTracks(tracks.filter((track) => artistNameForTrack(track) === artist.name));
     isLikedSongsOpen = false;
     isMixBuilderOpen = false;
+    isLibraryHealthOpen = false;
     mainElement?.scrollTo({ top: 0 });
   }
 
@@ -354,6 +393,7 @@
     clearGenreEditState();
     isLikedSongsOpen = false;
     isMixBuilderOpen = false;
+    isLibraryHealthOpen = false;
     mainElement?.scrollTo({ top: 0 });
   }
 
@@ -365,6 +405,7 @@
     clearGenreEditState();
     isLikedSongsOpen = true;
     isMixBuilderOpen = false;
+    isLibraryHealthOpen = false;
     searchQuery = "";
     mainElement?.scrollTo({ top: 0 });
   }
@@ -377,7 +418,21 @@
     clearGenreEditState();
     isLikedSongsOpen = false;
     isMixBuilderOpen = true;
+    isLibraryHealthOpen = false;
     mixMessage = null;
+    searchQuery = "";
+    mainElement?.scrollTo({ top: 0 });
+  }
+
+  function handleLibraryHealthSelect() {
+    activeView = "Settings";
+    selectedAlbumId = null;
+    selectedArtistName = null;
+    selectedGenreName = null;
+    clearGenreEditState();
+    isLikedSongsOpen = false;
+    isMixBuilderOpen = false;
+    isLibraryHealthOpen = true;
     searchQuery = "";
     mainElement?.scrollTo({ top: 0 });
   }
@@ -403,6 +458,11 @@
     isLikedSongsOpen = false;
     isMixBuilderOpen = false;
     mixMessage = null;
+    mainElement?.scrollTo({ top: 0 });
+  }
+
+  function handleBackToSettings() {
+    isLibraryHealthOpen = false;
     mainElement?.scrollTo({ top: 0 });
   }
 
@@ -675,6 +735,39 @@
     }
   }
 
+  async function handleMprisPlay() {
+    if (!currentTrack || isPlaying) {
+      return;
+    }
+
+    await handleTogglePlayback();
+  }
+
+  async function handleMprisPause() {
+    if (!currentTrack || !isPlaying) {
+      return;
+    }
+
+    await handleTogglePlayback();
+  }
+
+  async function handleMprisStop() {
+    if (!currentTrack) {
+      return;
+    }
+
+    playbackError = null;
+
+    try {
+      applyPlaybackStatus(await pausePlayback());
+      applyPlaybackStatus(await seekPlayback(0));
+      positionSeconds = 0;
+      hasCurrentTrackEnded = false;
+    } catch (error) {
+      playbackError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
   async function handleSeek(nextPositionSeconds: number) {
     playbackError = null;
 
@@ -760,6 +853,122 @@
 
   function trackGenres(track: Track) {
     return track.genres.length > 0 ? track.genres : ["Unknown Genre"];
+  }
+
+  function buildLibraryDiagnostics(libraryTracks: Track[], albums: Album[], artists: Artist[]): LibraryDiagnostics {
+    const missingGenreTracks = libraryTracks.filter(trackMissingGenre);
+    const missingCoverTracks = libraryTracks.filter((track) => !track.coverArtPath);
+    const missingCoverAlbums = albums.filter((album) => !album.coverArtPath);
+
+    return {
+      totalTracks: libraryTracks.length,
+      totalAlbums: albums.length,
+      totalArtists: artists.length,
+      missingGenreTracks,
+      missingCoverTracks,
+      missingCoverAlbums,
+      unknownArtistTracks: libraryTracks.filter(trackUnknownArtist),
+      unknownAlbumTracks: libraryTracks.filter(trackUnknownAlbum),
+      missingTrackNumberTracks: libraryTracks.filter((track) => track.trackNumber === null),
+      missingYearTracks: libraryTracks.filter((track) => track.year === null),
+      duplicateAlbumGroups: buildDuplicateAlbumGroups(libraryTracks, albums),
+    };
+  }
+
+  function libraryHealthTotalIssueCount(diagnostics: LibraryDiagnostics) {
+    return diagnostics.missingGenreTracks.length
+      + diagnostics.missingCoverTracks.length
+      + diagnostics.unknownArtistTracks.length
+      + diagnostics.unknownAlbumTracks.length
+      + diagnostics.missingTrackNumberTracks.length
+      + diagnostics.missingYearTracks.length
+      + diagnostics.duplicateAlbumGroups.length;
+  }
+
+  function trackMissingGenre(track: Track) {
+    const genres = trackGenres(track);
+
+    return genres.length === 0 || genres.every((genre) => genre === "Unknown Genre");
+  }
+
+  function trackUnknownArtist(track: Track) {
+    return textMissingOrUnknown(track.artist, "Unknown Artist");
+  }
+
+  function trackUnknownAlbum(track: Track) {
+    return textMissingOrUnknown(track.album, "Unknown Album");
+  }
+
+  function textMissingOrUnknown(value: string | null | undefined, unknownLabel: string) {
+    const normalized = value?.trim().toLocaleLowerCase();
+
+    return !normalized || normalized === unknownLabel.toLocaleLowerCase();
+  }
+
+  function buildDuplicateAlbumGroups(libraryTracks: Track[], albums: Album[]) {
+    const albumsById = new Map(albums.map((album) => [album.id, album]));
+    const groupsByTitle = new Map<string, {
+      title: string;
+      albumIds: Set<string>;
+      artists: Set<string>;
+      folders: Set<string>;
+      trackCount: number;
+    }>();
+
+    for (const track of libraryTracks) {
+      if (trackUnknownAlbum(track)) {
+        continue;
+      }
+
+      const title = track.album?.trim() ?? "";
+      const key = title.toLocaleLowerCase();
+      const group = groupsByTitle.get(key) ?? {
+        title,
+        albumIds: new Set<string>(),
+        artists: new Set<string>(),
+        folders: new Set<string>(),
+        trackCount: 0,
+      };
+
+      group.albumIds.add(albumIdForTrack(track));
+      group.artists.add(track.albumArtist ?? track.artist ?? "Unknown Artist");
+      group.folders.add(folderForTrack(track));
+      group.trackCount += 1;
+      groupsByTitle.set(key, group);
+    }
+
+    return [...groupsByTitle.values()]
+      .filter((group) => group.albumIds.size > 1 && (group.artists.size > 1 || group.folders.size > 1))
+      .map((group) => ({
+        title: group.title,
+        albums: [...group.albumIds]
+          .map((albumId) => albumsById.get(albumId))
+          .filter((album): album is Album => Boolean(album)),
+        folders: [...group.folders].filter((folder) => folder !== "Unknown Folder").sort(),
+        trackCount: group.trackCount,
+      }))
+      .filter((group) => group.albums.length > 1)
+      .sort((left, right) => left.title.localeCompare(right.title));
+  }
+
+  function folderForTrack(track: Track) {
+    const parts = track.filePath.split(/[\\/]/).filter(Boolean);
+
+    if (parts.length <= 1) {
+      return "Unknown Folder";
+    }
+
+    return parts.slice(0, -1).join("/");
+  }
+
+  function folderLabel(path: string) {
+    const parts = path.split(/[\\/]/).filter(Boolean);
+
+    return parts.slice(-2).join("/") || path;
+  }
+
+  function issueCountLabel(count: number, noun = "track") {
+    return `${count} ${count === 1 ? noun : `${noun}s`}`;
   }
 
   function toggleSelection(values: string[], value: string) {
@@ -1999,21 +2208,177 @@
           </section>
         {/if}
       {:else if activeView === "Settings"}
-        <section class="placeholder-panel" aria-labelledby="settings-title">
-          <p class="eyebrow">Library</p>
-          <h3 id="settings-title">Settings</h3>
-          <div class="settings-grid">
-            <div>
-              <span>Library folder</span>
-              <p>{scannedFolder ?? "No folder scanned"}</p>
+        {#if isLibraryHealthOpen}
+          <section class="detail-view health-detail" aria-labelledby="library-health-title">
+            <button class="back-button" type="button" onclick={handleBackToSettings}>Back to Settings</button>
+            <div class="playlist-detail-header">
+              <div class="health-mark" aria-hidden="true">H</div>
+              <div class="detail-copy">
+                <p class="eyebrow">Library Diagnostics</p>
+                <h3 id="library-health-title">Library Health</h3>
+                <p>{libraryHealthIssueCount} {libraryHealthIssueCount === 1 ? "issue" : "issues"} found in {libraryDiagnostics.totalTracks} {libraryDiagnostics.totalTracks === 1 ? "track" : "tracks"}</p>
+              </div>
             </div>
-            <div>
-              <span>Tracks</span>
-              <p>{scanCount ?? tracks.length}</p>
+
+            <div class="health-summary-grid" aria-label="Library health summary">
+              <div><span>Total tracks</span><strong>{libraryDiagnostics.totalTracks}</strong></div>
+              <div><span>Total albums</span><strong>{libraryDiagnostics.totalAlbums}</strong></div>
+              <div><span>Total artists</span><strong>{libraryDiagnostics.totalArtists}</strong></div>
+              <div class:issue={libraryDiagnostics.missingGenreTracks.length > 0}><span>Missing genre</span><strong>{libraryDiagnostics.missingGenreTracks.length}</strong></div>
+              <div class:issue={libraryDiagnostics.missingCoverTracks.length > 0}><span>Missing cover art</span><strong>{libraryDiagnostics.missingCoverTracks.length}</strong></div>
+              <div class:issue={libraryDiagnostics.unknownArtistTracks.length > 0}><span>Unknown artist</span><strong>{libraryDiagnostics.unknownArtistTracks.length}</strong></div>
+              <div class:issue={libraryDiagnostics.unknownAlbumTracks.length > 0}><span>Unknown album</span><strong>{libraryDiagnostics.unknownAlbumTracks.length}</strong></div>
+              <div class:issue={libraryDiagnostics.missingTrackNumberTracks.length > 0}><span>Missing track number</span><strong>{libraryDiagnostics.missingTrackNumberTracks.length}</strong></div>
+              <div class:issue={libraryDiagnostics.missingYearTracks.length > 0}><span>Missing year</span><strong>{libraryDiagnostics.missingYearTracks.length}</strong></div>
+              <div class:issue={libraryDiagnostics.duplicateAlbumGroups.length > 0}><span>Possible duplicate albums</span><strong>{libraryDiagnostics.duplicateAlbumGroups.length}</strong></div>
             </div>
-          </div>
-          <p>More playback, library, and appearance settings will live here later.</p>
-        </section>
+
+            <LibrarySection title="Missing Genre" viewAllLabel={issueCountLabel(libraryDiagnostics.missingGenreTracks.length)}>
+              {#if libraryDiagnostics.missingGenreTracks.length === 0}
+                <div class="group-empty compact">
+                  <h3>No issues found</h3>
+                  <p>All cached tracks have genre data or a Cassette genre assignment.</p>
+                </div>
+              {:else}
+                <div class="diagnostic-album-list">
+                  {#each albumsForTracks(libraryDiagnostics.missingGenreTracks, sortedAlbums) as album}
+                    <button class="diagnostic-album-card" type="button" onclick={() => handleAlbumSelect(album)}>
+                      <span>{album.title.slice(0, 1)}</span>
+                      <div>
+                        <strong>{album.title}</strong>
+                        <small>{album.artist} · open album to set genre</small>
+                      </div>
+                    </button>
+                  {/each}
+                </div>
+                <TrackList
+                  tracks={libraryDiagnostics.missingGenreTracks}
+                  isScanning={false}
+                  selectedTrackId={currentTrack?.id}
+                  onTrackSelect={handleTrackSelect}
+                  onToggleFavorite={handleToggleFavorite}
+                />
+              {/if}
+            </LibrarySection>
+
+            <LibrarySection title="Missing Cover Art" viewAllLabel={`${issueCountLabel(libraryDiagnostics.missingCoverTracks.length)} · ${issueCountLabel(libraryDiagnostics.missingCoverAlbums.length, "album")}`}>
+              {#if libraryDiagnostics.missingCoverTracks.length === 0 && libraryDiagnostics.missingCoverAlbums.length === 0}
+                <div class="group-empty compact">
+                  <h3>No issues found</h3>
+                  <p>All cached tracks and albums have cover art.</p>
+                </div>
+              {:else}
+                {#if libraryDiagnostics.missingCoverAlbums.length > 0}
+                  <div class="diagnostic-album-list">
+                    {#each libraryDiagnostics.missingCoverAlbums as album}
+                      <button class="diagnostic-album-card" type="button" onclick={() => handleAlbumSelect(album)}>
+                        <span>{album.title.slice(0, 1)}</span>
+                        <div>
+                          <strong>{album.title}</strong>
+                          <small>{album.artist} · {album.trackCount} {album.trackCount === 1 ? "track" : "tracks"}</small>
+                        </div>
+                      </button>
+                    {/each}
+                  </div>
+                {/if}
+                <TrackList
+                  tracks={libraryDiagnostics.missingCoverTracks}
+                  isScanning={false}
+                  selectedTrackId={currentTrack?.id}
+                  onTrackSelect={handleTrackSelect}
+                  onToggleFavorite={handleToggleFavorite}
+                />
+              {/if}
+            </LibrarySection>
+
+            <LibrarySection title="Unknown Artist" viewAllLabel={issueCountLabel(libraryDiagnostics.unknownArtistTracks.length)}>
+              {#if libraryDiagnostics.unknownArtistTracks.length === 0}
+                <div class="group-empty compact"><h3>No issues found</h3><p>No tracks have an empty or unknown artist.</p></div>
+              {:else}
+                <TrackList tracks={libraryDiagnostics.unknownArtistTracks} isScanning={false} selectedTrackId={currentTrack?.id} onTrackSelect={handleTrackSelect} onToggleFavorite={handleToggleFavorite} />
+              {/if}
+            </LibrarySection>
+
+            <LibrarySection title="Unknown Album" viewAllLabel={issueCountLabel(libraryDiagnostics.unknownAlbumTracks.length)}>
+              {#if libraryDiagnostics.unknownAlbumTracks.length === 0}
+                <div class="group-empty compact"><h3>No issues found</h3><p>No tracks have an empty or unknown album.</p></div>
+              {:else}
+                <TrackList tracks={libraryDiagnostics.unknownAlbumTracks} isScanning={false} selectedTrackId={currentTrack?.id} onTrackSelect={handleTrackSelect} onToggleFavorite={handleToggleFavorite} />
+              {/if}
+            </LibrarySection>
+
+            <LibrarySection title="Missing Track Number" viewAllLabel={issueCountLabel(libraryDiagnostics.missingTrackNumberTracks.length)}>
+              {#if libraryDiagnostics.missingTrackNumberTracks.length === 0}
+                <div class="group-empty compact"><h3>No issues found</h3><p>All cached tracks have track numbers.</p></div>
+              {:else}
+                <TrackList tracks={libraryDiagnostics.missingTrackNumberTracks} isScanning={false} selectedTrackId={currentTrack?.id} onTrackSelect={handleTrackSelect} onToggleFavorite={handleToggleFavorite} />
+              {/if}
+            </LibrarySection>
+
+            <LibrarySection title="Missing Year" viewAllLabel={issueCountLabel(libraryDiagnostics.missingYearTracks.length)}>
+              {#if libraryDiagnostics.missingYearTracks.length === 0}
+                <div class="group-empty compact"><h3>No issues found</h3><p>All cached tracks have year metadata.</p></div>
+              {:else}
+                <TrackList tracks={libraryDiagnostics.missingYearTracks} isScanning={false} selectedTrackId={currentTrack?.id} onTrackSelect={handleTrackSelect} onToggleFavorite={handleToggleFavorite} />
+              {/if}
+            </LibrarySection>
+
+            <LibrarySection title="Possible Duplicate Albums" viewAllLabel={issueCountLabel(libraryDiagnostics.duplicateAlbumGroups.length, "group")}>
+              {#if libraryDiagnostics.duplicateAlbumGroups.length === 0}
+                <div class="group-empty compact">
+                  <h3>No issues found</h3>
+                  <p>No conservative duplicate album candidates were found.</p>
+                </div>
+              {:else}
+                <div class="duplicate-album-list">
+                  {#each libraryDiagnostics.duplicateAlbumGroups as group}
+                    <article class="duplicate-album-card">
+                      <div>
+                        <p class="eyebrow">Same album title</p>
+                        <h3>{group.title}</h3>
+                        <p>{group.trackCount} {group.trackCount === 1 ? "track" : "tracks"} · {group.albums.length} album entries</p>
+                      </div>
+                      <div class="duplicate-album-actions">
+                        {#each group.albums as album}
+                          <button type="button" onclick={() => handleAlbumSelect(album)}>
+                            {album.artist} · {album.trackCount} {album.trackCount === 1 ? "track" : "tracks"}
+                          </button>
+                        {/each}
+                      </div>
+                      {#if group.folders.length > 0}
+                        <p class="duplicate-folders">{group.folders.map(folderLabel).join(" · ")}</p>
+                      {/if}
+                    </article>
+                  {/each}
+                </div>
+              {/if}
+            </LibrarySection>
+          </section>
+        {:else}
+          <section class="placeholder-panel settings-panel" aria-labelledby="settings-title">
+            <p class="eyebrow">Library</p>
+            <h3 id="settings-title">Settings</h3>
+            <div class="settings-grid">
+              <div>
+                <span>Library folder</span>
+                <p>{scannedFolder ?? "No folder scanned"}</p>
+              </div>
+              <div>
+                <span>Tracks</span>
+                <p>{scanCount ?? tracks.length}</p>
+              </div>
+            </div>
+            <button class="health-card" type="button" onclick={handleLibraryHealthSelect}>
+              <span class="health-mark" aria-hidden="true">H</span>
+              <span>
+                <span class="eyebrow">Diagnostics</span>
+                <strong>Library Health</strong>
+                <small>{libraryHealthIssueCount} {libraryHealthIssueCount === 1 ? "issue" : "issues"} found · {libraryDiagnostics.totalAlbums} {libraryDiagnostics.totalAlbums === 1 ? "album" : "albums"} · {libraryDiagnostics.totalArtists} {libraryDiagnostics.totalArtists === 1 ? "artist" : "artists"}</small>
+              </span>
+            </button>
+            <p>More playback, library, and appearance settings will live here later.</p>
+          </section>
+        {/if}
       {/if}
     </main>
   </div>
@@ -2518,7 +2883,8 @@
   }
 
   .liked-mark,
-  .mix-mark {
+  .mix-mark,
+  .health-mark {
     display: grid;
     width: 58px;
     height: 58px;
@@ -2537,6 +2903,11 @@
   .mix-mark {
     background: #17332f;
     color: #9ee3d9;
+  }
+
+  .health-mark {
+    background: #1b2633;
+    color: #8fb9f2;
   }
 
   .detail-view {
@@ -2916,6 +3287,10 @@
     margin-bottom: 8px;
   }
 
+  .settings-panel {
+    max-width: 960px;
+  }
+
   .settings-grid {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -2946,6 +3321,216 @@
     color: #f4f7fb;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .health-card {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    width: 100%;
+    min-height: 112px;
+    margin: 18px 0;
+    border: 1px solid #2a313c;
+    border-radius: 8px;
+    background: #12161c;
+    color: inherit;
+    cursor: default;
+    font: inherit;
+    padding: 16px;
+    text-align: left;
+  }
+
+  .health-card:hover,
+  .health-card:focus-visible {
+    border-color: #35544f;
+    background: #171d24;
+    outline: none;
+  }
+
+  .health-card > span:last-child {
+    display: grid;
+    min-width: 0;
+    gap: 4px;
+  }
+
+  .health-card strong,
+  .health-card small {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .health-card strong {
+    color: #f4f7fb;
+    font-size: 1.08rem;
+    line-height: 1.2;
+  }
+
+  .health-card small {
+    color: #8f9aa8;
+    font-size: 0.88rem;
+    font-weight: 700;
+  }
+
+  .health-summary-grid {
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 10px;
+  }
+
+  .health-summary-grid div {
+    min-width: 0;
+    border: 1px solid #242b35;
+    border-radius: 8px;
+    background: #12161c;
+    padding: 12px;
+  }
+
+  .health-summary-grid div.issue {
+    border-color: #45412a;
+    background: #1d1b12;
+  }
+
+  .health-summary-grid span {
+    display: block;
+    overflow: hidden;
+    margin-bottom: 5px;
+    color: #8f9aa8;
+    font-size: 0.75rem;
+    font-weight: 850;
+    text-overflow: ellipsis;
+    text-transform: uppercase;
+    white-space: nowrap;
+  }
+
+  .health-summary-grid strong {
+    color: #f4f7fb;
+    font-size: 1.25rem;
+    line-height: 1;
+  }
+
+  .group-empty.compact {
+    min-height: 82px;
+  }
+
+  .diagnostic-album-list,
+  .duplicate-album-list {
+    display: grid;
+    gap: 10px;
+  }
+
+  .diagnostic-album-list {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    margin-bottom: 12px;
+  }
+
+  .diagnostic-album-card {
+    display: grid;
+    grid-template-columns: 42px minmax(0, 1fr);
+    align-items: center;
+    gap: 10px;
+    min-height: 66px;
+    border: 1px solid #242b35;
+    border-radius: 8px;
+    background: #151a21;
+    color: inherit;
+    cursor: default;
+    font: inherit;
+    padding: 10px;
+    text-align: left;
+  }
+
+  .diagnostic-album-card:hover,
+  .diagnostic-album-card:focus-visible {
+    border-color: #35544f;
+    background: #1b2027;
+    outline: none;
+  }
+
+  .diagnostic-album-card > span:first-child {
+    display: grid;
+    width: 42px;
+    height: 42px;
+    place-items: center;
+    border-radius: 8px;
+    background: #17332f;
+    color: #9ee3d9;
+    font-weight: 900;
+  }
+
+  .diagnostic-album-card div {
+    min-width: 0;
+  }
+
+  .diagnostic-album-card strong,
+  .diagnostic-album-card small {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .diagnostic-album-card strong {
+    color: #f4f7fb;
+    font-size: 0.9rem;
+    line-height: 1.25;
+  }
+
+  .diagnostic-album-card small {
+    margin-top: 3px;
+    color: #8f9aa8;
+    font-size: 0.78rem;
+    font-weight: 700;
+  }
+
+  .duplicate-album-card {
+    display: grid;
+    gap: 12px;
+    border: 1px solid #242b35;
+    border-radius: 8px;
+    background: #151a21;
+    padding: 14px;
+  }
+
+  .duplicate-album-card h3 {
+    margin-bottom: 5px;
+  }
+
+  .duplicate-album-card p:not(.eyebrow) {
+    margin: 0;
+    color: #8f9aa8;
+    font-weight: 700;
+  }
+
+  .duplicate-album-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .duplicate-album-actions button {
+    min-height: 34px;
+    border: 1px solid #303844;
+    border-radius: 8px;
+    background: #12161c;
+    color: #d5dce5;
+    cursor: default;
+    font: inherit;
+    font-size: 0.82rem;
+    font-weight: 800;
+    padding: 0 11px;
+  }
+
+  .duplicate-album-actions button:hover,
+  .duplicate-album-actions button:focus-visible {
+    border-color: #35544f;
+    background: #1b2027;
+    outline: none;
+  }
+
+  .duplicate-folders {
+    overflow-wrap: anywhere;
+    font-size: 0.82rem;
   }
 
   .queue-panel {
@@ -3089,6 +3674,14 @@
     .mix-option-grid {
       grid-template-columns: repeat(2, minmax(0, 1fr));
     }
+
+    .health-summary-grid {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    .diagnostic-album-list {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
   }
 
   @media (max-width: 760px) {
@@ -3142,6 +3735,11 @@
       justify-content: flex-start;
     }
 
+    .health-summary-grid,
+    .diagnostic-album-list {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
     .queue-panel {
       left: 16px;
       right: 16px;
@@ -3157,6 +3755,8 @@
     .genre-grid,
     .playlist-grid,
     .mix-option-grid,
+    .health-summary-grid,
+    .diagnostic-album-list,
     .settings-grid {
       grid-template-columns: 1fr;
     }

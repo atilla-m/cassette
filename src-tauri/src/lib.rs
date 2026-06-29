@@ -14,6 +14,10 @@ use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Manager, State};
 
+mod mpris;
+
+use mpris::{MprisState, MprisTrack};
+
 const SUPPORTED_EXTENSIONS: &[&str] = &["flac", "mp3", "ogg", "opus", "wav", "m4a"];
 const COVER_IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "webp"];
 const PREFERRED_COVER_NAMES: &[&str] = &["cover", "folder", "front", "album"];
@@ -477,6 +481,48 @@ impl LibraryDatabase {
         Ok(next)
     }
 
+    fn track_by_id(&self, id: &str) -> Result<Option<Track>, String> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "
+                SELECT
+                    id,
+                    title,
+                    artist,
+                    album,
+                    album_artist,
+                    track_number,
+                    disc_number,
+                    year,
+                    duration_seconds,
+                    file_path,
+                    file_name,
+                    extension,
+                    modified_time,
+                    file_size,
+                    scanned_at,
+                    cover_art_path,
+                    is_favorite,
+                    genres
+                FROM tracks
+                WHERE id = ?1
+                ",
+            )
+            .map_err(|error| format!("Could not prepare track lookup: {error}"))?;
+        let mut track = statement
+            .query_row([id], row_to_track)
+            .optional()
+            .map_err(|error| format!("Could not read cached track: {error}"))?;
+
+        if let Some(track) = track.as_mut() {
+            let genre_assignments = self.genre_assignments()?;
+            apply_genre_assignments(std::slice::from_mut(track), &genre_assignments);
+        }
+
+        Ok(track)
+    }
+
     fn set_genres(
         &self,
         scope: &str,
@@ -555,67 +601,102 @@ impl LibraryDatabase {
 fn play_track(
     file_path: String,
     playback: State<'_, Mutex<PlaybackState>>,
+    library: State<'_, Mutex<LibraryDatabase>>,
+    mpris: State<'_, MprisState>,
+) -> Result<PlaybackStatus, String> {
+    let status = {
+        let mut playback = playback
+            .lock()
+            .map_err(|_| "Playback state is unavailable.".to_owned())?;
+
+        playback.play(&file_path)?
+    };
+    let track = library
+        .lock()
+        .ok()
+        .and_then(|library| library.track_by_id(&file_path).ok().flatten())
+        .map(|track| MprisTrack::from(&track));
+    mpris.update_track(track, status.is_playing);
+
+    Ok(status)
+}
+
+#[tauri::command]
+fn pause_playback(
+    playback: State<'_, Mutex<PlaybackState>>,
+    mpris: State<'_, MprisState>,
 ) -> Result<PlaybackStatus, String> {
     let mut playback = playback
         .lock()
         .map_err(|_| "Playback state is unavailable.".to_owned())?;
 
-    playback.play(&file_path)
+    let status = playback.pause()?;
+    mpris.update_playback(status.is_playing, status.position_seconds, status.volume);
+
+    Ok(status)
 }
 
 #[tauri::command]
-fn pause_playback(playback: State<'_, Mutex<PlaybackState>>) -> Result<PlaybackStatus, String> {
+fn resume_playback(
+    playback: State<'_, Mutex<PlaybackState>>,
+    mpris: State<'_, MprisState>,
+) -> Result<PlaybackStatus, String> {
     let mut playback = playback
         .lock()
         .map_err(|_| "Playback state is unavailable.".to_owned())?;
 
-    playback.pause()
-}
+    let status = playback.resume()?;
+    mpris.update_playback(status.is_playing, status.position_seconds, status.volume);
 
-#[tauri::command]
-fn resume_playback(playback: State<'_, Mutex<PlaybackState>>) -> Result<PlaybackStatus, String> {
-    let mut playback = playback
-        .lock()
-        .map_err(|_| "Playback state is unavailable.".to_owned())?;
-
-    playback.resume()
+    Ok(status)
 }
 
 #[tauri::command]
 fn get_playback_status(
     playback: State<'_, Mutex<PlaybackState>>,
+    mpris: State<'_, MprisState>,
 ) -> Result<PlaybackStatus, String> {
     let mut playback = playback
         .lock()
         .map_err(|_| "Playback state is unavailable.".to_owned())?;
 
     playback.refresh()?;
+    let status = playback.status();
+    mpris.update_playback(status.is_playing, status.position_seconds, status.volume);
 
-    Ok(playback.status())
+    Ok(status)
 }
 
 #[tauri::command]
 fn seek_playback(
     position_seconds: u64,
     playback: State<'_, Mutex<PlaybackState>>,
+    mpris: State<'_, MprisState>,
 ) -> Result<PlaybackStatus, String> {
     let mut playback = playback
         .lock()
         .map_err(|_| "Playback state is unavailable.".to_owned())?;
 
-    playback.seek(position_seconds)
+    let status = playback.seek(position_seconds)?;
+    mpris.update_playback(status.is_playing, status.position_seconds, status.volume);
+
+    Ok(status)
 }
 
 #[tauri::command]
 fn set_playback_volume(
     volume: f64,
     playback: State<'_, Mutex<PlaybackState>>,
+    mpris: State<'_, MprisState>,
 ) -> Result<PlaybackStatus, String> {
     let mut playback = playback
         .lock()
         .map_err(|_| "Playback state is unavailable.".to_owned())?;
 
-    playback.set_volume(volume)
+    let status = playback.set_volume(volume)?;
+    mpris.update_playback(status.is_playing, status.position_seconds, status.volume);
+
+    Ok(status)
 }
 
 impl PlaybackState {
@@ -819,6 +900,18 @@ fn row_to_track(row: &rusqlite::Row<'_>) -> rusqlite::Result<Track> {
         is_favorite: row.get(16)?,
         genres: parse_cached_genres(row.get(17)?),
     })
+}
+
+impl From<&Track> for MprisTrack {
+    fn from(track: &Track) -> Self {
+        Self {
+            title: track.title.clone(),
+            artist: track.artist.clone().or_else(|| track.album_artist.clone()),
+            album: track.album.clone(),
+            duration_seconds: track.duration_seconds.map(u64::from),
+            art_path: track.cover_art_path.clone(),
+        }
+    }
 }
 
 fn parse_cached_genres(value: String) -> Vec<String> {
@@ -1409,8 +1502,10 @@ pub fn run() {
                 })?
                 .join("library.sqlite3");
             let library = LibraryDatabase::open(db_path).map_err(io::Error::other)?;
+            let mpris = MprisState::new(app.handle().clone());
 
             app.manage(Mutex::new(library));
+            app.manage(mpris);
 
             Ok(())
         })
