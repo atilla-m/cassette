@@ -36,6 +36,9 @@
     queueIndex: number;
     offset: number;
   };
+  type MixCategory = "genre" | "artist" | "album";
+
+  const mixFormatOptions = ["All", "FLAC", "MP3", "OGG", "OPUS", "WAV", "M4A"];
 
   let tracks = $state<Track[]>([]);
   let isScanning = $state(false);
@@ -60,6 +63,7 @@
   let selectedArtistName = $state<string | null>(null);
   let selectedGenreName = $state<string | null>(null);
   let isLikedSongsOpen = $state(false);
+  let isMixBuilderOpen = $state(false);
   let searchQuery = $state("");
   let songSort = $state<SongSortKey>("title");
   let songSortDirection = $state<SortDirection>("asc");
@@ -73,6 +77,12 @@
   let albumGenreDraft = $state("");
   let artistGenreDraft = $state("");
   let isSavingGenreAssignment = $state(false);
+  let mixSelectedGenres = $state<string[]>([]);
+  let mixSelectedArtists = $state<string[]>([]);
+  let mixSelectedAlbums = $state<string[]>([]);
+  let mixLikedOnly = $state(false);
+  let mixFormatFilter = $state("All");
+  let mixMessage = $state<string | null>(null);
   let isPlaying = $state(false);
   let hasCurrentTrackEnded = $state(false);
   let positionSeconds = $state(0);
@@ -126,6 +136,14 @@
   let selectedGenreArtists = $derived(selectedGenre ? buildArtists(selectedGenreTracks) : []);
   let selectedAlbumGenreText = $derived(genreDisplayForTracks(selectedAlbumTracks));
   let selectedArtistGenreText = $derived(genreDisplayForTracks(selectedArtistTracks));
+  let mixSelectedGenreSet = $derived(new Set(mixSelectedGenres));
+  let mixSelectedArtistSet = $derived(new Set(mixSelectedArtists));
+  let mixSelectedAlbumSet = $derived(new Set(mixSelectedAlbums));
+  let mixHasSelection = $derived(
+    mixSelectedGenres.length > 0 || mixSelectedArtists.length > 0 || mixSelectedAlbums.length > 0,
+  );
+  let mixTracks = $derived(buildMixTracks(tracks));
+  let mixSelectedSourceCount = $derived(mixSelectedGenres.length + mixSelectedArtists.length + mixSelectedAlbums.length);
   let playbackOrder = $derived(
     isShuffleEnabled
       ? normalizedQueueOrder(shuffledQueueOrder, playbackQueue.length)
@@ -253,6 +271,8 @@
       selectedGenreName = null;
       clearGenreEditState();
       isLikedSongsOpen = false;
+      isMixBuilderOpen = false;
+      clearMixSelection();
       searchQuery = "";
       currentTrackIndex = null;
       hasCurrentTrackEnded = false;
@@ -295,6 +315,7 @@
     selectedGenreName = null;
     clearGenreEditState();
     isLikedSongsOpen = false;
+    isMixBuilderOpen = false;
     mainElement?.scrollTo({ top: 0 });
   }
 
@@ -307,6 +328,7 @@
     clearGenreEditState();
     albumGenreDraft = genreDraftForTracks(tracks.filter((track) => albumIdForTrack(track) === album.id));
     isLikedSongsOpen = false;
+    isMixBuilderOpen = false;
     mainElement?.scrollTo({ top: 0 });
   }
 
@@ -319,6 +341,7 @@
     clearGenreEditState();
     artistGenreDraft = genreDraftForTracks(tracks.filter((track) => artistNameForTrack(track) === artist.name));
     isLikedSongsOpen = false;
+    isMixBuilderOpen = false;
     mainElement?.scrollTo({ top: 0 });
   }
 
@@ -330,6 +353,7 @@
     selectedArtistName = null;
     clearGenreEditState();
     isLikedSongsOpen = false;
+    isMixBuilderOpen = false;
     mainElement?.scrollTo({ top: 0 });
   }
 
@@ -340,6 +364,20 @@
     selectedGenreName = null;
     clearGenreEditState();
     isLikedSongsOpen = true;
+    isMixBuilderOpen = false;
+    searchQuery = "";
+    mainElement?.scrollTo({ top: 0 });
+  }
+
+  function handleMixBuilderSelect() {
+    activeView = "Playlists";
+    selectedAlbumId = null;
+    selectedArtistName = null;
+    selectedGenreName = null;
+    clearGenreEditState();
+    isLikedSongsOpen = false;
+    isMixBuilderOpen = true;
+    mixMessage = null;
     searchQuery = "";
     mainElement?.scrollTo({ top: 0 });
   }
@@ -363,6 +401,8 @@
 
   function handleBackToPlaylists() {
     isLikedSongsOpen = false;
+    isMixBuilderOpen = false;
+    mixMessage = null;
     mainElement?.scrollTo({ top: 0 });
   }
 
@@ -540,6 +580,53 @@
     await playQueuedTrackAtIndex(startIndex);
   }
 
+  async function handleStartMix() {
+    mixMessage = null;
+
+    if (!mixHasSelection) {
+      mixMessage = "Select at least one genre, artist, or album to start a mix.";
+      return;
+    }
+
+    if (mixTracks.length === 0) {
+      mixMessage = "No tracks match this mix.";
+      return;
+    }
+
+    const shuffledMix = shuffleTracks(mixTracks);
+    playbackQueue = shuffledMix;
+    currentQueueIndex = 0;
+    isShuffleEnabled = true;
+    shuffledQueueOrder = shuffledMix.map((_, index) => index);
+    isQueueOpen = true;
+    await playQueuedTrackAtIndex(0);
+  }
+
+  function handleToggleMixItem(category: MixCategory, value: string) {
+    mixMessage = null;
+
+    if (category === "genre") {
+      mixSelectedGenres = toggleSelection(mixSelectedGenres, value);
+    } else if (category === "artist") {
+      mixSelectedArtists = toggleSelection(mixSelectedArtists, value);
+    } else {
+      mixSelectedAlbums = toggleSelection(mixSelectedAlbums, value);
+    }
+  }
+
+  function handleClearMixSelection() {
+    clearMixSelection();
+  }
+
+  function clearMixSelection() {
+    mixSelectedGenres = [];
+    mixSelectedArtists = [];
+    mixSelectedAlbums = [];
+    mixLikedOnly = false;
+    mixFormatFilter = "All";
+    mixMessage = null;
+  }
+
   function handleToggleQueue() {
     isQueueOpen = !isQueueOpen;
   }
@@ -673,6 +760,77 @@
 
   function trackGenres(track: Track) {
     return track.genres.length > 0 ? track.genres : ["Unknown Genre"];
+  }
+
+  function toggleSelection(values: string[], value: string) {
+    return values.includes(value)
+      ? values.filter((candidate) => candidate !== value)
+      : [...values, value];
+  }
+
+  function buildMixTracks(libraryTracks: Track[]) {
+    if (!mixHasSelection) {
+      return [];
+    }
+
+    const seen = new Set<string>();
+    const mixTracks: Track[] = [];
+
+    for (const track of libraryTracks) {
+      if (!trackMatchesMixSelection(track) || !trackMatchesMixFilters(track)) {
+        continue;
+      }
+
+      if (!seen.has(track.id)) {
+        seen.add(track.id);
+        mixTracks.push(track);
+      }
+    }
+
+    return mixTracks;
+  }
+
+  function trackMatchesMixSelection(track: Track) {
+    return (
+      trackGenres(track).some((genre) => mixSelectedGenreSet.has(genre))
+      || mixSelectedArtistSet.has(artistNameForTrack(track))
+      || mixSelectedAlbumSet.has(albumIdForTrack(track))
+    );
+  }
+
+  function trackMatchesMixFilters(track: Track) {
+    if (mixLikedOnly && !track.isFavorite) {
+      return false;
+    }
+
+    if (mixFormatFilter !== "All" && track.extension.toUpperCase() !== mixFormatFilter) {
+      return false;
+    }
+
+    return true;
+  }
+
+  function mixTrackCountForGenre(genre: Genre) {
+    return tracks.filter((track) => trackGenres(track).includes(genre.name) && trackMatchesMixFilters(track)).length;
+  }
+
+  function mixTrackCountForArtist(artist: Artist) {
+    return tracks.filter((track) => artistNameForTrack(track) === artist.name && trackMatchesMixFilters(track)).length;
+  }
+
+  function mixTrackCountForAlbum(album: Album) {
+    return tracks.filter((track) => albumIdForTrack(track) === album.id && trackMatchesMixFilters(track)).length;
+  }
+
+  function shuffleTracks(libraryTracks: Track[]) {
+    const shuffled = [...libraryTracks];
+
+    for (let index = shuffled.length - 1; index > 0; index -= 1) {
+      const swapIndex = Math.floor(Math.random() * (index + 1));
+      [shuffled[index], shuffled[swapIndex]] = [shuffled[swapIndex], shuffled[index]];
+    }
+
+    return shuffled;
   }
 
   function parseGenreDraft(value: string) {
@@ -1691,6 +1849,135 @@
               {/if}
             </LibrarySection>
           </section>
+        {:else if isMixBuilderOpen}
+          <section class="detail-view" aria-labelledby="mix-builder-title">
+            <button class="back-button" type="button" onclick={handleBackToPlaylists}>Back to Playlists</button>
+            <div class="playlist-detail-header">
+              <div class="mix-mark" aria-hidden="true">M</div>
+              <div class="detail-copy">
+                <p class="eyebrow">Temporary Mix</p>
+                <h3 id="mix-builder-title">Mix Builder</h3>
+                <p>{mixSelectedSourceCount} {mixSelectedSourceCount === 1 ? "source" : "sources"} · {mixTracks.length} {mixTracks.length === 1 ? "track" : "tracks"} selected</p>
+              </div>
+            </div>
+
+            <div class="mix-builder-panel">
+              <div class="mix-builder-controls">
+                <label class="mix-toggle">
+                  <input type="checkbox" bind:checked={mixLikedOnly} onchange={() => mixMessage = null} />
+                  <span>Liked songs only</span>
+                </label>
+                <label>
+                  <span>Format</span>
+                  <select bind:value={mixFormatFilter} onchange={() => mixMessage = null}>
+                    {#each mixFormatOptions as format}
+                      <option value={format}>{format}</option>
+                    {/each}
+                  </select>
+                </label>
+              </div>
+              <div class="mix-builder-actions">
+                <p>{mixTracks.length} {mixTracks.length === 1 ? "track" : "tracks"} selected</p>
+                <button type="button" onclick={handleClearMixSelection} disabled={!mixHasSelection && !mixLikedOnly && mixFormatFilter === "All"}>
+                  Clear Selection
+                </button>
+                <button class="accent" type="button" onclick={() => void handleStartMix()}>
+                  Start Mix
+                </button>
+              </div>
+              {#if mixMessage}
+                <p class="mix-message" role="status">{mixMessage}</p>
+              {:else if mixHasSelection && mixTracks.length === 0}
+                <p class="mix-message" role="status">No tracks match this mix.</p>
+              {:else if !mixHasSelection}
+                <p class="mix-message" role="status">Select at least one source.</p>
+              {/if}
+            </div>
+
+            <LibrarySection title="Genres" viewAllLabel={`${mixSelectedGenres.length} selected`}>
+              {#if sortedGenres.length === 0}
+                <div class="group-empty">
+                  <h3>No genres found</h3>
+                  <p>Scan a music folder to build your local genre library.</p>
+                </div>
+              {:else}
+                <div class="mix-option-grid">
+                  {#each sortedGenres as genre}
+                    <label class:selected={mixSelectedGenreSet.has(genre.name)} class="mix-option-card">
+                      <input
+                        type="checkbox"
+                        checked={mixSelectedGenreSet.has(genre.name)}
+                        onchange={() => handleToggleMixItem("genre", genre.name)}
+                      />
+                      <span class="mix-option-mark" style={`--item-color: ${genre.color}`} aria-hidden="true">
+                        {genre.name.slice(0, 1)}
+                      </span>
+                      <span>
+                        <strong>{genre.name}</strong>
+                        <small>{mixTrackCountForGenre(genre)} {mixTrackCountForGenre(genre) === 1 ? "track" : "tracks"}</small>
+                      </span>
+                    </label>
+                  {/each}
+                </div>
+              {/if}
+            </LibrarySection>
+
+            <LibrarySection title="Artists" viewAllLabel={`${mixSelectedArtists.length} selected`}>
+              {#if sortedArtists.length === 0}
+                <div class="group-empty">
+                  <h3>No artists found</h3>
+                  <p>Scan a music folder to build your local artist library.</p>
+                </div>
+              {:else}
+                <div class="mix-option-grid">
+                  {#each sortedArtists as artist}
+                    <label class:selected={mixSelectedArtistSet.has(artist.name)} class="mix-option-card">
+                      <input
+                        type="checkbox"
+                        checked={mixSelectedArtistSet.has(artist.name)}
+                        onchange={() => handleToggleMixItem("artist", artist.name)}
+                      />
+                      <span class="mix-option-mark round" style={`--item-color: ${artist.color}`} aria-hidden="true">
+                        {artist.name.slice(0, 1)}
+                      </span>
+                      <span>
+                        <strong>{artist.name}</strong>
+                        <small>{mixTrackCountForArtist(artist)} {mixTrackCountForArtist(artist) === 1 ? "track" : "tracks"}</small>
+                      </span>
+                    </label>
+                  {/each}
+                </div>
+              {/if}
+            </LibrarySection>
+
+            <LibrarySection title="Albums" viewAllLabel={`${mixSelectedAlbums.length} selected`}>
+              {#if sortedAlbums.length === 0}
+                <div class="group-empty">
+                  <h3>No albums found</h3>
+                  <p>Scan a music folder to build your local album library.</p>
+                </div>
+              {:else}
+                <div class="mix-option-grid">
+                  {#each sortedAlbums as album}
+                    <label class:selected={mixSelectedAlbumSet.has(album.id)} class="mix-option-card">
+                      <input
+                        type="checkbox"
+                        checked={mixSelectedAlbumSet.has(album.id)}
+                        onchange={() => handleToggleMixItem("album", album.id)}
+                      />
+                      <span class="mix-option-mark" style={`--item-color: ${album.color}`} aria-hidden="true">
+                        {album.title.slice(0, 1)}
+                      </span>
+                      <span>
+                        <strong>{album.title}</strong>
+                        <small>{album.artist} · {mixTrackCountForAlbum(album)} {mixTrackCountForAlbum(album) === 1 ? "track" : "tracks"}</small>
+                      </span>
+                    </label>
+                  {/each}
+                </div>
+              {/if}
+            </LibrarySection>
+          </section>
         {:else}
           <section class="playlist-grid" aria-labelledby="playlists-title">
             <button class="playlist-card" type="button" onclick={handleLikedSongsSelect}>
@@ -1699,6 +1986,14 @@
                 <p class="eyebrow">Smart Playlist</p>
                 <h3 id="playlists-title">Liked Songs</h3>
                 <p>{favoriteTracks.length} {favoriteTracks.length === 1 ? "song" : "songs"}</p>
+              </div>
+            </button>
+            <button class="playlist-card" type="button" onclick={handleMixBuilderSelect}>
+              <div class="mix-mark" aria-hidden="true">M</div>
+              <div>
+                <p class="eyebrow">Temporary Mix</p>
+                <h3>Mix Builder</h3>
+                <p>{tracks.length} {tracks.length === 1 ? "track" : "tracks"} available</p>
               </div>
             </button>
           </section>
@@ -2052,7 +2347,8 @@
 
   .album-card,
   .artist-card > div:last-child,
-  .genre-card > div:last-child {
+  .genre-card > div:last-child,
+  .playlist-card > div:last-child {
     min-width: 0;
   }
 
@@ -2061,7 +2357,9 @@
   .artist-card h3,
   .artist-card p,
   .genre-card h3,
-  .genre-card p {
+  .genre-card p,
+  .playlist-card h3,
+  .playlist-card p:not(.eyebrow) {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -2219,17 +2517,26 @@
     font-weight: 650;
   }
 
-  .liked-mark {
+  .liked-mark,
+  .mix-mark {
     display: grid;
     width: 58px;
     height: 58px;
     flex: 0 0 auto;
     place-items: center;
     border-radius: 8px;
-    background: #262214;
-    color: #f0c85a;
     font-size: 1.45rem;
     font-weight: 900;
+  }
+
+  .liked-mark {
+    background: #262214;
+    color: #f0c85a;
+  }
+
+  .mix-mark {
+    background: #17332f;
+    color: #9ee3d9;
   }
 
   .detail-view {
@@ -2407,6 +2714,180 @@
     color: #9ee3d9;
   }
 
+  .mix-builder-panel {
+    display: grid;
+    grid-template-columns: minmax(240px, 1fr) auto;
+    gap: 14px;
+    align-items: center;
+    border: 1px solid #242b35;
+    border-radius: 8px;
+    background: #12161c;
+    padding: 14px;
+  }
+
+  .mix-builder-controls,
+  .mix-builder-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: center;
+  }
+
+  .mix-builder-controls label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 36px;
+    color: #8f9aa8;
+    font-size: 0.82rem;
+    font-weight: 800;
+  }
+
+  .mix-toggle input,
+  .mix-option-card input {
+    accent-color: #2f8f83;
+  }
+
+  .mix-builder-controls select {
+    min-height: 36px;
+    border: 1px solid #303844;
+    border-radius: 8px;
+    background: #0f1318;
+    color: #f4f7fb;
+    font: inherit;
+    font-size: 0.86rem;
+    font-weight: 750;
+    outline: none;
+    padding: 0 10px;
+  }
+
+  .mix-builder-controls select:focus {
+    border-color: #2f8f83;
+    box-shadow: 0 0 0 2px rgba(47, 143, 131, 0.18);
+  }
+
+  .mix-builder-actions {
+    justify-content: flex-end;
+  }
+
+  .mix-builder-actions p {
+    margin: 0;
+    color: #d5dce5;
+    font-size: 0.9rem;
+    font-weight: 800;
+  }
+
+  .mix-builder-actions button {
+    min-height: 36px;
+    border: 1px solid #303844;
+    border-radius: 8px;
+    background: #161a20;
+    color: #d5dce5;
+    cursor: default;
+    font: inherit;
+    font-size: 0.86rem;
+    font-weight: 850;
+    padding: 0 12px;
+  }
+
+  .mix-builder-actions button.accent {
+    border-color: #35544f;
+    background: #17332f;
+    color: #d8fffa;
+  }
+
+  .mix-builder-actions button:disabled {
+    border-color: #303844;
+    background: #151a21;
+    color: #626c79;
+  }
+
+  .mix-message {
+    grid-column: 1 / -1;
+    margin: 0;
+    color: #9aa4b1;
+    font-size: 0.9rem;
+    font-weight: 700;
+  }
+
+  .mix-option-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 10px;
+  }
+
+  .mix-option-card {
+    display: grid;
+    grid-template-columns: auto 42px minmax(0, 1fr);
+    align-items: center;
+    gap: 10px;
+    min-height: 68px;
+    border: 1px solid #242b35;
+    border-radius: 8px;
+    background: #151a21;
+    cursor: default;
+    padding: 10px;
+  }
+
+  .mix-option-card:hover,
+  .mix-option-card:focus-within {
+    border-color: #35544f;
+    background: #1b2027;
+  }
+
+  .mix-option-card.selected {
+    border-color: #2f8f83;
+    background: #14241f;
+    box-shadow: inset 0 0 0 1px rgba(47, 143, 131, 0.28);
+  }
+
+  .mix-option-card input {
+    width: 16px;
+    height: 16px;
+    margin: 0;
+  }
+
+  .mix-option-mark {
+    display: grid;
+    width: 42px;
+    height: 42px;
+    place-items: center;
+    border-radius: 8px;
+    background: var(--item-color);
+    color: #0d0f13;
+    font-size: 0.98rem;
+    font-weight: 900;
+  }
+
+  .mix-option-mark.round {
+    border-radius: 50%;
+  }
+
+  .mix-option-card > span:last-child {
+    min-width: 0;
+  }
+
+  .mix-option-card strong,
+  .mix-option-card small {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .mix-option-card strong {
+    color: #f4f7fb;
+    font-size: 0.9rem;
+    line-height: 1.25;
+  }
+
+  .mix-option-card small {
+    margin-top: 3px;
+    color: #8f9aa8;
+    font-size: 0.78rem;
+    font-weight: 700;
+  }
+
   .detail-view :global(.library-section + .library-section) {
     margin-top: 8px;
   }
@@ -2473,9 +2954,10 @@
     bottom: 104px;
     z-index: 4;
     display: grid;
+    grid-template-rows: auto minmax(0, 1fr);
     gap: 14px;
     width: min(420px, calc(100vw - 32px));
-    max-height: min(60vh, 520px);
+    max-height: min(520px, calc(100dvh - 136px));
     overflow: hidden;
     border: 1px solid #2a313c;
     border-radius: 8px;
@@ -2522,9 +3004,11 @@
 
   .queue-list {
     display: grid;
+    align-content: start;
     gap: 8px;
     min-height: 0;
-    overflow: auto;
+    overflow-y: auto;
+    overscroll-behavior: contain;
     padding-right: 2px;
   }
 
@@ -2601,6 +3085,10 @@
     .playlist-grid {
       grid-template-columns: repeat(2, minmax(0, 1fr));
     }
+
+    .mix-option-grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
   }
 
   @media (max-width: 760px) {
@@ -2646,9 +3134,20 @@
       grid-template-columns: 1fr;
     }
 
+    .mix-builder-panel {
+      grid-template-columns: 1fr;
+    }
+
+    .mix-builder-actions {
+      justify-content: flex-start;
+    }
+
     .queue-panel {
+      left: 16px;
       right: 16px;
       bottom: 150px;
+      width: auto;
+      max-height: calc(100dvh - 178px);
     }
   }
 
@@ -2657,6 +3156,7 @@
     .artist-grid,
     .genre-grid,
     .playlist-grid,
+    .mix-option-grid,
     .settings-grid {
       grid-template-columns: 1fr;
     }
