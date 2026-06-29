@@ -162,6 +162,7 @@
   let searchGenres = $derived(
     normalizedSearchQuery ? displayGenres.filter((genre) => genreMatchesSearch(genre, normalizedSearchQuery)) : [],
   );
+  let libraryTracksById = $derived(new Map(tracks.map((track) => [track.id, track])));
   let hasSearchResults = $derived(
     searchTracks.length > 0 || searchAlbums.length > 0 || searchArtists.length > 0 || searchGenres.length > 0,
   );
@@ -186,6 +187,8 @@
   let selectedGenreArtists = $derived(selectedGenre ? buildArtists(selectedGenreTracks) : []);
   let selectedAlbumGenreText = $derived(genreDisplayForTracks(selectedAlbumTracks));
   let selectedArtistGenreText = $derived(genreDisplayForTracks(selectedArtistTracks));
+  let selectedPlaylistMissingTrackCount = $derived(selectedPlaylist ? missingTrackCountForPlaylist(selectedPlaylist) : 0);
+  let canCreatePlaylist = $derived(normalizePlaylistName(playlistNameDraft).length > 0);
   let libraryDiagnostics = $derived(buildLibraryDiagnostics(tracks, displayAlbums, displayArtists));
   let libraryHealthIssueCount = $derived(libraryHealthTotalIssueCount(libraryDiagnostics));
   let mixSelectedGenreSet = $derived(new Set(mixSelectedGenres));
@@ -577,6 +580,8 @@
     isLibraryHealthOpen = false;
     selectedPlaylistId = null;
     searchQuery = "";
+    playlistMessage = null;
+    playlistError = null;
     mainElement?.scrollTo({ top: 0 });
   }
 
@@ -591,6 +596,8 @@
     isLibraryHealthOpen = false;
     selectedPlaylistId = null;
     mixMessage = null;
+    playlistMessage = null;
+    playlistError = null;
     searchQuery = "";
     mainElement?.scrollTo({ top: 0 });
   }
@@ -610,10 +617,21 @@
   async function handleCreatePlaylist() {
     playlistError = null;
     playlistMessage = null;
+    const name = playlistNameDraft.trim();
+
+    if (!name) {
+      playlistError = "Playlist name is required.";
+      return;
+    }
+
+    if (playlistNameExists(name)) {
+      playlistError = "A playlist with this name already exists.";
+      return;
+    }
 
     try {
-      const playlist = await createPlaylist(playlistNameDraft);
-      playlists = [...playlists, playlist];
+      const playlist = await createPlaylist(name);
+      applyUpdatedPlaylist(playlist);
       playlistNameDraft = "";
       playlistMessage = `${playlist.name} created.`;
     } catch (error) {
@@ -624,11 +642,22 @@
   async function handleAddTrackToPlaylist(playlistId: string, track: Track) {
     playlistError = null;
     playlistMessage = null;
+    const playlist = playlists.find((candidate) => candidate.id === playlistId);
+
+    if (!playlist) {
+      playlistError = "Playlist does not exist.";
+      return;
+    }
+
+    if (playlist.trackIds.includes(track.id)) {
+      playlistMessage = `${track.title} is already in ${playlist.name}.`;
+      return;
+    }
 
     try {
-      const playlist = await addTrackToPlaylist(playlistId, track.id);
-      applyUpdatedPlaylist(playlist);
-      playlistMessage = `${track.title} added to ${playlist.name}.`;
+      const updatedPlaylist = await addTrackToPlaylist(playlistId, track.id);
+      applyUpdatedPlaylist(updatedPlaylist);
+      playlistMessage = `${track.title} added to ${updatedPlaylist.name}.`;
     } catch (error) {
       playlistError = error instanceof Error ? error.message : String(error);
     }
@@ -637,16 +666,27 @@
   async function handleCreatePlaylistFromTrack(track: Track) {
     const name = window.prompt("Playlist name");
 
-    if (!name) {
+    if (name === null) {
       return;
     }
 
+    const trimmedName = name.trim();
     playlistError = null;
     playlistMessage = null;
 
+    if (!trimmedName) {
+      playlistError = "Playlist name is required.";
+      return;
+    }
+
+    if (playlistNameExists(trimmedName)) {
+      playlistError = "A playlist with this name already exists.";
+      return;
+    }
+
     try {
-      const playlist = await createPlaylist(name);
-      playlists = [...playlists, playlist];
+      const playlist = await createPlaylist(trimmedName);
+      applyUpdatedPlaylist(playlist);
       await handleAddTrackToPlaylist(playlist.id, track);
     } catch (error) {
       playlistError = error instanceof Error ? error.message : String(error);
@@ -662,18 +702,25 @@
 
     playlistError = null;
     playlistMessage = null;
+    const previousPlaylists = playlists;
+    playlists = playlists.map((candidate) => candidate.id === playlist.id
+      ? { ...candidate, trackIds: candidate.trackIds.filter((trackId) => trackId !== track.id) }
+      : candidate);
 
     try {
       const updatedPlaylist = await removeTrackFromPlaylist(playlist.id, track.id);
       applyUpdatedPlaylist(updatedPlaylist);
       playlistMessage = `${track.title} removed from ${updatedPlaylist.name}.`;
     } catch (error) {
+      playlists = previousPlaylists;
       playlistError = error instanceof Error ? error.message : String(error);
     }
   }
 
   function applyUpdatedPlaylist(updatedPlaylist: Playlist) {
-    playlists = playlists.map((playlist) => playlist.id === updatedPlaylist.id ? updatedPlaylist : playlist);
+    playlists = playlists.some((playlist) => playlist.id === updatedPlaylist.id)
+      ? playlists.map((playlist) => playlist.id === updatedPlaylist.id ? updatedPlaylist : playlist)
+      : [...playlists, updatedPlaylist];
   }
 
   function handleLibraryHealthSelect() {
@@ -1284,12 +1331,60 @@
   }
 
   function tracksForPlaylist(playlist: Playlist) {
-    const tracksById = new Map(tracks.map((track) => [track.id, track]));
+    const seenTrackIds = new Set<string>();
 
     return playlist.trackIds.flatMap((trackId) => {
-      const track = tracksById.get(trackId);
+      if (seenTrackIds.has(trackId)) {
+        return [];
+      }
+
+      seenTrackIds.add(trackId);
+      const track = libraryTracksById.get(trackId);
       return track ? [track] : [];
     });
+  }
+
+  function missingTrackCountForPlaylist(playlist: Playlist) {
+    const seenTrackIds = new Set<string>();
+    let missingTrackCount = 0;
+
+    for (const trackId of playlist.trackIds) {
+      if (seenTrackIds.has(trackId)) {
+        continue;
+      }
+
+      seenTrackIds.add(trackId);
+
+      if (!libraryTracksById.has(trackId)) {
+        missingTrackCount += 1;
+      }
+    }
+
+    return missingTrackCount;
+  }
+
+  function playlistTrackLabel(playlist: Playlist) {
+    const availableTrackCount = tracksForPlaylist(playlist).length;
+    const missingTrackCount = missingTrackCountForPlaylist(playlist);
+    const availableLabel = songCountLabel(availableTrackCount);
+
+    return missingTrackCount > 0
+      ? `${availableLabel} · ${missingTrackCount} unavailable`
+      : availableLabel;
+  }
+
+  function songCountLabel(count: number) {
+    return `${count} ${count === 1 ? "song" : "songs"}`;
+  }
+
+  function normalizePlaylistName(value: string) {
+    return value.trim().toLocaleLowerCase();
+  }
+
+  function playlistNameExists(name: string) {
+    const normalizedName = normalizePlaylistName(name);
+
+    return playlists.some((playlist) => normalizePlaylistName(playlist.name) === normalizedName);
   }
 
   function buildLibraryDiagnostics(libraryTracks: Track[], albums: Album[], artists: Artist[]): LibraryDiagnostics {
@@ -1953,6 +2048,11 @@
       {#if playbackError}
         <div class="scan-error" role="alert">{playbackError}</div>
       {/if}
+      {#if activeView !== "Playlists" && playlistError}
+        <div class="scan-error" role="alert">{playlistError}</div>
+      {:else if activeView !== "Playlists" && playlistMessage}
+        <div class="scan-error status-message" role="status">{playlistMessage}</div>
+      {/if}
 
       {#if normalizedSearchQuery}
         {#if hasSearchResults}
@@ -2587,6 +2687,12 @@
               </div>
             </div>
 
+            {#if playlistError}
+              <div class="scan-error" role="alert">{playlistError}</div>
+            {:else if playlistMessage}
+              <div class="scan-error status-message" role="status">{playlistMessage}</div>
+            {/if}
+
             <LibrarySection title="Songs" viewAllLabel={`${favoriteTracks.length} total`}>
               {#if favoriteTracks.length === 0}
                 <div class="group-empty">
@@ -2615,7 +2721,7 @@
               <div class="detail-copy">
                 <p class="eyebrow">Playlist</p>
                 <h3 id="custom-playlist-title">{selectedPlaylist.name}</h3>
-                <p>{selectedPlaylistTracks.length} {selectedPlaylistTracks.length === 1 ? "song" : "songs"}</p>
+                <p>{playlistTrackLabel(selectedPlaylist)}</p>
               </div>
             </div>
 
@@ -2624,12 +2730,22 @@
             {:else if playlistMessage}
               <div class="scan-error status-message" role="status">{playlistMessage}</div>
             {/if}
+            {#if selectedPlaylistMissingTrackCount > 0}
+              <div class="playlist-warning" role="status">
+                {selectedPlaylistMissingTrackCount} {selectedPlaylistMissingTrackCount === 1 ? "track is" : "tracks are"} unavailable because the file is no longer in the scanned library.
+              </div>
+            {/if}
 
-            <LibrarySection title="Songs" viewAllLabel={`${selectedPlaylistTracks.length} total`}>
+            <LibrarySection title="Songs" viewAllLabel={`${selectedPlaylistTracks.length} playable`}>
               {#if selectedPlaylistTracks.length === 0}
                 <div class="group-empty">
-                  <h3>No songs in this playlist</h3>
-                  <p>Add songs from a track context menu.</p>
+                  {#if selectedPlaylist.trackIds.length > 0}
+                    <h3>No available songs in this playlist</h3>
+                    <p>Rescan the folder that contains these files, or add songs from a track context menu.</p>
+                  {:else}
+                    <h3>No songs in this playlist</h3>
+                    <p>Add songs from a track context menu.</p>
+                  {/if}
                 </div>
               {:else}
                 <TrackList
@@ -2805,8 +2921,9 @@
                     bind:value={playlistNameDraft}
                     placeholder="Playlist name"
                     aria-label="Playlist name"
+                    aria-invalid={playlistError ? "true" : "false"}
                   />
-                  <button type="submit">Create</button>
+                  <button type="submit" disabled={!canCreatePlaylist}>Create</button>
                 </div>
                 {#if playlistError}
                   <p class="form-message error" role="alert">{playlistError}</p>
@@ -2826,7 +2943,7 @@
                 <div>
                   <p class="eyebrow">Custom Playlist</p>
                   <h3>{playlist.name}</h3>
-                  <p>{playlist.trackIds.length} {playlist.trackIds.length === 1 ? "song" : "songs"}</p>
+                  <p>{playlistTrackLabel(playlist)}</p>
                 </div>
               </button>
             {/each}
@@ -3402,8 +3519,19 @@
     color: #9ee3d9;
   }
 
+  .playlist-warning {
+    border: 1px solid #45412a;
+    border-radius: 8px;
+    background: #1d1b12;
+    color: #eadb94;
+    font-size: 0.9rem;
+    font-weight: 700;
+    padding: 12px 14px;
+  }
+
   .scan-error + :global(.library-section),
-  .scan-error + .placeholder-panel {
+  .scan-error + .placeholder-panel,
+  .playlist-warning + :global(.library-section) {
     margin-top: 16px;
   }
 
@@ -3661,6 +3789,12 @@
     font-size: 0.84rem;
     font-weight: 850;
     padding: 0 10px;
+  }
+
+  .playlist-create-card button:disabled {
+    border-color: #303844;
+    background: #151a21;
+    color: #626c79;
   }
 
   .form-message {

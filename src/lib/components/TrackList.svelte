@@ -105,7 +105,7 @@
   </div>
 {:else}
   <div class="track-list">
-    {#each tracks as track}
+    {#each tracks as track (track.id)}
       <div
         class:active={track.id === selectedTrackId}
         class="track-row"

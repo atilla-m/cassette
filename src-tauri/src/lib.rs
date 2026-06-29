@@ -292,6 +292,9 @@ impl LibraryDatabase {
 
         let connection = Connection::open(path)
             .map_err(|error| format!("Could not open library cache: {error}"))?;
+        connection
+            .execute_batch("PRAGMA foreign_keys = ON;")
+            .map_err(|error| format!("Could not configure library cache: {error}"))?;
         let database = Self { connection };
         database
             .migrate()
@@ -784,6 +787,10 @@ impl LibraryDatabase {
             return Err("Playlist name is required.".to_owned());
         }
 
+        if self.playlist_name_exists(name)? {
+            return Err("A playlist with this name already exists.".to_owned());
+        }
+
         let now = unix_timestamp();
         let id = format!("playlist-{}", unique_timestamp_nanos());
 
@@ -801,8 +808,14 @@ impl LibraryDatabase {
     }
 
     fn add_track_to_playlist(&self, playlist_id: &str, track_id: &str) -> Result<Playlist, String> {
+        let playlist = self.playlist_by_id(playlist_id)?;
+
         if self.track_by_id(track_id)?.is_none() {
             return Err("Track is not in the library cache.".to_owned());
+        }
+
+        if playlist.track_ids.iter().any(|id| id == track_id) {
+            return Err("Track is already in this playlist.".to_owned());
         }
 
         let now = unix_timestamp();
@@ -841,6 +854,8 @@ impl LibraryDatabase {
         playlist_id: &str,
         track_id: &str,
     ) -> Result<Playlist, String> {
+        self.playlist_by_id(playlist_id)?;
+
         let now = unix_timestamp();
         let changed = self
             .connection
@@ -872,6 +887,23 @@ impl LibraryDatabase {
         }
 
         Ok(())
+    }
+
+    fn playlist_name_exists(&self, name: &str) -> Result<bool, String> {
+        let normalized_name = normalize_playlist_name(name);
+        let mut statement = self
+            .connection
+            .prepare("SELECT name FROM playlists")
+            .map_err(|error| format!("Could not read playlists: {error}"))?;
+        let existing_names = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|error| format!("Could not read playlists: {error}"))?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|error| format!("Could not read playlist rows: {error}"))?;
+
+        Ok(existing_names
+            .iter()
+            .any(|existing_name| normalize_playlist_name(existing_name) == normalized_name))
     }
 
     fn compact_playlist_positions(&self, playlist_id: &str) -> Result<(), String> {
@@ -1508,6 +1540,10 @@ fn artist_key_for_track(track: &Track) -> String {
 
 fn artist_key_for_name(artist: &str) -> String {
     artist.trim().to_lowercase()
+}
+
+fn normalize_playlist_name(name: &str) -> String {
+    name.trim().to_lowercase()
 }
 
 fn apply_genre_assignments(tracks: &mut [Track], assignments: &GenreAssignmentMaps) {
