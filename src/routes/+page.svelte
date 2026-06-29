@@ -1,8 +1,11 @@
 <script lang="ts">
   import {
+    addTrackToPlaylist,
     chooseLibraryFolder,
+    createPlaylist,
     getLibraryCache,
     recordTrackPlay,
+    removeTrackFromPlaylist,
     scanLibrary,
     setAlbumGenres,
     setArtistGenres,
@@ -23,7 +26,7 @@
   import TrackList from "$lib/components/TrackList.svelte";
   import { buildAlbums, buildArtists, buildGenres } from "$lib/data/libraryViews";
   import { albums as mockAlbums, artists as mockArtists, genres as mockGenres, navItems } from "$lib/data/mockLibrary";
-  import type { Album, Artist, Genre, PlaybackStatus, Track } from "$lib/types/library";
+  import type { Album, Artist, Genre, PlaybackStatus, Playlist, Track } from "$lib/types/library";
   import { localImageSource } from "$lib/utils/localImage";
   import { listen } from "@tauri-apps/api/event";
   import { onMount } from "svelte";
@@ -81,6 +84,7 @@
   let scannedFolder = $state<string | null>(null);
   let scanCount = $state<number | null>(null);
   let hasLoadedCache = $state(false);
+  let playlists = $state<Playlist[]>([]);
   let currentTrack = $state<Track | null>(null);
   let currentTrackIndex = $state<number | null>(null);
   let playbackQueue = $state<Track[]>([]);
@@ -97,7 +101,11 @@
   let isLikedSongsOpen = $state(false);
   let isMixBuilderOpen = $state(false);
   let isLibraryHealthOpen = $state(false);
+  let selectedPlaylistId = $state<string | null>(null);
   let searchQuery = $state("");
+  let playlistNameDraft = $state("");
+  let playlistMessage = $state<string | null>(null);
+  let playlistError = $state<string | null>(null);
   let songSort = $state<SongSortKey>("title");
   let songSortDirection = $state<SortDirection>("asc");
   let songFormatFilter = $state("All");
@@ -160,6 +168,8 @@
   let selectedAlbum = $derived(displayAlbums.find((album) => album.id === selectedAlbumId) ?? null);
   let selectedArtist = $derived(displayArtists.find((artist) => artist.name === selectedArtistName) ?? null);
   let selectedGenre = $derived(displayGenres.find((genre) => genre.name === selectedGenreName) ?? null);
+  let selectedPlaylist = $derived(playlists.find((playlist) => playlist.id === selectedPlaylistId) ?? null);
+  let selectedPlaylistTracks = $derived(selectedPlaylist ? tracksForPlaylist(selectedPlaylist) : []);
   let selectedAlbumTracks = $derived(
     selectedAlbum ? tracks.filter((track) => albumIdForTrack(track) === selectedAlbum.id) : [],
   );
@@ -302,6 +312,7 @@
     try {
       const cache = await getLibraryCache();
       tracks = cache.tracks;
+      playlists = cache.playlists;
       scannedFolder = cache.lastScannedFolder;
       scanCount = cache.tracks.length;
       hasLoadedCache = true;
@@ -333,6 +344,7 @@
       isLikedSongsOpen = false;
       isMixBuilderOpen = false;
       isLibraryHealthOpen = false;
+      selectedPlaylistId = null;
       clearMixSelection();
       searchQuery = "";
       currentTrackIndex = null;
@@ -383,6 +395,7 @@
       { label: "Play", action: () => handleTrackSelect(track, queue) },
       { label: "Play next", action: () => insertTracksNext([track]) },
       { label: "Add to queue", action: () => appendTracksToQueue([track]) },
+      ...playlistAddMenuItems(track),
       { label: "Go to artist", action: () => handleTrackArtistSelect(track) },
       { label: "Go to album", action: () => handleTrackAlbumSelect(track) },
       {
@@ -390,6 +403,16 @@
         action: () => handleToggleFavorite(track),
       },
     ]);
+  }
+
+  function playlistAddMenuItems(track: Track): ContextMenuItem[] {
+    return [
+      ...playlists.map((playlist) => ({
+        label: `Add to ${playlist.name}`,
+        action: () => handleAddTrackToPlaylist(playlist.id, track),
+      })),
+      { label: "Add to new playlist...", action: () => handleCreatePlaylistFromTrack(track) },
+    ];
   }
 
   function openAlbumContextMenu(event: MouseEvent, album: Album) {
@@ -433,6 +456,19 @@
     ]);
   }
 
+  function openPlaylistContextMenu(event: MouseEvent, playlist: Playlist) {
+    event.preventDefault();
+    event.stopPropagation();
+
+    const playlistTracks = tracksForPlaylist(playlist);
+
+    openContextMenu(event.clientX, event.clientY, [
+      { label: "Play playlist", disabled: playlistTracks.length === 0, action: () => playTrackSet(playlistTracks) },
+      { label: "Shuffle playlist", disabled: playlistTracks.length === 0, action: () => playTrackSet(playlistTracks, true) },
+      { label: "Add playlist to queue", disabled: playlistTracks.length === 0, action: () => appendTracksToQueue(playlistTracks) },
+    ]);
+  }
+
   function handleNavigate(label: string) {
     activeView = label;
     selectedAlbumId = null;
@@ -442,6 +478,7 @@
     isLikedSongsOpen = false;
     isMixBuilderOpen = false;
     isLibraryHealthOpen = false;
+    selectedPlaylistId = null;
     mainElement?.scrollTo({ top: 0 });
   }
 
@@ -454,6 +491,7 @@
     isLikedSongsOpen = false;
     isMixBuilderOpen = false;
     isLibraryHealthOpen = false;
+    selectedPlaylistId = null;
     searchQuery = "";
     songSort = sortKey;
     songSortDirection = direction;
@@ -487,6 +525,7 @@
     isLikedSongsOpen = false;
     isMixBuilderOpen = false;
     isLibraryHealthOpen = false;
+    selectedPlaylistId = null;
     mainElement?.scrollTo({ top: 0 });
   }
 
@@ -509,6 +548,7 @@
     isLikedSongsOpen = false;
     isMixBuilderOpen = false;
     isLibraryHealthOpen = false;
+    selectedPlaylistId = null;
     mainElement?.scrollTo({ top: 0 });
   }
 
@@ -522,6 +562,7 @@
     isLikedSongsOpen = false;
     isMixBuilderOpen = false;
     isLibraryHealthOpen = false;
+    selectedPlaylistId = null;
     mainElement?.scrollTo({ top: 0 });
   }
 
@@ -534,6 +575,7 @@
     isLikedSongsOpen = true;
     isMixBuilderOpen = false;
     isLibraryHealthOpen = false;
+    selectedPlaylistId = null;
     searchQuery = "";
     mainElement?.scrollTo({ top: 0 });
   }
@@ -547,9 +589,91 @@
     isLikedSongsOpen = false;
     isMixBuilderOpen = true;
     isLibraryHealthOpen = false;
+    selectedPlaylistId = null;
     mixMessage = null;
     searchQuery = "";
     mainElement?.scrollTo({ top: 0 });
+  }
+
+  function handlePlaylistSelect(playlist: Playlist) {
+    activeView = "Playlists";
+    selectedPlaylistId = playlist.id;
+    isLikedSongsOpen = false;
+    isMixBuilderOpen = false;
+    isLibraryHealthOpen = false;
+    searchQuery = "";
+    playlistMessage = null;
+    playlistError = null;
+    mainElement?.scrollTo({ top: 0 });
+  }
+
+  async function handleCreatePlaylist() {
+    playlistError = null;
+    playlistMessage = null;
+
+    try {
+      const playlist = await createPlaylist(playlistNameDraft);
+      playlists = [...playlists, playlist];
+      playlistNameDraft = "";
+      playlistMessage = `${playlist.name} created.`;
+    } catch (error) {
+      playlistError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  async function handleAddTrackToPlaylist(playlistId: string, track: Track) {
+    playlistError = null;
+    playlistMessage = null;
+
+    try {
+      const playlist = await addTrackToPlaylist(playlistId, track.id);
+      applyUpdatedPlaylist(playlist);
+      playlistMessage = `${track.title} added to ${playlist.name}.`;
+    } catch (error) {
+      playlistError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  async function handleCreatePlaylistFromTrack(track: Track) {
+    const name = window.prompt("Playlist name");
+
+    if (!name) {
+      return;
+    }
+
+    playlistError = null;
+    playlistMessage = null;
+
+    try {
+      const playlist = await createPlaylist(name);
+      playlists = [...playlists, playlist];
+      await handleAddTrackToPlaylist(playlist.id, track);
+    } catch (error) {
+      playlistError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  async function handleRemoveTrackFromSelectedPlaylist(track: Track) {
+    const playlist = selectedPlaylist;
+
+    if (!playlist) {
+      return;
+    }
+
+    playlistError = null;
+    playlistMessage = null;
+
+    try {
+      const updatedPlaylist = await removeTrackFromPlaylist(playlist.id, track.id);
+      applyUpdatedPlaylist(updatedPlaylist);
+      playlistMessage = `${track.title} removed from ${updatedPlaylist.name}.`;
+    } catch (error) {
+      playlistError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  function applyUpdatedPlaylist(updatedPlaylist: Playlist) {
+    playlists = playlists.map((playlist) => playlist.id === updatedPlaylist.id ? updatedPlaylist : playlist);
   }
 
   function handleLibraryHealthSelect() {
@@ -561,6 +685,7 @@
     isLikedSongsOpen = false;
     isMixBuilderOpen = false;
     isLibraryHealthOpen = true;
+    selectedPlaylistId = null;
     searchQuery = "";
     mainElement?.scrollTo({ top: 0 });
   }
@@ -585,7 +710,10 @@
   function handleBackToPlaylists() {
     isLikedSongsOpen = false;
     isMixBuilderOpen = false;
+    selectedPlaylistId = null;
     mixMessage = null;
+    playlistMessage = null;
+    playlistError = null;
     mainElement?.scrollTo({ top: 0 });
   }
 
@@ -1153,6 +1281,15 @@
 
   function tracksForGenre(genre: Genre) {
     return orderedContextTracks(tracks.filter((track) => trackGenres(track).includes(genre.name)));
+  }
+
+  function tracksForPlaylist(playlist: Playlist) {
+    const tracksById = new Map(tracks.map((track) => [track.id, track]));
+
+    return playlist.trackIds.flatMap((trackId) => {
+      const track = tracksById.get(trackId);
+      return track ? [track] : [];
+    });
   }
 
   function buildLibraryDiagnostics(libraryTracks: Track[], albums: Album[], artists: Artist[]): LibraryDiagnostics {
@@ -2470,6 +2607,45 @@
               {/if}
             </LibrarySection>
           </section>
+        {:else if selectedPlaylist}
+          <section class="detail-view" aria-labelledby="custom-playlist-title">
+            <button class="back-button" type="button" onclick={handleBackToPlaylists}>Back to Playlists</button>
+            <div class="playlist-detail-header">
+              <div class="playlist-mark" aria-hidden="true">P</div>
+              <div class="detail-copy">
+                <p class="eyebrow">Playlist</p>
+                <h3 id="custom-playlist-title">{selectedPlaylist.name}</h3>
+                <p>{selectedPlaylistTracks.length} {selectedPlaylistTracks.length === 1 ? "song" : "songs"}</p>
+              </div>
+            </div>
+
+            {#if playlistError}
+              <div class="scan-error" role="alert">{playlistError}</div>
+            {:else if playlistMessage}
+              <div class="scan-error status-message" role="status">{playlistMessage}</div>
+            {/if}
+
+            <LibrarySection title="Songs" viewAllLabel={`${selectedPlaylistTracks.length} total`}>
+              {#if selectedPlaylistTracks.length === 0}
+                <div class="group-empty">
+                  <h3>No songs in this playlist</h3>
+                  <p>Add songs from a track context menu.</p>
+                </div>
+              {:else}
+                <TrackList
+                  tracks={selectedPlaylistTracks}
+                  isScanning={false}
+                  selectedTrackId={currentTrack?.id}
+                  onTrackSelect={handleTrackSelect}
+                  onTrackContextMenu={openTrackContextMenu}
+                  onArtistSelect={handleTrackArtistSelect}
+                  onAlbumSelect={handleTrackAlbumSelect}
+                  onToggleFavorite={handleToggleFavorite}
+                  onRemoveTrack={handleRemoveTrackFromSelectedPlaylist}
+                />
+              {/if}
+            </LibrarySection>
+          </section>
         {:else if isMixBuilderOpen}
           <section class="detail-view" aria-labelledby="mix-builder-title">
             <button class="back-button" type="button" onclick={handleBackToPlaylists}>Back to Playlists</button>
@@ -2617,6 +2793,43 @@
                 <p>{tracks.length} {tracks.length === 1 ? "track" : "tracks"} available</p>
               </div>
             </button>
+            <form class="playlist-create-card" onsubmit={(event) => { event.preventDefault(); void handleCreatePlaylist(); }}>
+              <div class="playlist-mark" aria-hidden="true">+</div>
+              <div>
+                <p class="eyebrow">Custom Playlist</p>
+                <label for="playlist-name">Create Playlist</label>
+                <div>
+                  <input
+                    id="playlist-name"
+                    type="text"
+                    bind:value={playlistNameDraft}
+                    placeholder="Playlist name"
+                    aria-label="Playlist name"
+                  />
+                  <button type="submit">Create</button>
+                </div>
+                {#if playlistError}
+                  <p class="form-message error" role="alert">{playlistError}</p>
+                {:else if playlistMessage}
+                  <p class="form-message" role="status">{playlistMessage}</p>
+                {/if}
+              </div>
+            </form>
+            {#each playlists as playlist}
+              <button
+                class="playlist-card"
+                type="button"
+                onclick={() => handlePlaylistSelect(playlist)}
+                oncontextmenu={(event) => openPlaylistContextMenu(event, playlist)}
+              >
+                <div class="playlist-mark" aria-hidden="true">P</div>
+                <div>
+                  <p class="eyebrow">Custom Playlist</p>
+                  <h3>{playlist.name}</h3>
+                  <p>{playlist.trackIds.length} {playlist.trackIds.length === 1 ? "song" : "songs"}</p>
+                </div>
+              </button>
+            {/each}
           </section>
         {/if}
       {:else if activeView === "Settings"}
@@ -3183,6 +3396,12 @@
     padding: 12px 14px;
   }
 
+  .scan-error.status-message {
+    border-color: #2f5f58;
+    background: #142521;
+    color: #9ee3d9;
+  }
+
   .scan-error + :global(.library-section),
   .scan-error + .placeholder-panel {
     margin-top: 16px;
@@ -3226,7 +3445,8 @@
   .album-card,
   .artist-card > div:last-child,
   .genre-card > div:last-child,
-  .playlist-card > div:last-child {
+  .playlist-card > div:last-child,
+  .playlist-create-card > div:last-child {
     min-width: 0;
   }
 
@@ -3363,7 +3583,8 @@
     margin-top: 4px;
   }
 
-  .playlist-card {
+  .playlist-card,
+  .playlist-create-card {
     display: flex;
     align-items: center;
     gap: 14px;
@@ -3395,8 +3616,67 @@
     font-weight: 650;
   }
 
+  .playlist-create-card label {
+    display: block;
+    margin-bottom: 8px;
+    color: #f4f7fb;
+    font-size: 0.98rem;
+    font-weight: 800;
+    line-height: 1.25;
+  }
+
+  .playlist-create-card > div:last-child > div {
+    display: flex;
+    gap: 8px;
+  }
+
+  .playlist-create-card input {
+    width: 100%;
+    min-width: 0;
+    min-height: 36px;
+    border: 1px solid #303844;
+    border-radius: 8px;
+    background: #0f1318;
+    color: #f4f7fb;
+    font: inherit;
+    font-size: 0.88rem;
+    font-weight: 650;
+    outline: none;
+    padding: 0 10px;
+  }
+
+  .playlist-create-card input:focus {
+    border-color: #2f8f83;
+    box-shadow: 0 0 0 2px rgba(47, 143, 131, 0.18);
+  }
+
+  .playlist-create-card button {
+    min-height: 36px;
+    border: 1px solid #35544f;
+    border-radius: 8px;
+    background: #17332f;
+    color: #d8fffa;
+    cursor: default;
+    font: inherit;
+    font-size: 0.84rem;
+    font-weight: 850;
+    padding: 0 10px;
+  }
+
+  .form-message {
+    margin: 8px 0 0;
+    color: #9ee3d9;
+    font-size: 0.78rem;
+    font-weight: 750;
+  }
+
+  .form-message.error {
+    color: #ffcbc8;
+  }
+
   .liked-mark,
   .mix-mark,
+  .playlist-mark,
   .health-mark {
     display: grid;
     width: 58px;
@@ -3416,6 +3696,11 @@
   .mix-mark {
     background: #17332f;
     color: #9ee3d9;
+  }
+
+  .playlist-mark {
+    background: #1b2633;
+    color: #8fb9f2;
   }
 
   .health-mark {

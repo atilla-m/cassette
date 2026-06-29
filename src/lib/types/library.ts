@@ -46,6 +46,14 @@ export type Genre = {
   color: string;
 };
 
+export type Playlist = {
+  id: string;
+  name: string;
+  createdAt: number;
+  updatedAt: number;
+  trackIds: string[];
+};
+
 export type NavItem = {
   label: string;
   icon: string;
@@ -62,6 +70,7 @@ export type PlaybackStatus = {
 
 export type LibraryCache = {
   tracks: Track[];
+  playlists: Playlist[];
   lastScannedFolder: string | null;
   lastScannedAt: number | null;
 };

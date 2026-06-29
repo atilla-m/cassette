@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import type { LibraryCache, Track } from "$lib/types/library";
+import type { LibraryCache, Playlist, Track } from "$lib/types/library";
 
 export async function chooseLibraryFolder(): Promise<string | null> {
   const selected = await open({
@@ -35,4 +35,16 @@ export async function setAlbumGenres(albumId: string, genres: string[]): Promise
 
 export async function setArtistGenres(artistName: string, genres: string[]): Promise<Track[]> {
   return invoke<Track[]>("set_artist_genres", { artistName, genres });
+}
+
+export async function createPlaylist(name: string): Promise<Playlist> {
+  return invoke<Playlist>("create_playlist", { name });
+}
+
+export async function addTrackToPlaylist(playlistId: string, trackId: string): Promise<Playlist> {
+  return invoke<Playlist>("add_track_to_playlist", { playlistId, trackId });
+}
+
+export async function removeTrackFromPlaylist(playlistId: string, trackId: string): Promise<Playlist> {
+  return invoke<Playlist>("remove_track_from_playlist", { playlistId, trackId });
 }

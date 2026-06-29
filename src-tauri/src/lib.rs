@@ -119,8 +119,19 @@ struct GenreAssignmentMaps {
 #[serde(rename_all = "camelCase")]
 struct LibraryCache {
     tracks: Vec<Track>,
+    playlists: Vec<Playlist>,
     last_scanned_folder: Option<String>,
     last_scanned_at: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Playlist {
+    id: String,
+    name: String,
+    created_at: i64,
+    updated_at: i64,
+    track_ids: Vec<String>,
 }
 
 struct LibraryDatabase {
@@ -234,6 +245,44 @@ fn set_artist_genres(
     library.set_genres(GENRE_SCOPE_ARTIST, &artist_key, genres)
 }
 
+#[tauri::command]
+fn create_playlist(
+    name: String,
+    library: State<'_, Mutex<LibraryDatabase>>,
+) -> Result<Playlist, String> {
+    let library = library
+        .lock()
+        .map_err(|_| "Library cache is unavailable.".to_owned())?;
+
+    library.create_playlist(&name)
+}
+
+#[tauri::command]
+fn add_track_to_playlist(
+    playlist_id: String,
+    track_id: String,
+    library: State<'_, Mutex<LibraryDatabase>>,
+) -> Result<Playlist, String> {
+    let library = library
+        .lock()
+        .map_err(|_| "Library cache is unavailable.".to_owned())?;
+
+    library.add_track_to_playlist(&playlist_id, &track_id)
+}
+
+#[tauri::command]
+fn remove_track_from_playlist(
+    playlist_id: String,
+    track_id: String,
+    library: State<'_, Mutex<LibraryDatabase>>,
+) -> Result<Playlist, String> {
+    let library = library
+        .lock()
+        .map_err(|_| "Library cache is unavailable.".to_owned())?;
+
+    library.remove_track_from_playlist(&playlist_id, &track_id)
+}
+
 impl LibraryDatabase {
     fn open(path: PathBuf) -> Result<Self, String> {
         if let Some(parent) = path.parent() {
@@ -288,6 +337,22 @@ impl LibraryDatabase {
                 genres TEXT NOT NULL DEFAULT '[]',
                 updated_at INTEGER NOT NULL,
                 PRIMARY KEY (scope, entity_key)
+            );
+
+            CREATE TABLE IF NOT EXISTS playlists (
+                id TEXT PRIMARY KEY NOT NULL,
+                name TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS playlist_tracks (
+                playlist_id TEXT NOT NULL,
+                track_id TEXT NOT NULL,
+                position INTEGER NOT NULL,
+                added_at INTEGER NOT NULL,
+                PRIMARY KEY (playlist_id, track_id),
+                FOREIGN KEY (playlist_id) REFERENCES playlists(id) ON DELETE CASCADE
             );
             ",
         )?;
@@ -383,6 +448,7 @@ impl LibraryDatabase {
 
         Ok(LibraryCache {
             tracks,
+            playlists: self.playlists()?,
             last_scanned_folder: self.meta_value("last_scanned_folder")?,
             last_scanned_at: self
                 .meta_value("last_scanned_at")?
@@ -626,6 +692,205 @@ impl LibraryDatabase {
         }
 
         self.load_cache().map(|cache| cache.tracks)
+    }
+
+    fn playlists(&self) -> Result<Vec<Playlist>, String> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "
+                SELECT id, name, created_at, updated_at
+                FROM playlists
+                ORDER BY created_at ASC
+                ",
+            )
+            .map_err(|error| format!("Could not read playlists: {error}"))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok(Playlist {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    created_at: row.get(2)?,
+                    updated_at: row.get(3)?,
+                    track_ids: Vec::new(),
+                })
+            })
+            .map_err(|error| format!("Could not read playlists: {error}"))?;
+        let mut playlists = rows
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|error| format!("Could not read playlist rows: {error}"))?;
+
+        for playlist in &mut playlists {
+            playlist.track_ids = self.playlist_track_ids(&playlist.id)?;
+        }
+
+        Ok(playlists)
+    }
+
+    fn playlist_by_id(&self, playlist_id: &str) -> Result<Playlist, String> {
+        let mut playlist = self
+            .connection
+            .query_row(
+                "
+                SELECT id, name, created_at, updated_at
+                FROM playlists
+                WHERE id = ?1
+                ",
+                [playlist_id],
+                |row| {
+                    Ok(Playlist {
+                        id: row.get(0)?,
+                        name: row.get(1)?,
+                        created_at: row.get(2)?,
+                        updated_at: row.get(3)?,
+                        track_ids: Vec::new(),
+                    })
+                },
+            )
+            .optional()
+            .map_err(|error| format!("Could not read playlist: {error}"))?
+            .ok_or_else(|| "Playlist does not exist.".to_owned())?;
+        playlist.track_ids = self.playlist_track_ids(playlist_id)?;
+
+        Ok(playlist)
+    }
+
+    fn playlist_track_ids(&self, playlist_id: &str) -> Result<Vec<String>, String> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "
+                SELECT track_id
+                FROM playlist_tracks
+                WHERE playlist_id = ?1
+                ORDER BY position ASC
+                ",
+            )
+            .map_err(|error| format!("Could not read playlist tracks: {error}"))?;
+
+        let track_ids = statement
+            .query_map([playlist_id], |row| row.get::<_, String>(0))
+            .map_err(|error| format!("Could not read playlist tracks: {error}"))?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|error| format!("Could not read playlist track rows: {error}"))?;
+
+        Ok(track_ids)
+    }
+
+    fn create_playlist(&self, name: &str) -> Result<Playlist, String> {
+        let name = name.trim();
+
+        if name.is_empty() {
+            return Err("Playlist name is required.".to_owned());
+        }
+
+        let now = unix_timestamp();
+        let id = format!("playlist-{}", unique_timestamp_nanos());
+
+        self.connection
+            .execute(
+                "
+                INSERT INTO playlists (id, name, created_at, updated_at)
+                VALUES (?1, ?2, ?3, ?3)
+                ",
+                params![id, name, now],
+            )
+            .map_err(|error| format!("Could not create playlist: {error}"))?;
+
+        self.playlist_by_id(&id)
+    }
+
+    fn add_track_to_playlist(&self, playlist_id: &str, track_id: &str) -> Result<Playlist, String> {
+        if self.track_by_id(track_id)?.is_none() {
+            return Err("Track is not in the library cache.".to_owned());
+        }
+
+        let now = unix_timestamp();
+        let next_position = self
+            .connection
+            .query_row(
+                "
+                SELECT COALESCE(MAX(position), -1) + 1
+                FROM playlist_tracks
+                WHERE playlist_id = ?1
+                ",
+                [playlist_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|error| format!("Could not read playlist position: {error}"))?;
+        let changed = self
+            .connection
+            .execute(
+                "
+                INSERT OR IGNORE INTO playlist_tracks (playlist_id, track_id, position, added_at)
+                VALUES (?1, ?2, ?3, ?4)
+                ",
+                params![playlist_id, track_id, next_position, now],
+            )
+            .map_err(|error| format!("Could not add track to playlist: {error}"))?;
+
+        if changed > 0 {
+            self.touch_playlist(playlist_id, now)?;
+        }
+
+        self.playlist_by_id(playlist_id)
+    }
+
+    fn remove_track_from_playlist(
+        &self,
+        playlist_id: &str,
+        track_id: &str,
+    ) -> Result<Playlist, String> {
+        let now = unix_timestamp();
+        let changed = self
+            .connection
+            .execute(
+                "DELETE FROM playlist_tracks WHERE playlist_id = ?1 AND track_id = ?2",
+                params![playlist_id, track_id],
+            )
+            .map_err(|error| format!("Could not remove track from playlist: {error}"))?;
+
+        if changed > 0 {
+            self.compact_playlist_positions(playlist_id)?;
+            self.touch_playlist(playlist_id, now)?;
+        }
+
+        self.playlist_by_id(playlist_id)
+    }
+
+    fn touch_playlist(&self, playlist_id: &str, updated_at: i64) -> Result<(), String> {
+        let changed = self
+            .connection
+            .execute(
+                "UPDATE playlists SET updated_at = ?2 WHERE id = ?1",
+                params![playlist_id, updated_at],
+            )
+            .map_err(|error| format!("Could not update playlist: {error}"))?;
+
+        if changed == 0 {
+            return Err("Playlist does not exist.".to_owned());
+        }
+
+        Ok(())
+    }
+
+    fn compact_playlist_positions(&self, playlist_id: &str) -> Result<(), String> {
+        let track_ids = self.playlist_track_ids(playlist_id)?;
+
+        for (position, track_id) in track_ids.iter().enumerate() {
+            self.connection
+                .execute(
+                    "
+                    UPDATE playlist_tracks
+                    SET position = ?3
+                    WHERE playlist_id = ?1 AND track_id = ?2
+                    ",
+                    params![playlist_id, track_id, position as i64],
+                )
+                .map_err(|error| format!("Could not update playlist order: {error}"))?;
+        }
+
+        Ok(())
     }
 
     fn genre_assignments(&self) -> Result<GenreAssignmentMaps, String> {
@@ -1452,6 +1717,13 @@ fn unix_timestamp() -> i64 {
     system_time_to_unix(SystemTime::now()).unwrap_or(0)
 }
 
+fn unique_timestamp_nanos() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0)
+}
+
 fn system_time_to_unix(time: SystemTime) -> Option<i64> {
     time.duration_since(UNIX_EPOCH)
         .ok()
@@ -1629,6 +1901,9 @@ pub fn run() {
             record_track_play,
             set_album_genres,
             set_artist_genres,
+            create_playlist,
+            add_track_to_playlist,
+            remove_track_from_playlist,
             play_track,
             pause_playback,
             resume_playback,

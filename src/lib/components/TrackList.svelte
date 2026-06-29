@@ -11,6 +11,7 @@
     onArtistSelect?: (track: Track) => void;
     onAlbumSelect?: (track: Track) => void;
     onToggleFavorite?: (track: Track) => void;
+    onRemoveTrack?: (track: Track) => void;
   };
 
   let {
@@ -22,6 +23,7 @@
     onArtistSelect,
     onAlbumSelect,
     onToggleFavorite,
+    onRemoveTrack,
   }: Props = $props();
 
   function displayArtist(track: Track) {
@@ -67,6 +69,11 @@
   function toggleFavorite(event: MouseEvent, track: Track) {
     event.stopPropagation();
     onToggleFavorite?.(track);
+  }
+
+  function removeTrack(event: MouseEvent, track: Track) {
+    event.stopPropagation();
+    onRemoveTrack?.(track);
   }
 
   function hideBrokenImage(event: Event) {
@@ -144,6 +151,16 @@
         >
           {track.isFavorite ? "★" : "☆"}
         </button>
+        {#if onRemoveTrack}
+          <button
+            class="remove-button"
+            type="button"
+            aria-label="Remove from playlist"
+            onclick={(event) => removeTrack(event, track)}
+          >
+            Remove
+          </button>
+        {/if}
         <span>{track.extension.toUpperCase()}</span>
       </div>
     {/each}
@@ -226,6 +243,27 @@
     font-size: 0.95rem;
     font-weight: 900;
     line-height: 1;
+  }
+
+  .remove-button {
+    min-height: 32px;
+    border: 1px solid #303844;
+    border-radius: 8px;
+    background: #171c23;
+    color: #aeb9c6;
+    cursor: default;
+    font: inherit;
+    font-size: 0.78rem;
+    font-weight: 850;
+    padding: 0 9px;
+  }
+
+  .remove-button:hover,
+  .remove-button:focus-visible {
+    border-color: #5b3434;
+    background: #2a1718;
+    color: #ffcbc8;
+    outline: none;
   }
 
   .favorite-button:hover,
