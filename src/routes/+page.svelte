@@ -16,6 +16,7 @@
     seekPlayback,
     setPlaybackVolume,
   } from "$lib/api/playback";
+  import ContextMenu from "$lib/components/ContextMenu.svelte";
   import LibrarySection from "$lib/components/LibrarySection.svelte";
   import NowPlayingBar from "$lib/components/NowPlayingBar.svelte";
   import Sidebar from "$lib/components/Sidebar.svelte";
@@ -37,6 +38,16 @@
     track: Track;
     queueIndex: number;
     offset: number;
+  };
+  type ContextMenuItem = {
+    label: string;
+    disabled?: boolean;
+    action: () => void | Promise<void>;
+  };
+  type ContextMenuState = {
+    x: number;
+    y: number;
+    items: ContextMenuItem[];
   };
   type MixCategory = "genre" | "artist" | "album";
   type DuplicateAlbumGroup = {
@@ -114,6 +125,7 @@
   let positionSeconds = $state(0);
   let durationSeconds = $state<number | null>(null);
   let volume = $state(1);
+  let contextMenu = $state<ContextMenuState | null>(null);
   let displayAlbums = $derived(!hasLoadedCache ? mockAlbums : buildAlbums(tracks));
   let displayArtists = $derived(!hasLoadedCache ? mockArtists : buildArtists(tracks));
   let displayGenres = $derived(!hasLoadedCache ? mockGenres : buildGenres(tracks));
@@ -356,6 +368,69 @@
     currentQueueIndex = queueIndex;
     shuffledQueueOrder = isShuffleEnabled ? buildShuffledQueueOrder(nextQueue.length, queueIndex) : [];
     await playQueuedTrackAtIndex(queueIndex);
+  }
+
+  function openContextMenu(x: number, y: number, items: ContextMenuItem[]) {
+    contextMenu = { x, y, items };
+  }
+
+  function closeContextMenu() {
+    contextMenu = null;
+  }
+
+  function openTrackContextMenu(track: Track, queue: Track[], x: number, y: number) {
+    openContextMenu(x, y, [
+      { label: "Play", action: () => handleTrackSelect(track, queue) },
+      { label: "Play next", action: () => insertTracksNext([track]) },
+      { label: "Add to queue", action: () => appendTracksToQueue([track]) },
+      { label: "Go to artist", action: () => handleTrackArtistSelect(track) },
+      { label: "Go to album", action: () => handleTrackAlbumSelect(track) },
+      {
+        label: track.isFavorite ? "Remove from liked songs" : "Add to liked songs",
+        action: () => handleToggleFavorite(track),
+      },
+    ]);
+  }
+
+  function openAlbumContextMenu(event: MouseEvent, album: Album) {
+    event.preventDefault();
+    event.stopPropagation();
+
+    const albumTracks = tracksForAlbum(album);
+    const hasArtist = album.artist.trim().length > 0 && album.artist !== "Unknown Artist";
+
+    openContextMenu(event.clientX, event.clientY, [
+      { label: "Play album", disabled: albumTracks.length === 0, action: () => playTrackSet(albumTracks) },
+      { label: "Shuffle album", disabled: albumTracks.length === 0, action: () => playTrackSet(albumTracks, true) },
+      { label: "Add album to queue", disabled: albumTracks.length === 0, action: () => appendTracksToQueue(albumTracks) },
+      { label: "Go to artist", disabled: !hasArtist, action: () => selectArtistName(album.artist) },
+    ]);
+  }
+
+  function openArtistContextMenu(event: MouseEvent, artist: Artist) {
+    event.preventDefault();
+    event.stopPropagation();
+
+    const artistTracks = tracksForArtist(artist);
+
+    openContextMenu(event.clientX, event.clientY, [
+      { label: "Play artist", disabled: artistTracks.length === 0, action: () => playTrackSet(artistTracks) },
+      { label: "Shuffle artist", disabled: artistTracks.length === 0, action: () => playTrackSet(artistTracks, true) },
+      { label: "Add artist to queue", disabled: artistTracks.length === 0, action: () => appendTracksToQueue(artistTracks) },
+    ]);
+  }
+
+  function openGenreContextMenu(event: MouseEvent, genre: Genre) {
+    event.preventDefault();
+    event.stopPropagation();
+
+    const genreTracks = tracksForGenre(genre);
+
+    openContextMenu(event.clientX, event.clientY, [
+      { label: "Play genre", disabled: genreTracks.length === 0, action: () => playTrackSet(genreTracks) },
+      { label: "Shuffle genre", disabled: genreTracks.length === 0, action: () => playTrackSet(genreTracks, true) },
+      { label: "Add genre to queue", disabled: genreTracks.length === 0, action: () => appendTracksToQueue(genreTracks) },
+    ]);
   }
 
   function handleNavigate(label: string) {
@@ -828,6 +903,74 @@
     isQueueOpen = false;
   }
 
+  async function playTrackSet(libraryTracks: Track[], shouldShuffle = false) {
+    const queue = shouldShuffle ? shuffleTracks(libraryTracks) : orderedContextTracks(libraryTracks);
+
+    if (queue.length === 0) {
+      return;
+    }
+
+    playbackQueue = queue;
+    currentQueueIndex = 0;
+    isShuffleEnabled = false;
+    shuffledQueueOrder = [];
+    await playQueuedTrackAtIndex(0);
+  }
+
+  function insertTracksNext(libraryTracks: Track[]) {
+    if (libraryTracks.length === 0) {
+      return;
+    }
+
+    const insertIndex = currentQueueIndex === null ? playbackQueue.length : currentQueueIndex + 1;
+    const insertedTracks = [...libraryTracks];
+    const previousLength = playbackQueue.length;
+    const previousOrder = isShuffleEnabled
+      ? normalizedQueueOrder(shuffledQueueOrder, previousLength)
+      : [];
+
+    playbackQueue = [
+      ...playbackQueue.slice(0, insertIndex),
+      ...insertedTracks,
+      ...playbackQueue.slice(insertIndex),
+    ];
+
+    if (!isShuffleEnabled) {
+      return;
+    }
+
+    const insertedIndices = insertedTracks.map((_, offset) => insertIndex + offset);
+    const shiftedOrder = previousOrder.map((index) => index >= insertIndex ? index + insertedTracks.length : index);
+    const currentOrderPosition = currentQueueIndex === null ? -1 : shiftedOrder.indexOf(currentQueueIndex);
+
+    shuffledQueueOrder = currentOrderPosition === -1
+      ? [...shiftedOrder, ...insertedIndices]
+      : [
+          ...shiftedOrder.slice(0, currentOrderPosition + 1),
+          ...insertedIndices,
+          ...shiftedOrder.slice(currentOrderPosition + 1),
+        ];
+  }
+
+  function appendTracksToQueue(libraryTracks: Track[]) {
+    if (libraryTracks.length === 0) {
+      return;
+    }
+
+    const startIndex = playbackQueue.length;
+    const appendedTracks = [...libraryTracks];
+    const appendedIndices = appendedTracks.map((_, offset) => startIndex + offset);
+
+    playbackQueue = [...playbackQueue, ...appendedTracks];
+
+    if (isShuffleEnabled) {
+      shuffledQueueOrder = [
+        ...normalizedQueueOrder(shuffledQueueOrder, startIndex),
+        ...appendedIndices,
+      ];
+    }
+  }
+
   function handleToggleShuffle() {
     isShuffleEnabled = !isShuffleEnabled;
     shuffledQueueOrder = !isShuffleEnabled
@@ -994,6 +1137,22 @@
 
   function trackGenres(track: Track) {
     return track.genres.length > 0 ? track.genres : ["Unknown Genre"];
+  }
+
+  function orderedContextTracks(libraryTracks: Track[]) {
+    return sortTracks(libraryTracks, "album", "asc");
+  }
+
+  function tracksForAlbum(album: Album) {
+    return orderedContextTracks(tracks.filter((track) => albumIdForTrack(track) === album.id));
+  }
+
+  function tracksForArtist(artist: Artist) {
+    return orderedContextTracks(tracks.filter((track) => artistNameForTrack(track) === artist.name));
+  }
+
+  function tracksForGenre(genre: Genre) {
+    return orderedContextTracks(tracks.filter((track) => trackGenres(track).includes(genre.name)));
   }
 
   function buildLibraryDiagnostics(libraryTracks: Track[], albums: Album[], artists: Artist[]): LibraryDiagnostics {
@@ -1672,6 +1831,7 @@
                 isScanning={false}
                 selectedTrackId={currentTrack?.id}
                 onTrackSelect={handleTrackSelect}
+                onTrackContextMenu={openTrackContextMenu}
                 onArtistSelect={handleTrackArtistSelect}
                 onAlbumSelect={handleTrackAlbumSelect}
                 onToggleFavorite={handleToggleFavorite}
@@ -1688,7 +1848,7 @@
             {:else}
               <div class="album-grid">
                 {#each searchAlbums as album}
-                  <button class="album-card" type="button" onclick={() => handleAlbumSelect(album)}>
+                  <button class="album-card" type="button" onclick={() => handleAlbumSelect(album)} oncontextmenu={(event) => openAlbumContextMenu(event, album)}>
                     <div class="album-art" style={`--item-color: ${album.color}`} aria-hidden="true">
                       {#if album.coverArtPath}
                         <img
@@ -1718,7 +1878,7 @@
             {:else}
               <div class="artist-grid">
                 {#each searchArtists as artist}
-                  <button class="artist-card" type="button" onclick={() => handleArtistSelect(artist)}>
+                  <button class="artist-card" type="button" onclick={() => handleArtistSelect(artist)} oncontextmenu={(event) => openArtistContextMenu(event, artist)}>
                     <div class="artist-avatar" style={`--item-color: ${artist.color}`} aria-hidden="true">
                       {artist.name.slice(0, 1)}
                     </div>
@@ -1741,7 +1901,7 @@
             {:else}
               <div class="genre-grid">
                 {#each searchGenres as genre}
-                  <button class="genre-card" type="button" onclick={() => handleGenreSelect(genre)}>
+                  <button class="genre-card" type="button" onclick={() => handleGenreSelect(genre)} oncontextmenu={(event) => openGenreContextMenu(event, genre)}>
                     <div class="genre-mark" style={`--item-color: ${genre.color}`} aria-hidden="true">
                       {genre.name.slice(0, 1)}
                     </div>
@@ -1773,6 +1933,7 @@
               {isScanning}
               selectedTrackId={currentTrack?.id}
               onTrackSelect={handleTrackSelect}
+              onTrackContextMenu={openTrackContextMenu}
               onArtistSelect={handleTrackArtistSelect}
               onAlbumSelect={handleTrackAlbumSelect}
               onToggleFavorite={handleToggleFavorite}
@@ -1792,6 +1953,7 @@
               {isScanning}
               selectedTrackId={currentTrack?.id}
               onTrackSelect={handleTrackSelect}
+              onTrackContextMenu={openTrackContextMenu}
               onArtistSelect={handleTrackArtistSelect}
               onAlbumSelect={handleTrackAlbumSelect}
               onToggleFavorite={handleToggleFavorite}
@@ -1805,6 +1967,7 @@
             {isScanning}
             selectedTrackId={currentTrack?.id}
             onTrackSelect={handleTrackSelect}
+            onTrackContextMenu={openTrackContextMenu}
             onArtistSelect={handleTrackArtistSelect}
             onAlbumSelect={handleTrackAlbumSelect}
             onToggleFavorite={handleToggleFavorite}
@@ -1820,7 +1983,7 @@
           {:else}
             <div class="album-grid">
               {#each homeAlbums as album}
-                <button class="album-card" type="button" onclick={() => handleAlbumSelect(album)}>
+                <button class="album-card" type="button" onclick={() => handleAlbumSelect(album)} oncontextmenu={(event) => openAlbumContextMenu(event, album)}>
                   <div class="album-art" style={`--item-color: ${album.color}`} aria-hidden="true">
                     {#if album.coverArtPath}
                       <img
@@ -1850,7 +2013,7 @@
           {:else}
             <div class="artist-grid">
               {#each homeArtists as artist}
-                <button class="artist-card" type="button" onclick={() => handleArtistSelect(artist)}>
+                <button class="artist-card" type="button" onclick={() => handleArtistSelect(artist)} oncontextmenu={(event) => openArtistContextMenu(event, artist)}>
                   <div class="artist-avatar" style={`--item-color: ${artist.color}`} aria-hidden="true">
                     {artist.name.slice(0, 1)}
                   </div>
@@ -1916,6 +2079,7 @@
                 isScanning={false}
                 selectedTrackId={currentTrack?.id}
                 onTrackSelect={handleTrackSelect}
+                onTrackContextMenu={openTrackContextMenu}
                 onArtistSelect={handleTrackArtistSelect}
                 onAlbumSelect={handleTrackAlbumSelect}
                 onToggleFavorite={handleToggleFavorite}
@@ -1951,7 +2115,7 @@
             {:else}
               <div class="album-grid">
                 {#each sortedAlbums as album}
-                  <button class="album-card" type="button" onclick={() => handleAlbumSelect(album)}>
+                  <button class="album-card" type="button" onclick={() => handleAlbumSelect(album)} oncontextmenu={(event) => openAlbumContextMenu(event, album)}>
                     <div class="album-art" style={`--item-color: ${album.color}`} aria-hidden="true">
                       {#if album.coverArtPath}
                         <img
@@ -2020,7 +2184,7 @@
               {:else}
                 <div class="album-grid">
                   {#each selectedArtistAlbums as album}
-                    <button class="album-card" type="button" onclick={() => handleAlbumSelect(album)}>
+                    <button class="album-card" type="button" onclick={() => handleAlbumSelect(album)} oncontextmenu={(event) => openAlbumContextMenu(event, album)}>
                       <div class="album-art" style={`--item-color: ${album.color}`} aria-hidden="true">
                         {#if album.coverArtPath}
                           <img
@@ -2047,6 +2211,7 @@
                 isScanning={false}
                 selectedTrackId={currentTrack?.id}
                 onTrackSelect={handleTrackSelect}
+                onTrackContextMenu={openTrackContextMenu}
                 onArtistSelect={handleTrackArtistSelect}
                 onAlbumSelect={handleTrackAlbumSelect}
                 onToggleFavorite={handleToggleFavorite}
@@ -2081,7 +2246,7 @@
             {:else}
               <div class="artist-grid">
                 {#each sortedArtists as artist}
-                  <button class="artist-card" type="button" onclick={() => handleArtistSelect(artist)}>
+                  <button class="artist-card" type="button" onclick={() => handleArtistSelect(artist)} oncontextmenu={(event) => openArtistContextMenu(event, artist)}>
                     <div class="artist-avatar" style={`--item-color: ${artist.color}`} aria-hidden="true">
                       {artist.name.slice(0, 1)}
                     </div>
@@ -2129,7 +2294,7 @@
               {:else}
                 <div class="album-grid">
                   {#each selectedGenreAlbums as album}
-                    <button class="album-card" type="button" onclick={() => handleAlbumSelect(album)}>
+                    <button class="album-card" type="button" onclick={() => handleAlbumSelect(album)} oncontextmenu={(event) => openAlbumContextMenu(event, album)}>
                       <div class="album-art" style={`--item-color: ${album.color}`} aria-hidden="true">
                         {#if album.coverArtPath}
                           <img
@@ -2159,7 +2324,7 @@
               {:else}
                 <div class="artist-grid">
                   {#each selectedGenreArtists as artist}
-                    <button class="artist-card" type="button" onclick={() => handleArtistSelect(artist)}>
+                    <button class="artist-card" type="button" onclick={() => handleArtistSelect(artist)} oncontextmenu={(event) => openArtistContextMenu(event, artist)}>
                       <div class="artist-avatar" style={`--item-color: ${artist.color}`} aria-hidden="true">
                         {artist.name.slice(0, 1)}
                       </div>
@@ -2179,6 +2344,7 @@
                 isScanning={false}
                 selectedTrackId={currentTrack?.id}
                 onTrackSelect={handleTrackSelect}
+                onTrackContextMenu={openTrackContextMenu}
                 onArtistSelect={handleTrackArtistSelect}
                 onAlbumSelect={handleTrackAlbumSelect}
                 onToggleFavorite={handleToggleFavorite}
@@ -2214,7 +2380,7 @@
             {:else}
               <div class="genre-grid">
                 {#each sortedGenres as genre}
-                  <button class="genre-card" type="button" onclick={() => handleGenreSelect(genre)}>
+                  <button class="genre-card" type="button" onclick={() => handleGenreSelect(genre)} oncontextmenu={(event) => openGenreContextMenu(event, genre)}>
                     <div class="genre-mark" style={`--item-color: ${genre.color}`} aria-hidden="true">
                       {genre.name.slice(0, 1)}
                     </div>
@@ -2265,6 +2431,7 @@
             {isScanning}
             selectedTrackId={currentTrack?.id}
             onTrackSelect={handleTrackSelect}
+            onTrackContextMenu={openTrackContextMenu}
             onArtistSelect={handleTrackArtistSelect}
             onAlbumSelect={handleTrackAlbumSelect}
             onToggleFavorite={handleToggleFavorite}
@@ -2295,6 +2462,7 @@
                   isScanning={false}
                   selectedTrackId={currentTrack?.id}
                   onTrackSelect={handleTrackSelect}
+                  onTrackContextMenu={openTrackContextMenu}
                   onArtistSelect={handleTrackArtistSelect}
                   onAlbumSelect={handleTrackAlbumSelect}
                   onToggleFavorite={handleToggleFavorite}
@@ -2356,7 +2524,7 @@
               {:else}
                 <div class="mix-option-grid">
                   {#each sortedGenres as genre}
-                    <label class:selected={mixSelectedGenreSet.has(genre.name)} class="mix-option-card">
+                    <label class:selected={mixSelectedGenreSet.has(genre.name)} class="mix-option-card" oncontextmenu={(event) => openGenreContextMenu(event, genre)}>
                       <input
                         type="checkbox"
                         checked={mixSelectedGenreSet.has(genre.name)}
@@ -2384,7 +2552,7 @@
               {:else}
                 <div class="mix-option-grid">
                   {#each sortedArtists as artist}
-                    <label class:selected={mixSelectedArtistSet.has(artist.name)} class="mix-option-card">
+                    <label class:selected={mixSelectedArtistSet.has(artist.name)} class="mix-option-card" oncontextmenu={(event) => openArtistContextMenu(event, artist)}>
                       <input
                         type="checkbox"
                         checked={mixSelectedArtistSet.has(artist.name)}
@@ -2412,7 +2580,7 @@
               {:else}
                 <div class="mix-option-grid">
                   {#each sortedAlbums as album}
-                    <label class:selected={mixSelectedAlbumSet.has(album.id)} class="mix-option-card">
+                    <label class:selected={mixSelectedAlbumSet.has(album.id)} class="mix-option-card" oncontextmenu={(event) => openAlbumContextMenu(event, album)}>
                       <input
                         type="checkbox"
                         checked={mixSelectedAlbumSet.has(album.id)}
@@ -2486,7 +2654,7 @@
               {:else}
                 <div class="diagnostic-album-list">
                   {#each albumsForTracks(libraryDiagnostics.missingGenreTracks, sortedAlbums) as album}
-                    <button class="diagnostic-album-card" type="button" onclick={() => handleAlbumSelect(album)}>
+                    <button class="diagnostic-album-card" type="button" onclick={() => handleAlbumSelect(album)} oncontextmenu={(event) => openAlbumContextMenu(event, album)}>
                       <span>{album.title.slice(0, 1)}</span>
                       <div>
                         <strong>{album.title}</strong>
@@ -2500,6 +2668,7 @@
                   isScanning={false}
                   selectedTrackId={currentTrack?.id}
                   onTrackSelect={handleTrackSelect}
+                  onTrackContextMenu={openTrackContextMenu}
                   onArtistSelect={handleTrackArtistSelect}
                   onAlbumSelect={handleTrackAlbumSelect}
                   onToggleFavorite={handleToggleFavorite}
@@ -2517,7 +2686,7 @@
                 {#if libraryDiagnostics.missingCoverAlbums.length > 0}
                   <div class="diagnostic-album-list">
                     {#each libraryDiagnostics.missingCoverAlbums as album}
-                      <button class="diagnostic-album-card" type="button" onclick={() => handleAlbumSelect(album)}>
+                      <button class="diagnostic-album-card" type="button" onclick={() => handleAlbumSelect(album)} oncontextmenu={(event) => openAlbumContextMenu(event, album)}>
                         <span>{album.title.slice(0, 1)}</span>
                         <div>
                           <strong>{album.title}</strong>
@@ -2532,6 +2701,7 @@
                   isScanning={false}
                   selectedTrackId={currentTrack?.id}
                   onTrackSelect={handleTrackSelect}
+                  onTrackContextMenu={openTrackContextMenu}
                   onArtistSelect={handleTrackArtistSelect}
                   onAlbumSelect={handleTrackAlbumSelect}
                   onToggleFavorite={handleToggleFavorite}
@@ -2548,6 +2718,7 @@
                   isScanning={false}
                   selectedTrackId={currentTrack?.id}
                   onTrackSelect={handleTrackSelect}
+                  onTrackContextMenu={openTrackContextMenu}
                   onArtistSelect={handleTrackArtistSelect}
                   onAlbumSelect={handleTrackAlbumSelect}
                   onToggleFavorite={handleToggleFavorite}
@@ -2564,6 +2735,7 @@
                   isScanning={false}
                   selectedTrackId={currentTrack?.id}
                   onTrackSelect={handleTrackSelect}
+                  onTrackContextMenu={openTrackContextMenu}
                   onArtistSelect={handleTrackArtistSelect}
                   onAlbumSelect={handleTrackAlbumSelect}
                   onToggleFavorite={handleToggleFavorite}
@@ -2580,6 +2752,7 @@
                   isScanning={false}
                   selectedTrackId={currentTrack?.id}
                   onTrackSelect={handleTrackSelect}
+                  onTrackContextMenu={openTrackContextMenu}
                   onArtistSelect={handleTrackArtistSelect}
                   onAlbumSelect={handleTrackAlbumSelect}
                   onToggleFavorite={handleToggleFavorite}
@@ -2596,6 +2769,7 @@
                   isScanning={false}
                   selectedTrackId={currentTrack?.id}
                   onTrackSelect={handleTrackSelect}
+                  onTrackContextMenu={openTrackContextMenu}
                   onArtistSelect={handleTrackArtistSelect}
                   onAlbumSelect={handleTrackAlbumSelect}
                   onToggleFavorite={handleToggleFavorite}
@@ -2620,7 +2794,7 @@
                       </div>
                       <div class="duplicate-album-actions">
                         {#each group.albums as album}
-                          <button type="button" onclick={() => handleAlbumSelect(album)}>
+                          <button type="button" onclick={() => handleAlbumSelect(album)} oncontextmenu={(event) => openAlbumContextMenu(event, album)}>
                             {album.artist} · {album.trackCount} {album.trackCount === 1 ? "track" : "tracks"}
                           </button>
                         {/each}
@@ -2700,6 +2874,15 @@
         </div>
       {/if}
     </aside>
+  {/if}
+
+  {#if contextMenu}
+    <ContextMenu
+      x={contextMenu.x}
+      y={contextMenu.y}
+      items={contextMenu.items}
+      onClose={closeContextMenu}
+    />
   {/if}
 
   <NowPlayingBar

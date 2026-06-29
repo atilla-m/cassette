@@ -7,6 +7,7 @@
     isScanning: boolean;
     selectedTrackId?: string | null;
     onTrackSelect?: (track: Track, queue: Track[]) => void;
+    onTrackContextMenu?: (track: Track, queue: Track[], x: number, y: number) => void;
     onArtistSelect?: (track: Track) => void;
     onAlbumSelect?: (track: Track) => void;
     onToggleFavorite?: (track: Track) => void;
@@ -17,6 +18,7 @@
     isScanning,
     selectedTrackId = null,
     onTrackSelect,
+    onTrackContextMenu,
     onArtistSelect,
     onAlbumSelect,
     onToggleFavorite,
@@ -32,6 +34,12 @@
 
   function selectTrack(track: Track) {
     onTrackSelect?.(track, tracks);
+  }
+
+  function openTrackContextMenu(event: MouseEvent, track: Track) {
+    event.preventDefault();
+    event.stopPropagation();
+    onTrackContextMenu?.(track, tracks, event.clientX, event.clientY);
   }
 
   function handleRowKeydown(event: KeyboardEvent, track: Track) {
@@ -98,6 +106,7 @@
         tabindex="0"
         title={track.filePath}
         onclick={() => selectTrack(track)}
+        oncontextmenu={(event) => openTrackContextMenu(event, track)}
         onkeydown={(event) => handleRowKeydown(event, track)}
       >
         <div class="mini-cover" aria-hidden="true">
