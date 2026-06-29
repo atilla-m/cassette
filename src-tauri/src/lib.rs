@@ -258,6 +258,31 @@ fn create_playlist(
 }
 
 #[tauri::command]
+fn rename_playlist(
+    playlist_id: String,
+    name: String,
+    library: State<'_, Mutex<LibraryDatabase>>,
+) -> Result<Playlist, String> {
+    let library = library
+        .lock()
+        .map_err(|_| "Library cache is unavailable.".to_owned())?;
+
+    library.rename_playlist(&playlist_id, &name)
+}
+
+#[tauri::command]
+fn delete_playlist(
+    playlist_id: String,
+    library: State<'_, Mutex<LibraryDatabase>>,
+) -> Result<(), String> {
+    let library = library
+        .lock()
+        .map_err(|_| "Library cache is unavailable.".to_owned())?;
+
+    library.delete_playlist(&playlist_id)
+}
+
+#[tauri::command]
 fn add_track_to_playlist(
     playlist_id: String,
     track_id: String,
@@ -281,6 +306,20 @@ fn remove_track_from_playlist(
         .map_err(|_| "Library cache is unavailable.".to_owned())?;
 
     library.remove_track_from_playlist(&playlist_id, &track_id)
+}
+
+#[tauri::command]
+fn move_playlist_track(
+    playlist_id: String,
+    track_id: String,
+    direction: String,
+    library: State<'_, Mutex<LibraryDatabase>>,
+) -> Result<Playlist, String> {
+    let library = library
+        .lock()
+        .map_err(|_| "Library cache is unavailable.".to_owned())?;
+
+    library.move_playlist_track(&playlist_id, &track_id, &direction)
 }
 
 impl LibraryDatabase {
@@ -807,6 +846,54 @@ impl LibraryDatabase {
         self.playlist_by_id(&id)
     }
 
+    fn rename_playlist(&self, playlist_id: &str, name: &str) -> Result<Playlist, String> {
+        self.playlist_by_id(playlist_id)?;
+        let name = name.trim();
+
+        if name.is_empty() {
+            return Err("Playlist name is required.".to_owned());
+        }
+
+        if self.playlist_name_exists_for_other_playlist(playlist_id, name)? {
+            return Err("A playlist with this name already exists.".to_owned());
+        }
+
+        let now = unix_timestamp();
+        let changed = self
+            .connection
+            .execute(
+                "
+                UPDATE playlists
+                SET name = ?2,
+                    updated_at = ?3
+                WHERE id = ?1
+                ",
+                params![playlist_id, name, now],
+            )
+            .map_err(|error| format!("Could not rename playlist: {error}"))?;
+
+        if changed == 0 {
+            return Err("Playlist does not exist.".to_owned());
+        }
+
+        self.playlist_by_id(playlist_id)
+    }
+
+    fn delete_playlist(&self, playlist_id: &str) -> Result<(), String> {
+        self.playlist_by_id(playlist_id)?;
+
+        let changed = self
+            .connection
+            .execute("DELETE FROM playlists WHERE id = ?1", [playlist_id])
+            .map_err(|error| format!("Could not delete playlist: {error}"))?;
+
+        if changed == 0 {
+            return Err("Playlist does not exist.".to_owned());
+        }
+
+        Ok(())
+    }
+
     fn add_track_to_playlist(&self, playlist_id: &str, track_id: &str) -> Result<Playlist, String> {
         let playlist = self.playlist_by_id(playlist_id)?;
 
@@ -873,6 +960,85 @@ impl LibraryDatabase {
         self.playlist_by_id(playlist_id)
     }
 
+    fn move_playlist_track(
+        &self,
+        playlist_id: &str,
+        track_id: &str,
+        direction: &str,
+    ) -> Result<Playlist, String> {
+        self.playlist_by_id(playlist_id)?;
+        self.compact_playlist_positions(playlist_id)?;
+
+        let direction = direction.trim().to_lowercase();
+        let current_position = self
+            .connection
+            .query_row(
+                "
+                SELECT position
+                FROM playlist_tracks
+                WHERE playlist_id = ?1 AND track_id = ?2
+                ",
+                params![playlist_id, track_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(|error| format!("Could not read playlist track: {error}"))?
+            .ok_or_else(|| "Track is not in this playlist.".to_owned())?;
+
+        let target_position = match direction.as_str() {
+            "up" => {
+                if current_position == 0 {
+                    return self.playlist_by_id(playlist_id);
+                }
+
+                current_position - 1
+            }
+            "down" => current_position + 1,
+            _ => return Err("Move direction must be up or down.".to_owned()),
+        };
+
+        let Some(target_track_id) = self
+            .connection
+            .query_row(
+                "
+                SELECT track_id
+                FROM playlist_tracks
+                WHERE playlist_id = ?1 AND position = ?2
+                ",
+                params![playlist_id, target_position],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|error| format!("Could not read playlist track: {error}"))?
+        else {
+            return self.playlist_by_id(playlist_id);
+        };
+
+        self.connection
+            .execute(
+                "
+                UPDATE playlist_tracks
+                SET position = CASE track_id
+                    WHEN ?2 THEN ?4
+                    WHEN ?3 THEN ?5
+                    ELSE position
+                END
+                WHERE playlist_id = ?1 AND track_id IN (?2, ?3)
+                ",
+                params![
+                    playlist_id,
+                    track_id,
+                    target_track_id,
+                    target_position,
+                    current_position,
+                ],
+            )
+            .map_err(|error| format!("Could not move playlist track: {error}"))?;
+        self.touch_playlist(playlist_id, unix_timestamp())?;
+
+        self.playlist_by_id(playlist_id)
+    }
+
     fn touch_playlist(&self, playlist_id: &str, updated_at: i64) -> Result<(), String> {
         let changed = self
             .connection
@@ -890,20 +1056,32 @@ impl LibraryDatabase {
     }
 
     fn playlist_name_exists(&self, name: &str) -> Result<bool, String> {
+        self.playlist_name_exists_for_other_playlist("", name)
+    }
+
+    fn playlist_name_exists_for_other_playlist(
+        &self,
+        playlist_id: &str,
+        name: &str,
+    ) -> Result<bool, String> {
         let normalized_name = normalize_playlist_name(name);
         let mut statement = self
             .connection
-            .prepare("SELECT name FROM playlists")
+            .prepare("SELECT id, name FROM playlists")
             .map_err(|error| format!("Could not read playlists: {error}"))?;
-        let existing_names = statement
-            .query_map([], |row| row.get::<_, String>(0))
+        let existing_playlists = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
             .map_err(|error| format!("Could not read playlists: {error}"))?
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(|error| format!("Could not read playlist rows: {error}"))?;
 
-        Ok(existing_names
+        Ok(existing_playlists
             .iter()
-            .any(|existing_name| normalize_playlist_name(existing_name) == normalized_name))
+            .any(|(existing_id, existing_name)| {
+                existing_id != playlist_id && normalize_playlist_name(existing_name) == normalized_name
+            }))
     }
 
     fn compact_playlist_positions(&self, playlist_id: &str) -> Result<(), String> {
@@ -1938,8 +2116,11 @@ pub fn run() {
             set_album_genres,
             set_artist_genres,
             create_playlist,
+            rename_playlist,
+            delete_playlist,
             add_track_to_playlist,
             remove_track_from_playlist,
+            move_playlist_track,
             play_track,
             pause_playback,
             resume_playback,

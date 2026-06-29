@@ -3,9 +3,12 @@
     addTrackToPlaylist,
     chooseLibraryFolder,
     createPlaylist,
+    deletePlaylist,
     getLibraryCache,
+    movePlaylistTrack,
     recordTrackPlay,
     removeTrackFromPlaylist,
+    renamePlaylist,
     scanLibrary,
     setAlbumGenres,
     setArtistGenres,
@@ -469,6 +472,8 @@
       { label: "Play playlist", disabled: playlistTracks.length === 0, action: () => playTrackSet(playlistTracks) },
       { label: "Shuffle playlist", disabled: playlistTracks.length === 0, action: () => playTrackSet(playlistTracks, true) },
       { label: "Add playlist to queue", disabled: playlistTracks.length === 0, action: () => appendTracksToQueue(playlistTracks) },
+      { label: "Rename playlist", action: () => handleRenamePlaylist(playlist) },
+      { label: "Delete playlist", action: () => handleDeletePlaylist(playlist) },
     ]);
   }
 
@@ -713,6 +718,119 @@
       playlistMessage = `${track.title} removed from ${updatedPlaylist.name}.`;
     } catch (error) {
       playlists = previousPlaylists;
+      playlistError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  async function handleMoveTrackInSelectedPlaylist(track: Track, direction: "up" | "down") {
+    const playlist = selectedPlaylist;
+
+    if (!playlist || !canMovePlaylistTrack(playlist, track, direction)) {
+      return;
+    }
+
+    playlistError = null;
+    playlistMessage = null;
+    const previousPlaylists = playlists;
+    const optimisticPlaylist = moveTrackIdInPlaylist(playlist, track.id, direction);
+    applyUpdatedPlaylist(optimisticPlaylist);
+
+    try {
+      const updatedPlaylist = await movePlaylistTrack(playlist.id, track.id, direction);
+      applyUpdatedPlaylist(updatedPlaylist);
+    } catch (error) {
+      playlists = previousPlaylists;
+      playlistError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  function canMoveSelectedPlaylistTrack(track: Track, direction: "up" | "down") {
+    return selectedPlaylist ? canMovePlaylistTrack(selectedPlaylist, track, direction) : false;
+  }
+
+  function canMovePlaylistTrack(playlist: Playlist, track: Track, direction: "up" | "down") {
+    const trackIndex = playlist.trackIds.indexOf(track.id);
+
+    if (trackIndex === -1) {
+      return false;
+    }
+
+    return direction === "up"
+      ? trackIndex > 0
+      : trackIndex < playlist.trackIds.length - 1;
+  }
+
+  function moveTrackIdInPlaylist(playlist: Playlist, trackId: string, direction: "up" | "down"): Playlist {
+    const trackIds = [...playlist.trackIds];
+    const trackIndex = trackIds.indexOf(trackId);
+    const targetIndex = direction === "up" ? trackIndex - 1 : trackIndex + 1;
+
+    if (trackIndex === -1 || targetIndex < 0 || targetIndex >= trackIds.length) {
+      return playlist;
+    }
+
+    [trackIds[trackIndex], trackIds[targetIndex]] = [trackIds[targetIndex], trackIds[trackIndex]];
+
+    return {
+      ...playlist,
+      trackIds,
+      updatedAt: Math.floor(Date.now() / 1000),
+    };
+  }
+
+  async function handleRenamePlaylist(playlist: Playlist) {
+    const name = window.prompt("Playlist name", playlist.name);
+
+    if (name === null) {
+      return;
+    }
+
+    const trimmedName = name.trim();
+    playlistError = null;
+    playlistMessage = null;
+
+    if (!trimmedName) {
+      playlistError = "Playlist name is required.";
+      return;
+    }
+
+    if (playlistNameExists(trimmedName, playlist.id)) {
+      playlistError = "A playlist with this name already exists.";
+      return;
+    }
+
+    try {
+      const updatedPlaylist = await renamePlaylist(playlist.id, trimmedName);
+      applyUpdatedPlaylist(updatedPlaylist);
+      playlistMessage = `${updatedPlaylist.name} renamed.`;
+    } catch (error) {
+      playlistError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  async function handleDeletePlaylist(playlist: Playlist) {
+    const shouldDelete = window.confirm(`Delete "${playlist.name}"? This will not delete any songs or audio files.`);
+
+    if (!shouldDelete) {
+      return;
+    }
+
+    playlistError = null;
+    playlistMessage = null;
+
+    try {
+      await deletePlaylist(playlist.id);
+      playlists = playlists.filter((candidate) => candidate.id !== playlist.id);
+
+      if (selectedPlaylistId === playlist.id) {
+        selectedPlaylistId = null;
+      }
+
+      isLikedSongsOpen = false;
+      isMixBuilderOpen = false;
+      playlistMessage = `${playlist.name} deleted.`;
+      mainElement?.scrollTo({ top: 0 });
+    } catch (error) {
       playlistError = error instanceof Error ? error.message : String(error);
     }
   }
@@ -1381,10 +1499,11 @@
     return value.trim().toLocaleLowerCase();
   }
 
-  function playlistNameExists(name: string) {
+  function playlistNameExists(name: string, excludedPlaylistId: string | null = null) {
     const normalizedName = normalizePlaylistName(name);
 
-    return playlists.some((playlist) => normalizePlaylistName(playlist.name) === normalizedName);
+    return playlists.some((playlist) =>
+      playlist.id !== excludedPlaylistId && normalizePlaylistName(playlist.name) === normalizedName);
   }
 
   function buildLibraryDiagnostics(libraryTracks: Track[], albums: Album[], artists: Artist[]): LibraryDiagnostics {
@@ -2715,7 +2834,15 @@
           </section>
         {:else if selectedPlaylist}
           <section class="detail-view" aria-labelledby="custom-playlist-title">
-            <button class="back-button" type="button" onclick={handleBackToPlaylists}>Back to Playlists</button>
+            <div class="detail-actions">
+              <button class="back-button" type="button" onclick={handleBackToPlaylists}>Back to Playlists</button>
+              <button class="back-button accent" type="button" onclick={() => void handleRenamePlaylist(selectedPlaylist)}>
+                Rename
+              </button>
+              <button class="back-button destructive" type="button" onclick={() => void handleDeletePlaylist(selectedPlaylist)}>
+                Delete Playlist
+              </button>
+            </div>
             <div class="playlist-detail-header">
               <div class="playlist-mark" aria-hidden="true">P</div>
               <div class="detail-copy">
@@ -2758,6 +2885,10 @@
                   onAlbumSelect={handleTrackAlbumSelect}
                   onToggleFavorite={handleToggleFavorite}
                   onRemoveTrack={handleRemoveTrackFromSelectedPlaylist}
+                  onMoveTrackUp={(track) => void handleMoveTrackInSelectedPlaylist(track, "up")}
+                  onMoveTrackDown={(track) => void handleMoveTrackInSelectedPlaylist(track, "down")}
+                  canMoveTrackUp={(track) => canMoveSelectedPlaylistTrack(track, "up")}
+                  canMoveTrackDown={(track) => canMoveSelectedPlaylistTrack(track, "down")}
                 />
               {/if}
             </LibrarySection>
@@ -3872,6 +4003,18 @@
     border-color: #35544f;
     background: #17332f;
     color: #d8fffa;
+  }
+
+  .back-button.destructive {
+    border-color: #5b3434;
+    background: #2a1718;
+    color: #ffcbc8;
+  }
+
+  .back-button.destructive:hover,
+  .back-button.destructive:focus-visible {
+    border-color: #7a3a3a;
+    background: #341c1e;
   }
 
   .back-button:disabled {

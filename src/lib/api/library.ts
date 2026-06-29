@@ -41,10 +41,26 @@ export async function createPlaylist(name: string): Promise<Playlist> {
   return invoke<Playlist>("create_playlist", { name });
 }
 
+export async function renamePlaylist(playlistId: string, name: string): Promise<Playlist> {
+  return invoke<Playlist>("rename_playlist", { playlistId, name });
+}
+
+export async function deletePlaylist(playlistId: string): Promise<void> {
+  return invoke<void>("delete_playlist", { playlistId });
+}
+
 export async function addTrackToPlaylist(playlistId: string, trackId: string): Promise<Playlist> {
   return invoke<Playlist>("add_track_to_playlist", { playlistId, trackId });
 }
 
 export async function removeTrackFromPlaylist(playlistId: string, trackId: string): Promise<Playlist> {
   return invoke<Playlist>("remove_track_from_playlist", { playlistId, trackId });
+}
+
+export async function movePlaylistTrack(
+  playlistId: string,
+  trackId: string,
+  direction: "up" | "down",
+): Promise<Playlist> {
+  return invoke<Playlist>("move_playlist_track", { playlistId, trackId, direction });
 }

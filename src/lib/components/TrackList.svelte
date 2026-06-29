@@ -12,6 +12,10 @@
     onAlbumSelect?: (track: Track) => void;
     onToggleFavorite?: (track: Track) => void;
     onRemoveTrack?: (track: Track) => void;
+    onMoveTrackUp?: (track: Track) => void;
+    onMoveTrackDown?: (track: Track) => void;
+    canMoveTrackUp?: (track: Track) => boolean;
+    canMoveTrackDown?: (track: Track) => boolean;
   };
 
   let {
@@ -24,7 +28,13 @@
     onAlbumSelect,
     onToggleFavorite,
     onRemoveTrack,
+    onMoveTrackUp,
+    onMoveTrackDown,
+    canMoveTrackUp,
+    canMoveTrackDown,
   }: Props = $props();
+
+  let hasMoveControls = $derived(Boolean(onMoveTrackUp || onMoveTrackDown));
 
   function displayArtist(track: Track) {
     return track.artist ?? "Unknown Artist";
@@ -76,6 +86,16 @@
     onRemoveTrack?.(track);
   }
 
+  function moveTrackUp(event: MouseEvent, track: Track) {
+    event.stopPropagation();
+    onMoveTrackUp?.(track);
+  }
+
+  function moveTrackDown(event: MouseEvent, track: Track) {
+    event.stopPropagation();
+    onMoveTrackDown?.(track);
+  }
+
   function hideBrokenImage(event: Event) {
     if (event.currentTarget instanceof HTMLImageElement) {
       event.currentTarget.hidden = true;
@@ -108,6 +128,8 @@
     {#each tracks as track (track.id)}
       <div
         class:active={track.id === selectedTrackId}
+        class:withMove={hasMoveControls}
+        class:withRemove={Boolean(onRemoveTrack)}
         class="track-row"
         role="button"
         tabindex="0"
@@ -151,6 +173,26 @@
         >
           {track.isFavorite ? "★" : "☆"}
         </button>
+        {#if hasMoveControls}
+          <div class="move-buttons" aria-label="Playlist track order">
+            <button
+              type="button"
+              aria-label={`Move ${track.title} up`}
+              disabled={canMoveTrackUp ? !canMoveTrackUp(track) : !onMoveTrackUp}
+              onclick={(event) => moveTrackUp(event, track)}
+            >
+              Up
+            </button>
+            <button
+              type="button"
+              aria-label={`Move ${track.title} down`}
+              disabled={canMoveTrackDown ? !canMoveTrackDown(track) : !onMoveTrackDown}
+              onclick={(event) => moveTrackDown(event, track)}
+            >
+              Down
+            </button>
+          </div>
+        {/if}
         {#if onRemoveTrack}
           <button
             class="remove-button"
@@ -215,6 +257,18 @@
     outline: none;
   }
 
+  .track-row.withRemove {
+    grid-template-columns: auto minmax(160px, 1.2fr) minmax(140px, 0.9fr) auto auto auto auto;
+  }
+
+  .track-row.withMove {
+    grid-template-columns: auto minmax(140px, 1.2fr) minmax(120px, 0.9fr) auto auto auto auto;
+  }
+
+  .track-row.withMove.withRemove {
+    grid-template-columns: auto minmax(130px, 1.2fr) minmax(110px, 0.8fr) auto auto auto auto auto;
+  }
+
   .track-row:hover,
   .track-row.active,
   .track-row:focus-visible {
@@ -256,6 +310,38 @@
     font-size: 0.78rem;
     font-weight: 850;
     padding: 0 9px;
+  }
+
+  .move-buttons {
+    display: flex;
+    gap: 6px;
+  }
+
+  .move-buttons button {
+    min-height: 32px;
+    border: 1px solid #303844;
+    border-radius: 8px;
+    background: #171c23;
+    color: #aeb9c6;
+    cursor: default;
+    font: inherit;
+    font-size: 0.76rem;
+    font-weight: 850;
+    padding: 0 8px;
+  }
+
+  .move-buttons button:hover,
+  .move-buttons button:focus-visible {
+    border-color: #35544f;
+    background: #1b2027;
+    color: #f4f7fb;
+    outline: none;
+  }
+
+  .move-buttons button:disabled {
+    border-color: #262d36;
+    background: #151a21;
+    color: #626c79;
   }
 
   .remove-button:hover,
@@ -373,6 +459,16 @@
   @media (max-width: 760px) {
     .track-row {
       grid-template-columns: auto minmax(0, 1fr) auto auto;
+    }
+
+    .track-row.withRemove {
+      grid-template-columns: auto minmax(0, 1fr) auto auto auto;
+    }
+
+    .track-row.withMove,
+    .track-row.withMove.withRemove {
+      grid-template-columns: auto minmax(0, 1fr) auto auto auto auto;
+      gap: 10px;
     }
 
     .album-link,
