@@ -18,6 +18,8 @@ const SUPPORTED_EXTENSIONS: &[&str] = &["flac", "mp3", "ogg", "opus", "wav", "m4
 const COVER_IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "webp"];
 const PREFERRED_COVER_NAMES: &[&str] = &["cover", "folder", "front", "album"];
 const MAX_FOLDER_COVER_BYTES: u64 = 25 * 1024 * 1024;
+const GENRE_SCOPE_ALBUM: &str = "album";
+const GENRE_SCOPE_ARTIST: &str = "artist";
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -101,6 +103,12 @@ struct PlaybackState {
     has_ended: bool,
 }
 
+#[derive(Debug, Default)]
+struct GenreAssignmentMaps {
+    albums: HashMap<String, Vec<String>>,
+    artists: HashMap<String, Vec<String>>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct LibraryCache {
@@ -175,6 +183,33 @@ fn toggle_track_favorite(
     library.toggle_favorite(&id)
 }
 
+#[tauri::command]
+fn set_album_genres(
+    album_id: String,
+    genres: Vec<String>,
+    library: State<'_, Mutex<LibraryDatabase>>,
+) -> Result<Vec<Track>, String> {
+    let library = library
+        .lock()
+        .map_err(|_| "Library cache is unavailable.".to_owned())?;
+
+    library.set_genres(GENRE_SCOPE_ALBUM, &album_id, genres)
+}
+
+#[tauri::command]
+fn set_artist_genres(
+    artist_name: String,
+    genres: Vec<String>,
+    library: State<'_, Mutex<LibraryDatabase>>,
+) -> Result<Vec<Track>, String> {
+    let library = library
+        .lock()
+        .map_err(|_| "Library cache is unavailable.".to_owned())?;
+    let artist_key = artist_key_for_name(&artist_name);
+
+    library.set_genres(GENRE_SCOPE_ARTIST, &artist_key, genres)
+}
+
 impl LibraryDatabase {
     fn open(path: PathBuf) -> Result<Self, String> {
         if let Some(parent) = path.parent() {
@@ -220,6 +255,14 @@ impl LibraryDatabase {
                 key TEXT PRIMARY KEY NOT NULL,
                 value TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS genre_assignments (
+                scope TEXT NOT NULL,
+                entity_key TEXT NOT NULL,
+                genres TEXT NOT NULL DEFAULT '[]',
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (scope, entity_key)
+            );
             ",
         )?;
 
@@ -229,16 +272,17 @@ impl LibraryDatabase {
         }
 
         if !self.has_column("tracks", "is_favorite")? {
-            self.connection
-                .execute(
-                    "ALTER TABLE tracks ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0",
-                    [],
-                )?;
+            self.connection.execute(
+                "ALTER TABLE tracks ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
         }
 
         if !self.has_column("tracks", "genres")? {
-            self.connection
-                .execute("ALTER TABLE tracks ADD COLUMN genres TEXT NOT NULL DEFAULT '[]'", [])?;
+            self.connection.execute(
+                "ALTER TABLE tracks ADD COLUMN genres TEXT NOT NULL DEFAULT '[]'",
+                [],
+            )?;
         }
 
         Ok(())
@@ -289,11 +333,13 @@ impl LibraryDatabase {
             )
             .map_err(|error| format!("Could not read library cache: {error}"))?;
 
-        let tracks = statement
+        let mut tracks = statement
             .query_map([], row_to_track)
             .map_err(|error| format!("Could not read library cache: {error}"))?
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(|error| format!("Could not read cached tracks: {error}"))?;
+        let genre_assignments = self.genre_assignments()?;
+        apply_genre_assignments(&mut tracks, &genre_assignments);
 
         Ok(LibraryCache {
             tracks,
@@ -349,10 +395,10 @@ impl LibraryDatabase {
                 )
                 .map_err(|error| format!("Could not prepare library cache update: {error}"))?;
 
-            for track in tracks {
+            for track in tracks.iter_mut() {
                 track.is_favorite = track.is_favorite || favorite_track_ids.contains(&track.id);
-                let genres_json = serde_json::to_string(&track.genres)
-                    .unwrap_or_else(|_| "[]".to_owned());
+                let genres_json =
+                    serde_json::to_string(&track.genres).unwrap_or_else(|_| "[]".to_owned());
                 statement
                     .execute(params![
                         &track.id,
@@ -389,7 +435,12 @@ impl LibraryDatabase {
 
         transaction
             .commit()
-            .map_err(|error| format!("Could not save library cache: {error}"))
+            .map_err(|error| format!("Could not save library cache: {error}"))?;
+
+        let genre_assignments = self.genre_assignments()?;
+        apply_genre_assignments(tracks, &genre_assignments);
+
+        Ok(())
     }
 
     fn meta_value(&self, key: &str) -> Result<Option<String>, String> {
@@ -406,9 +457,11 @@ impl LibraryDatabase {
     fn toggle_favorite(&self, id: &str) -> Result<bool, String> {
         let current = self
             .connection
-            .query_row("SELECT is_favorite FROM tracks WHERE id = ?1", [id], |row| {
-                row.get::<_, bool>(0)
-            })
+            .query_row(
+                "SELECT is_favorite FROM tracks WHERE id = ?1",
+                [id],
+                |row| row.get::<_, bool>(0),
+            )
             .optional()
             .map_err(|error| format!("Could not read favorite state: {error}"))?
             .ok_or_else(|| "Track is not in the library cache.".to_owned())?;
@@ -422,6 +475,79 @@ impl LibraryDatabase {
             .map_err(|error| format!("Could not update favorite state: {error}"))?;
 
         Ok(next)
+    }
+
+    fn set_genres(
+        &self,
+        scope: &str,
+        entity_key: &str,
+        genres: Vec<String>,
+    ) -> Result<Vec<Track>, String> {
+        let genres = normalize_manual_genres(genres);
+
+        if genres.is_empty() {
+            self.connection
+                .execute(
+                    "DELETE FROM genre_assignments WHERE scope = ?1 AND entity_key = ?2",
+                    params![scope, entity_key],
+                )
+                .map_err(|error| format!("Could not clear genre assignment: {error}"))?;
+        } else {
+            let genres_json = serde_json::to_string(&genres).unwrap_or_else(|_| "[]".to_owned());
+            self.connection
+                .execute(
+                    "
+                    INSERT INTO genre_assignments (scope, entity_key, genres, updated_at)
+                    VALUES (?1, ?2, ?3, ?4)
+                    ON CONFLICT(scope, entity_key) DO UPDATE SET
+                        genres = excluded.genres,
+                        updated_at = excluded.updated_at
+                    ",
+                    params![scope, entity_key, genres_json, unix_timestamp()],
+                )
+                .map_err(|error| format!("Could not save genre assignment: {error}"))?;
+        }
+
+        self.load_cache().map(|cache| cache.tracks)
+    }
+
+    fn genre_assignments(&self) -> Result<GenreAssignmentMaps, String> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT scope, entity_key, genres FROM genre_assignments")
+            .map_err(|error| format!("Could not read genre assignments: {error}"))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(|error| format!("Could not read genre assignments: {error}"))?;
+        let mut assignments = GenreAssignmentMaps::default();
+
+        for row in rows {
+            let (scope, entity_key, genres_json) =
+                row.map_err(|error| format!("Could not read genre assignment: {error}"))?;
+            let genres = parse_assigned_genres(genres_json);
+
+            if genres.is_empty() {
+                continue;
+            }
+
+            match scope.as_str() {
+                GENRE_SCOPE_ALBUM => {
+                    assignments.albums.insert(entity_key, genres);
+                }
+                GENRE_SCOPE_ARTIST => {
+                    assignments.artists.insert(entity_key, genres);
+                }
+                _ => {}
+            }
+        }
+
+        Ok(assignments)
     }
 }
 
@@ -705,6 +831,32 @@ fn parse_cached_genres(value: String) -> Vec<String> {
     normalize_genres(genres)
 }
 
+fn parse_assigned_genres(value: String) -> Vec<String> {
+    let genres = serde_json::from_str::<Vec<String>>(&value).unwrap_or_default();
+
+    normalize_manual_genres(genres)
+}
+
+fn normalize_manual_genres(genres: Vec<String>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut normalized = Vec::new();
+
+    for genre in genres {
+        for candidate in genre.split([',', ';', '\0']) {
+            let Some(genre) = clean_text(Some(candidate.to_owned())) else {
+                continue;
+            };
+            let key = genre.to_lowercase();
+
+            if seen.insert(key) {
+                normalized.push(genre);
+            }
+        }
+    }
+
+    normalized
+}
+
 fn favorite_track_ids(connection: &Connection) -> rusqlite::Result<HashSet<String>> {
     let mut statement = connection.prepare("SELECT id FROM tracks WHERE is_favorite = 1")?;
     let ids = statement
@@ -750,13 +902,7 @@ fn scan_directory(
         let path = entry.path();
 
         if file_type.is_dir() {
-            scan_directory(
-                &path,
-                scanned_at,
-                cover_art_dir,
-                album_art_paths,
-                tracks,
-            )?;
+            scan_directory(&path, scanned_at, cover_art_dir, album_art_paths, tracks)?;
         } else if file_type.is_file() && is_supported_audio_file(&path) {
             if let Some((mut track, embedded_cover_art)) = track_from_path(path.clone(), scanned_at)
             {
@@ -764,10 +910,9 @@ fn scan_directory(
                 let existing_priority = album_art_paths
                     .get(&album_art_key)
                     .map(|cover_art| cover_art.priority);
-                let should_check_cover_art = !matches!(
-                    existing_priority,
-                    Some(CoverArtPriority::Embedded)
-                ) && (existing_priority.is_none() || embedded_cover_art.is_some());
+                let should_check_cover_art =
+                    !matches!(existing_priority, Some(CoverArtPriority::Embedded))
+                        && (existing_priority.is_none() || embedded_cover_art.is_some());
 
                 if should_check_cover_art {
                     if let Some(candidate) = cover_art_candidate(
@@ -880,6 +1025,30 @@ fn album_key_for_track(track: &Track) -> String {
         .unwrap_or("Unknown Artist");
 
     format!("{}\0{}", artist.to_lowercase(), title.to_lowercase())
+}
+
+fn artist_key_for_track(track: &Track) -> String {
+    let artist = track
+        .artist
+        .as_deref()
+        .or(track.album_artist.as_deref())
+        .unwrap_or("Unknown Artist");
+
+    artist_key_for_name(artist)
+}
+
+fn artist_key_for_name(artist: &str) -> String {
+    artist.trim().to_lowercase()
+}
+
+fn apply_genre_assignments(tracks: &mut [Track], assignments: &GenreAssignmentMaps) {
+    for track in tracks {
+        if let Some(genres) = assignments.albums.get(&album_key_for_track(track)) {
+            track.genres = genres.clone();
+        } else if let Some(genres) = assignments.artists.get(&artist_key_for_track(track)) {
+            track.genres = genres.clone();
+        }
+    }
 }
 
 fn album_art_key_for_track(track: &Track, path: &Path) -> String {
@@ -1206,8 +1375,7 @@ fn image_extension(data: &[u8]) -> Option<&'static str> {
         return Some("bmp");
     }
 
-    if data.starts_with(&[b'I', b'I', 0x2a, 0x00]) || data.starts_with(&[b'M', b'M', 0x00, 0x2a])
-    {
+    if data.starts_with(&[b'I', b'I', 0x2a, 0x00]) || data.starts_with(&[b'M', b'M', 0x00, 0x2a]) {
         return Some("tif");
     }
 
@@ -1252,6 +1420,8 @@ pub fn run() {
             get_library_cache,
             scan_library,
             toggle_track_favorite,
+            set_album_genres,
+            set_artist_genres,
             play_track,
             pause_playback,
             resume_playback,

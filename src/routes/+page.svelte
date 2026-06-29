@@ -1,5 +1,12 @@
 <script lang="ts">
-  import { chooseLibraryFolder, getLibraryCache, scanLibrary, toggleTrackFavorite } from "$lib/api/library";
+  import {
+    chooseLibraryFolder,
+    getLibraryCache,
+    scanLibrary,
+    setAlbumGenres,
+    setArtistGenres,
+    toggleTrackFavorite,
+  } from "$lib/api/library";
   import {
     getPlaybackStatus,
     pausePlayback,
@@ -34,6 +41,8 @@
   let isScanning = $state(false);
   let scanError = $state<string | null>(null);
   let playbackError = $state<string | null>(null);
+  let genreEditError = $state<string | null>(null);
+  let genreEditMessage = $state<string | null>(null);
   let scannedFolder = $state<string | null>(null);
   let scanCount = $state<number | null>(null);
   let hasLoadedCache = $state(false);
@@ -61,6 +70,9 @@
   let artistSortDirection = $state<SortDirection>("asc");
   let genreSort = $state<GenreSortKey>("name");
   let genreSortDirection = $state<SortDirection>("asc");
+  let albumGenreDraft = $state("");
+  let artistGenreDraft = $state("");
+  let isSavingGenreAssignment = $state(false);
   let isPlaying = $state(false);
   let hasCurrentTrackEnded = $state(false);
   let positionSeconds = $state(0);
@@ -112,6 +124,8 @@
   );
   let selectedGenreAlbums = $derived(selectedGenre ? albumsForTracks(selectedGenreTracks, sortedAlbums) : []);
   let selectedGenreArtists = $derived(selectedGenre ? buildArtists(selectedGenreTracks) : []);
+  let selectedAlbumGenreText = $derived(genreDisplayForTracks(selectedAlbumTracks));
+  let selectedArtistGenreText = $derived(genreDisplayForTracks(selectedArtistTracks));
   let playbackOrder = $derived(
     isShuffleEnabled
       ? normalizedQueueOrder(shuffledQueueOrder, playbackQueue.length)
@@ -237,6 +251,7 @@
       selectedAlbumId = null;
       selectedArtistName = null;
       selectedGenreName = null;
+      clearGenreEditState();
       isLikedSongsOpen = false;
       searchQuery = "";
       currentTrackIndex = null;
@@ -278,6 +293,7 @@
     selectedAlbumId = null;
     selectedArtistName = null;
     selectedGenreName = null;
+    clearGenreEditState();
     isLikedSongsOpen = false;
     mainElement?.scrollTo({ top: 0 });
   }
@@ -288,6 +304,8 @@
     selectedAlbumId = album.id;
     selectedArtistName = null;
     selectedGenreName = null;
+    clearGenreEditState();
+    albumGenreDraft = genreDraftForTracks(tracks.filter((track) => albumIdForTrack(track) === album.id));
     isLikedSongsOpen = false;
     mainElement?.scrollTo({ top: 0 });
   }
@@ -298,6 +316,8 @@
     selectedArtistName = artist.name;
     selectedAlbumId = null;
     selectedGenreName = null;
+    clearGenreEditState();
+    artistGenreDraft = genreDraftForTracks(tracks.filter((track) => artistNameForTrack(track) === artist.name));
     isLikedSongsOpen = false;
     mainElement?.scrollTo({ top: 0 });
   }
@@ -308,6 +328,7 @@
     selectedGenreName = genre.name;
     selectedAlbumId = null;
     selectedArtistName = null;
+    clearGenreEditState();
     isLikedSongsOpen = false;
     mainElement?.scrollTo({ top: 0 });
   }
@@ -317,6 +338,7 @@
     selectedAlbumId = null;
     selectedArtistName = null;
     selectedGenreName = null;
+    clearGenreEditState();
     isLikedSongsOpen = true;
     searchQuery = "";
     mainElement?.scrollTo({ top: 0 });
@@ -324,11 +346,13 @@
 
   function handleBackToAlbums() {
     selectedAlbumId = null;
+    clearGenreEditState();
     mainElement?.scrollTo({ top: 0 });
   }
 
   function handleBackToArtists() {
     selectedArtistName = null;
+    clearGenreEditState();
     mainElement?.scrollTo({ top: 0 });
   }
 
@@ -413,6 +437,74 @@
     if (currentTrack?.id === trackId) {
       currentTrack = { ...currentTrack, isFavorite };
     }
+  }
+
+  async function handleSaveAlbumGenres() {
+    const album = selectedAlbum;
+
+    if (!album) {
+      return;
+    }
+
+    genreEditError = null;
+    genreEditMessage = null;
+    isSavingGenreAssignment = true;
+
+    try {
+      const submittedGenres = parseGenreDraft(albumGenreDraft);
+      const updatedTracks = await setAlbumGenres(album.id, submittedGenres);
+      applyUpdatedTracks(updatedTracks);
+      albumGenreDraft = genreDraftForTracks(updatedTracks.filter((track) => albumIdForTrack(track) === album.id));
+      genreEditMessage = submittedGenres.length > 0 ? "Album genres saved." : "Album genre assignment cleared.";
+    } catch (error) {
+      genreEditError = error instanceof Error ? error.message : String(error);
+    } finally {
+      isSavingGenreAssignment = false;
+    }
+  }
+
+  async function handleSaveArtistGenres() {
+    const artist = selectedArtist;
+
+    if (!artist) {
+      return;
+    }
+
+    genreEditError = null;
+    genreEditMessage = null;
+    isSavingGenreAssignment = true;
+
+    try {
+      const submittedGenres = parseGenreDraft(artistGenreDraft);
+      const updatedTracks = await setArtistGenres(artist.name, submittedGenres);
+      applyUpdatedTracks(updatedTracks);
+      artistGenreDraft = genreDraftForTracks(updatedTracks.filter((track) => artistNameForTrack(track) === artist.name));
+      genreEditMessage = submittedGenres.length > 0 ? "Artist genres saved." : "Artist genre assignment cleared.";
+    } catch (error) {
+      genreEditError = error instanceof Error ? error.message : String(error);
+    } finally {
+      isSavingGenreAssignment = false;
+    }
+  }
+
+  function applyUpdatedTracks(updatedTracks: Track[]) {
+    const tracksById = new Map(updatedTracks.map((track) => [track.id, track]));
+
+    tracks = updatedTracks;
+    playbackQueue = playbackQueue.map((track) => tracksById.get(track.id) ?? track);
+
+    if (currentTrack) {
+      currentTrack = tracksById.get(currentTrack.id) ?? currentTrack;
+      currentTrackIndex = tracks.findIndex((track) => track.id === currentTrack?.id);
+    }
+  }
+
+  function clearGenreEditState() {
+    genreEditError = null;
+    genreEditMessage = null;
+    isSavingGenreAssignment = false;
+    albumGenreDraft = "";
+    artistGenreDraft = "";
   }
 
   async function handlePreviousTrack() {
@@ -581,6 +673,51 @@
 
   function trackGenres(track: Track) {
     return track.genres.length > 0 ? track.genres : ["Unknown Genre"];
+  }
+
+  function parseGenreDraft(value: string) {
+    const seen = new Set<string>();
+    const genres: string[] = [];
+
+    for (const part of value.split(",")) {
+      const genre = part.trim();
+      const key = genre.toLocaleLowerCase();
+
+      if (genre && !seen.has(key)) {
+        seen.add(key);
+        genres.push(genre);
+      }
+    }
+
+    return genres;
+  }
+
+  function uniqueGenresForTracks(libraryTracks: Track[]) {
+    const seen = new Set<string>();
+    const genres: string[] = [];
+
+    for (const track of libraryTracks) {
+      for (const genre of trackGenres(track)) {
+        const key = genre.toLocaleLowerCase();
+
+        if (!seen.has(key)) {
+          seen.add(key);
+          genres.push(genre);
+        }
+      }
+    }
+
+    return genres;
+  }
+
+  function genreDisplayForTracks(libraryTracks: Track[]) {
+    return uniqueGenresForTracks(libraryTracks).join(", ") || "Unknown Genre";
+  }
+
+  function genreDraftForTracks(libraryTracks: Track[]) {
+    return uniqueGenresForTracks(libraryTracks)
+      .filter((genre) => genre !== "Unknown Genre")
+      .join(", ");
   }
 
   function albumIdsForTracks(libraryTracks: Track[]) {
@@ -1151,6 +1288,30 @@
               </div>
             </div>
 
+            <div class="genre-editor" aria-label="Album genre editor">
+              <div class="genre-editor-copy">
+                <p class="eyebrow">Genres</p>
+                <p>{selectedAlbumGenreText}</p>
+              </div>
+              <form onsubmit={(event) => { event.preventDefault(); void handleSaveAlbumGenres(); }}>
+                <input
+                  type="text"
+                  bind:value={albumGenreDraft}
+                  placeholder="Technical Death Metal, Jazz"
+                  aria-label="Album genres"
+                  disabled={isSavingGenreAssignment}
+                />
+                <button type="submit" disabled={isSavingGenreAssignment}>
+                  {isSavingGenreAssignment ? "Saving..." : "Save"}
+                </button>
+              </form>
+              {#if genreEditError}
+                <p class="genre-editor-error" role="alert">{genreEditError}</p>
+              {:else if genreEditMessage}
+                <p class="genre-editor-message">{genreEditMessage}</p>
+              {/if}
+            </div>
+
             <LibrarySection title="Album Songs" viewAllLabel={`${selectedAlbumTracks.length} total`}>
               <TrackList
                 tracks={selectedAlbumTracks}
@@ -1224,6 +1385,30 @@
                 <h3 id="artist-detail-title">{selectedArtist.name}</h3>
                 <p>{artistSongCount(selectedArtist)} · {selectedArtistAlbums.length} {selectedArtistAlbums.length === 1 ? "album" : "albums"}</p>
               </div>
+            </div>
+
+            <div class="genre-editor" aria-label="Artist genre editor">
+              <div class="genre-editor-copy">
+                <p class="eyebrow">Genres</p>
+                <p>{selectedArtistGenreText}</p>
+              </div>
+              <form onsubmit={(event) => { event.preventDefault(); void handleSaveArtistGenres(); }}>
+                <input
+                  type="text"
+                  bind:value={artistGenreDraft}
+                  placeholder="Technical Death Metal, Jazz"
+                  aria-label="Artist genres"
+                  disabled={isSavingGenreAssignment}
+                />
+                <button type="submit" disabled={isSavingGenreAssignment}>
+                  {isSavingGenreAssignment ? "Saving..." : "Save"}
+                </button>
+              </form>
+              {#if genreEditError}
+                <p class="genre-editor-error" role="alert">{genreEditError}</p>
+              {:else if genreEditMessage}
+                <p class="genre-editor-message">{genreEditMessage}</p>
+              {/if}
             </div>
 
             <LibrarySection title="Albums" viewAllLabel={`${selectedArtistAlbums.length} total`}>
@@ -2136,6 +2321,92 @@
     font-weight: 700;
   }
 
+  .genre-editor {
+    display: grid;
+    grid-template-columns: minmax(160px, 0.45fr) minmax(220px, 1fr);
+    gap: 12px;
+    align-items: center;
+    border: 1px solid #242b35;
+    border-radius: 8px;
+    background: #12161c;
+    padding: 14px;
+  }
+
+  .genre-editor-copy {
+    min-width: 0;
+  }
+
+  .genre-editor-copy p:not(.eyebrow) {
+    overflow: hidden;
+    margin: 0;
+    color: #d5dce5;
+    font-weight: 750;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .genre-editor form {
+    display: flex;
+    min-width: 0;
+    gap: 10px;
+  }
+
+  .genre-editor input {
+    width: 100%;
+    min-width: 0;
+    min-height: 40px;
+    border: 1px solid #303844;
+    border-radius: 8px;
+    background: #0f1318;
+    color: #f4f7fb;
+    font: inherit;
+    font-size: 0.92rem;
+    font-weight: 650;
+    outline: none;
+    padding: 0 12px;
+  }
+
+  .genre-editor input:focus {
+    border-color: #2f8f83;
+    box-shadow: 0 0 0 2px rgba(47, 143, 131, 0.18);
+  }
+
+  .genre-editor button {
+    min-width: 76px;
+    min-height: 40px;
+    border: 1px solid #35544f;
+    border-radius: 8px;
+    background: #17332f;
+    color: #d8fffa;
+    cursor: default;
+    font: inherit;
+    font-size: 0.88rem;
+    font-weight: 850;
+    padding: 0 13px;
+  }
+
+  .genre-editor button:disabled {
+    border-color: #303844;
+    background: #151a21;
+    color: #626c79;
+  }
+
+  .genre-editor-error,
+  .genre-editor-message {
+    grid-column: 1 / -1;
+    margin: 0;
+    font-size: 0.86rem;
+    font-weight: 700;
+  }
+
+  .genre-editor-error {
+    color: #ffcbc8;
+  }
+
+  .genre-editor-message {
+    color: #9ee3d9;
+  }
+
   .detail-view :global(.library-section + .library-section) {
     margin-top: 8px;
   }
@@ -2371,6 +2642,10 @@
       width: min(100%, 220px);
     }
 
+    .genre-editor {
+      grid-template-columns: 1fr;
+    }
+
     .queue-panel {
       right: 16px;
       bottom: 150px;
@@ -2384,6 +2659,10 @@
     .playlist-grid,
     .settings-grid {
       grid-template-columns: 1fr;
+    }
+
+    .genre-editor form {
+      flex-direction: column;
     }
   }
 </style>

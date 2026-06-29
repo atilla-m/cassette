@@ -24,3 +24,11 @@ export async function getLibraryCache(): Promise<LibraryCache> {
 export async function toggleTrackFavorite(id: string): Promise<boolean> {
   return invoke<boolean>("toggle_track_favorite", { id });
 }
+
+export async function setAlbumGenres(albumId: string, genres: string[]): Promise<Track[]> {
+  return invoke<Track[]>("set_album_genres", { albumId, genres });
+}
+
+export async function setArtistGenres(artistName: string, genres: string[]): Promise<Track[]> {
+  return invoke<Track[]>("set_artist_genres", { artistName, genres });
+}
