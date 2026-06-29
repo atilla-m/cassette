@@ -25,6 +25,10 @@ export async function toggleTrackFavorite(id: string): Promise<boolean> {
   return invoke<boolean>("toggle_track_favorite", { id });
 }
 
+export async function recordTrackPlay(id: string): Promise<Track> {
+  return invoke<Track>("record_track_play", { id });
+}
+
 export async function setAlbumGenres(albumId: string, genres: string[]): Promise<Track[]> {
   return invoke<Track[]>("set_album_genres", { albumId, genres });
 }

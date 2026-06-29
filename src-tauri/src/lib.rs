@@ -46,6 +46,8 @@ struct Track {
     scanned_at: Option<i64>,
     cover_art_path: Option<String>,
     is_favorite: bool,
+    play_count: i64,
+    last_played_at: Option<i64>,
 }
 
 #[derive(Debug, Default)]
@@ -125,6 +127,12 @@ struct LibraryDatabase {
     connection: Connection,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct PlaybackHistory {
+    play_count: i64,
+    last_played_at: Option<i64>,
+}
+
 #[tauri::command]
 fn get_library_cache(library: State<'_, Mutex<LibraryDatabase>>) -> Result<LibraryCache, String> {
     let library = library
@@ -185,6 +193,18 @@ fn toggle_track_favorite(
         .map_err(|_| "Library cache is unavailable.".to_owned())?;
 
     library.toggle_favorite(&id)
+}
+
+#[tauri::command]
+fn record_track_play(
+    id: String,
+    library: State<'_, Mutex<LibraryDatabase>>,
+) -> Result<Track, String> {
+    let library = library
+        .lock()
+        .map_err(|_| "Library cache is unavailable.".to_owned())?;
+
+    library.record_play(&id)
 }
 
 #[tauri::command]
@@ -252,7 +272,9 @@ impl LibraryDatabase {
                 file_size INTEGER,
                 scanned_at INTEGER NOT NULL,
                 cover_art_path TEXT,
-                is_favorite INTEGER NOT NULL DEFAULT 0
+                is_favorite INTEGER NOT NULL DEFAULT 0,
+                play_count INTEGER NOT NULL DEFAULT 0,
+                last_played_at INTEGER
             );
 
             CREATE TABLE IF NOT EXISTS library_meta (
@@ -287,6 +309,18 @@ impl LibraryDatabase {
                 "ALTER TABLE tracks ADD COLUMN genres TEXT NOT NULL DEFAULT '[]'",
                 [],
             )?;
+        }
+
+        if !self.has_column("tracks", "play_count")? {
+            self.connection.execute(
+                "ALTER TABLE tracks ADD COLUMN play_count INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+        }
+
+        if !self.has_column("tracks", "last_played_at")? {
+            self.connection
+                .execute("ALTER TABLE tracks ADD COLUMN last_played_at INTEGER", [])?;
         }
 
         Ok(())
@@ -330,7 +364,9 @@ impl LibraryDatabase {
                     scanned_at,
                     cover_art_path,
                     is_favorite,
-                    genres
+                    genres,
+                    play_count,
+                    last_played_at
                 FROM tracks
                 ORDER BY file_path
                 ",
@@ -366,6 +402,8 @@ impl LibraryDatabase {
             .map_err(|error| format!("Could not update library cache: {error}"))?;
         let favorite_track_ids = favorite_track_ids(&transaction)
             .map_err(|error| format!("Could not read favorite tracks: {error}"))?;
+        let playback_history = playback_history_by_id(&transaction)
+            .map_err(|error| format!("Could not read playback history: {error}"))?;
 
         transaction
             .execute("DELETE FROM tracks", [])
@@ -393,14 +431,20 @@ impl LibraryDatabase {
                         file_size,
                         scanned_at,
                         cover_art_path,
-                        is_favorite
-                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
+                        is_favorite,
+                        play_count,
+                        last_played_at
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
                     ",
                 )
                 .map_err(|error| format!("Could not prepare library cache update: {error}"))?;
 
             for track in tracks.iter_mut() {
                 track.is_favorite = track.is_favorite || favorite_track_ids.contains(&track.id);
+                if let Some(history) = playback_history.get(&track.id) {
+                    track.play_count = history.play_count;
+                    track.last_played_at = history.last_played_at;
+                }
                 let genres_json =
                     serde_json::to_string(&track.genres).unwrap_or_else(|_| "[]".to_owned());
                 statement
@@ -423,6 +467,8 @@ impl LibraryDatabase {
                         track.scanned_at,
                         &track.cover_art_path,
                         track.is_favorite,
+                        track.play_count,
+                        track.last_played_at,
                     ])
                     .map_err(|error| format!("Could not cache scanned track: {error}"))?;
             }
@@ -504,7 +550,9 @@ impl LibraryDatabase {
                     scanned_at,
                     cover_art_path,
                     is_favorite,
-                    genres
+                    genres,
+                    play_count,
+                    last_played_at
                 FROM tracks
                 WHERE id = ?1
                 ",
@@ -521,6 +569,29 @@ impl LibraryDatabase {
         }
 
         Ok(track)
+    }
+
+    fn record_play(&self, id: &str) -> Result<Track, String> {
+        let played_at = unix_timestamp();
+        let updated = self
+            .connection
+            .execute(
+                "
+                UPDATE tracks
+                SET play_count = play_count + 1,
+                    last_played_at = ?2
+                WHERE id = ?1
+                ",
+                params![id, played_at],
+            )
+            .map_err(|error| format!("Could not update playback history: {error}"))?;
+
+        if updated == 0 {
+            return Err("Track is not in the library cache.".to_owned());
+        }
+
+        self.track_by_id(id)?
+            .ok_or_else(|| "Track is not in the library cache.".to_owned())
     }
 
     fn set_genres(
@@ -669,7 +740,7 @@ fn get_playback_status(
 
 #[tauri::command]
 fn seek_playback(
-    position_seconds: u64,
+    position_seconds: f64,
     playback: State<'_, Mutex<PlaybackState>>,
     mpris: State<'_, MprisState>,
 ) -> Result<PlaybackStatus, String> {
@@ -778,15 +849,33 @@ impl PlaybackState {
         Ok(())
     }
 
-    fn seek(&mut self, position_seconds: u64) -> Result<PlaybackStatus, String> {
+    fn seek(&mut self, position_seconds: f64) -> Result<PlaybackStatus, String> {
+        if !position_seconds.is_finite() {
+            return Ok(self.status());
+        }
+
+        if self.current_path.is_none() {
+            return Ok(self.status());
+        }
+
         let Some(playbin) = self.playbin.as_ref() else {
             return Ok(self.status());
         };
 
+        let Some(duration) = playbin
+            .query_duration::<gst::ClockTime>()
+            .filter(|duration| *duration > gst::ClockTime::ZERO)
+        else {
+            return Ok(self.status());
+        };
+        let clamped_position_seconds = position_seconds.clamp(0.0, duration.seconds_f64());
+        let seek_position = gst::ClockTime::try_from_seconds_f64(clamped_position_seconds)
+            .map_err(|error| format!("Could not prepare seek position: {error}"))?;
+
         playbin
             .seek_simple(
                 gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
-                gst::ClockTime::from_seconds(position_seconds),
+                seek_position,
             )
             .map_err(|error| format!("Could not seek track: {error}"))?;
         self.has_ended = false;
@@ -899,6 +988,8 @@ fn row_to_track(row: &rusqlite::Row<'_>) -> rusqlite::Result<Track> {
         cover_art_path: row.get(15)?,
         is_favorite: row.get(16)?,
         genres: parse_cached_genres(row.get(17)?),
+        play_count: row.get(18)?,
+        last_played_at: row.get(19)?,
     })
 }
 
@@ -957,6 +1048,24 @@ fn favorite_track_ids(connection: &Connection) -> rusqlite::Result<HashSet<Strin
         .collect::<rusqlite::Result<HashSet<_>>>()?;
 
     Ok(ids)
+}
+
+fn playback_history_by_id(
+    connection: &Connection,
+) -> rusqlite::Result<HashMap<String, PlaybackHistory>> {
+    let mut statement = connection
+        .prepare("SELECT id, play_count, last_played_at FROM tracks WHERE play_count > 0")?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            PlaybackHistory {
+                play_count: row.get(1)?,
+                last_played_at: row.get(2)?,
+            },
+        ))
+    })?;
+
+    rows.collect()
 }
 
 fn upsert_meta(connection: &Connection, key: &str, value: &str) -> rusqlite::Result<()> {
@@ -1087,6 +1196,8 @@ fn track_from_path(path: PathBuf, scanned_at: i64) -> Option<(Track, Option<Embe
         scanned_at: Some(scanned_at),
         cover_art_path: None,
         is_favorite: false,
+        play_count: 0,
+        last_played_at: None,
     };
 
     Some((track, metadata.embedded_cover_art))
@@ -1515,6 +1626,7 @@ pub fn run() {
             get_library_cache,
             scan_library,
             toggle_track_favorite,
+            record_track_play,
             set_album_genres,
             set_artist_genres,
             play_track,

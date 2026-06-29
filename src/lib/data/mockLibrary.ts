@@ -118,4 +118,6 @@ export const nowPlaying: Track = {
   scannedAt: null,
   coverArtPath: null,
   isFavorite: false,
+  playCount: 0,
+  lastPlayedAt: null,
 };

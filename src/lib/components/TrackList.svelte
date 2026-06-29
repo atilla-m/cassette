@@ -7,6 +7,8 @@
     isScanning: boolean;
     selectedTrackId?: string | null;
     onTrackSelect?: (track: Track, queue: Track[]) => void;
+    onArtistSelect?: (track: Track) => void;
+    onAlbumSelect?: (track: Track) => void;
     onToggleFavorite?: (track: Track) => void;
   };
 
@@ -15,6 +17,8 @@
     isScanning,
     selectedTrackId = null,
     onTrackSelect,
+    onArtistSelect,
+    onAlbumSelect,
     onToggleFavorite,
   }: Props = $props();
 
@@ -35,11 +39,21 @@
       return;
     }
 
-    if (event.key === "Enter" || event.key === " ") {
+    if (event.key === "Enter") {
       event.preventDefault();
       event.stopPropagation();
       selectTrack(track);
     }
+  }
+
+  function selectArtist(event: MouseEvent, track: Track) {
+    event.stopPropagation();
+    onArtistSelect?.(track);
+  }
+
+  function selectAlbum(event: MouseEvent, track: Track) {
+    event.stopPropagation();
+    onAlbumSelect?.(track);
   }
 
   function toggleFavorite(event: MouseEvent, track: Track) {
@@ -57,6 +71,10 @@
     if (event.currentTarget instanceof HTMLImageElement) {
       event.currentTarget.hidden = false;
     }
+  }
+
+  function playCountLabel(track: Track) {
+    return `${track.playCount} ${track.playCount === 1 ? "play" : "plays"}`;
   }
 </script>
 
@@ -96,9 +114,18 @@
         </div>
         <div class="track-title">
           <span class="track-name">{track.title}</span>
-          <p>{displayArtist(track)}</p>
+          <button class="track-link" type="button" onclick={(event) => selectArtist(event, track)}>
+            {displayArtist(track)}
+          </button>
         </div>
-        <p>{displayAlbum(track)}</p>
+        <button class="track-link album-link" type="button" onclick={(event) => selectAlbum(event, track)}>
+          {displayAlbum(track)}
+        </button>
+        {#if track.playCount > 0}
+          <span class="play-count">{playCountLabel(track)}</span>
+        {:else}
+          <span class="play-count empty" aria-hidden="true"></span>
+        {/if}
         <button
           class:active={track.isFavorite}
           class="favorite-button"
@@ -147,7 +174,7 @@
 
   .track-row {
     display: grid;
-    grid-template-columns: auto minmax(160px, 1.2fr) minmax(140px, 0.9fr) auto auto;
+    grid-template-columns: auto minmax(160px, 1.2fr) minmax(140px, 0.9fr) auto auto auto;
     align-items: center;
     gap: 14px;
     min-height: 64px;
@@ -169,7 +196,6 @@
     background: #1b2027;
   }
 
-  .track-row > p,
   .track-row > span {
     margin: 0;
     color: #8f9aa8;
@@ -202,14 +228,12 @@
     outline: none;
   }
 
-  .track-row > p,
   .track-title {
     min-width: 0;
   }
 
-  .track-row > p,
   .track-name,
-  .track-title p {
+  .track-link {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -247,11 +271,56 @@
     line-height: 1.25;
   }
 
-  .track-title p {
-    margin: 3px 0 0;
+  .track-link {
+    display: block;
+    width: fit-content;
+    max-width: 100%;
+    border: 0;
+    background: transparent;
     color: #929daa;
     font-size: 0.86rem;
     font-weight: 650;
+    line-height: 1.3;
+    margin: 3px 0 0;
+    padding: 0;
+    text-align: left;
+    text-decoration: none;
+    cursor: default;
+  }
+
+  .album-link {
+    width: 100%;
+    margin: 0;
+    color: #8f9aa8;
+    font-size: 0.9rem;
+    font-weight: 620;
+  }
+
+  .track-link:hover,
+  .track-link:focus-visible {
+    color: #d8fffa;
+    outline: none;
+    text-decoration: underline;
+    text-decoration-color: #2f8f83;
+    text-underline-offset: 3px;
+  }
+
+  .play-count {
+    min-width: 58px;
+    border: 1px solid #303844;
+    border-radius: 999px;
+    background: #171c23;
+    color: #aeb9c6;
+    font-size: 0.75rem;
+    font-weight: 850;
+    line-height: 1;
+    padding: 6px 8px;
+    text-align: center;
+    white-space: nowrap;
+  }
+
+  .play-count.empty {
+    visibility: hidden;
   }
 
   @media (max-width: 760px) {
@@ -259,7 +328,8 @@
       grid-template-columns: auto minmax(0, 1fr) auto auto;
     }
 
-    .track-row > p {
+    .album-link,
+    .play-count {
       display: none;
     }
   }

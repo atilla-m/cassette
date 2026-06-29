@@ -17,6 +17,8 @@ export type Track = {
   scannedAt: number | null;
   coverArtPath: string | null;
   isFavorite: boolean;
+  playCount: number;
+  lastPlayedAt: number | null;
 };
 
 export type Album = {

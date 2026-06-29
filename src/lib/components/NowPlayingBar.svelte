@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { Track } from "$lib/types/library";
   import { localImageSource } from "$lib/utils/localImage";
+  import { onDestroy } from "svelte";
 
   type RepeatMode = "off" | "all" | "one";
 
@@ -19,7 +20,7 @@
     onTogglePlayback?: () => void;
     onPrevious?: () => void;
     onNext?: () => void;
-    onSeek?: (positionSeconds: number) => void;
+    onSeek?: (positionSeconds: number) => void | Promise<void>;
     onVolumeChange?: (volume: number) => void;
     onToggleFavorite?: (track: Track) => void;
     onToggleQueue?: () => void;
@@ -52,7 +53,13 @@
 
   let localVolume = $state(1);
   let localPosition = $state(0);
-  let isSeeking = $state(false);
+  let isPointerSeeking = $state(false);
+  let isSeekPending = $state(false);
+  let requestedSeekPosition = $state<number | null>(null);
+  let seekStartedFromPosition = $state<number | null>(null);
+  let seekHoldUntil = $state(0);
+  let seekHoldTimeoutId: number | null = null;
+  let lastTrackId: string | null = null;
   let coverArtSrc = $derived(localImageSource(track?.coverArtPath));
 
   $effect(() => {
@@ -60,8 +67,26 @@
   });
 
   $effect(() => {
-    if (!isSeeking) {
+    const trackId = track?.id ?? null;
+
+    if (trackId !== lastTrackId) {
+      lastTrackId = trackId;
+      isPointerSeeking = false;
+      isSeekPending = false;
+      requestedSeekPosition = null;
+      seekStartedFromPosition = null;
       localPosition = positionSeconds;
+      return;
+    }
+
+    if (canSyncBackendPosition()) {
+      localPosition = positionSeconds;
+    }
+  });
+
+  onDestroy(() => {
+    if (seekHoldTimeoutId !== null) {
+      window.clearTimeout(seekHoldTimeoutId);
     }
   });
 
@@ -85,13 +110,133 @@
     return `${minutes}:${remainingSeconds.toString().padStart(2, "0")}`;
   }
 
-  function handleSeek() {
-    isSeeking = false;
-    onSeek?.(localPosition);
+  function canSyncBackendPosition() {
+    if (isPointerSeeking || isSeekPending) {
+      return false;
+    }
+
+    if (requestedSeekPosition === null) {
+      return true;
+    }
+
+    const hasCaughtUp = Math.abs(positionSeconds - requestedSeekPosition) <= 1.25;
+    const isStalePreSeekPosition = seekStartedFromPosition !== null
+      && Math.abs(positionSeconds - seekStartedFromPosition) <= 2
+      && Math.abs(positionSeconds - requestedSeekPosition) > 1.25;
+
+    if (hasCaughtUp) {
+      requestedSeekPosition = null;
+      seekStartedFromPosition = null;
+      return true;
+    }
+
+    if (isStalePreSeekPosition) {
+      return false;
+    }
+
+    if (Date.now() >= seekHoldUntil) {
+      requestedSeekPosition = null;
+      seekStartedFromPosition = null;
+      return true;
+    }
+
+    return false;
   }
 
-  function handleSeekInput() {
-    isSeeking = true;
+  function seekPositionFromInput(event: Event) {
+    const duration = durationSeconds ?? track?.durationSeconds ?? null;
+
+    if (!(event.currentTarget instanceof HTMLInputElement) || !duration || duration <= 0) {
+      return null;
+    }
+
+    const value = Number(event.currentTarget.value);
+
+    if (!Number.isFinite(value)) {
+      return null;
+    }
+
+    return Math.min(Math.max(value, 0), duration);
+  }
+
+  async function commitSeek() {
+    const duration = durationSeconds ?? track?.durationSeconds ?? null;
+
+    if (!track || !duration || duration <= 0 || !Number.isFinite(localPosition)) {
+      isPointerSeeking = false;
+      return;
+    }
+
+    const nextPosition = Math.min(Math.max(localPosition, 0), duration);
+
+    if (isSeekPending && requestedSeekPosition !== null && Math.abs(requestedSeekPosition - nextPosition) < 0.05) {
+      return;
+    }
+
+    localPosition = nextPosition;
+    requestedSeekPosition = nextPosition;
+    seekStartedFromPosition = positionSeconds;
+    isSeekPending = true;
+
+    try {
+      await onSeek?.(nextPosition);
+    } finally {
+      isSeekPending = false;
+      holdSeekPreview(nextPosition);
+    }
+  }
+
+  function handleSeekStart() {
+    isPointerSeeking = true;
+  }
+
+  function handleSeekInput(event: Event) {
+    const nextPosition = seekPositionFromInput(event);
+
+    isPointerSeeking = true;
+
+    if (nextPosition !== null) {
+      localPosition = nextPosition;
+    }
+  }
+
+  function handleSeekEnd() {
+    isPointerSeeking = false;
+    void commitSeek();
+  }
+
+  function handleSeekChange() {
+    isPointerSeeking = false;
+    void commitSeek();
+  }
+
+  function handleSeekCancel() {
+    isPointerSeeking = false;
+  }
+
+  function holdSeekPreview(position: number) {
+    requestedSeekPosition = position;
+    seekHoldUntil = Date.now() + 900;
+
+    if (seekHoldTimeoutId !== null) {
+      window.clearTimeout(seekHoldTimeoutId);
+    }
+
+    seekHoldTimeoutId = window.setTimeout(() => {
+      seekHoldTimeoutId = null;
+
+      if (!isPointerSeeking && !isSeekPending) {
+        const isStalePreSeekPosition = seekStartedFromPosition !== null
+          && Math.abs(positionSeconds - seekStartedFromPosition) <= 2
+          && Math.abs(positionSeconds - position) > 1.25;
+
+        if (!isStalePreSeekPosition) {
+          requestedSeekPosition = null;
+          seekStartedFromPosition = null;
+          localPosition = positionSeconds;
+        }
+      }
+    }, 900);
   }
 
   function handleVolumeInput() {
@@ -213,8 +358,12 @@
       bind:value={localPosition}
       disabled={!track || !durationSeconds}
       aria-label="Playback progress"
+      onpointerdown={handleSeekStart}
+      onpointerup={handleSeekEnd}
+      onpointercancel={handleSeekCancel}
+      onblur={handleSeekCancel}
       oninput={handleSeekInput}
-      onchange={handleSeek}
+      onchange={handleSeekChange}
     />
     <span>{formatDuration(durationSeconds ?? track?.durationSeconds)}</span>
   </div>

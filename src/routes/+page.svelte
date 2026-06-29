@@ -2,6 +2,7 @@
   import {
     chooseLibraryFolder,
     getLibraryCache,
+    recordTrackPlay,
     scanLibrary,
     setAlbumGenres,
     setArtistGenres,
@@ -26,7 +27,7 @@
   import { listen } from "@tauri-apps/api/event";
   import { onMount } from "svelte";
 
-  type SongSortKey = "title" | "artist" | "album" | "duration";
+  type SongSortKey = "title" | "artist" | "album" | "duration" | "recentlyAdded" | "recentlyPlayed" | "playCount";
   type AlbumSortKey = "title" | "artist" | "year" | "trackCount";
   type ArtistSortKey = "name" | "songCount" | "albumCount";
   type GenreSortKey = "name" | "songCount" | "artistCount" | "albumCount";
@@ -106,6 +107,10 @@
   let mixMessage = $state<string | null>(null);
   let isPlaying = $state(false);
   let hasCurrentTrackEnded = $state(false);
+  let countedPlaybackTrackId = $state<string | null>(null);
+  let playbackSessionTrackId: string | null = null;
+  let playbackSessionListenedSeconds = 0;
+  let playbackSessionStartedAtMs: number | null = null;
   let positionSeconds = $state(0);
   let durationSeconds = $state<number | null>(null);
   let volume = $state(1);
@@ -120,6 +125,8 @@
   let sortedArtists = $derived(sortArtists(displayArtists, artistSort, artistSortDirection));
   let sortedGenres = $derived(sortGenres(displayGenres, genreSort, genreSortDirection));
   let homeTracks = $derived(tracks.slice(0, 8));
+  let recentlyPlayedTracks = $derived(recentlyPlayed(tracks).slice(0, 8));
+  let mostPlayedTracks = $derived(mostPlayed(tracks).slice(0, 8));
   let homeAlbums = $derived(sortedAlbums.slice(0, 4));
   let homeArtists = $derived(sortedArtists.slice(0, 4));
   let normalizedSearchQuery = $derived(normalizeSearch(searchQuery));
@@ -233,6 +240,9 @@
         return;
       }
 
+      updatePlaybackListenClock(true);
+      void maybeRecordTrackPlay();
+
       const duration = durationSeconds ?? currentTrack.durationSeconds;
       const nextPosition = positionSeconds + 0.25;
       positionSeconds = duration ? Math.min(nextPosition, duration) : nextPosition;
@@ -251,22 +261,25 @@
 
       if (event.code === "Space") {
         event.preventDefault();
+        event.stopPropagation();
         void handleTogglePlayback();
       } else if (event.key === "ArrowRight") {
         event.preventDefault();
+        event.stopPropagation();
         void handleNextTrack();
       } else if (event.key === "ArrowLeft") {
         event.preventDefault();
+        event.stopPropagation();
         void handlePreviousTrack();
       }
     }
 
-    window.addEventListener("keydown", handleKeydown);
+    window.addEventListener("keydown", handleKeydown, true);
 
     return () => {
       window.clearInterval(statusIntervalId);
       window.clearInterval(progressIntervalId);
-      window.removeEventListener("keydown", handleKeydown);
+      window.removeEventListener("keydown", handleKeydown, true);
       for (const unlisten of mprisUnlisteners) {
         void unlisten.then((cleanup) => cleanup());
       }
@@ -312,6 +325,7 @@
       searchQuery = "";
       currentTrackIndex = null;
       hasCurrentTrackEnded = false;
+      resetPlaybackListenSession(null);
       playbackQueue = [];
       currentQueueIndex = null;
       shuffledQueueOrder = [];
@@ -356,14 +370,45 @@
     mainElement?.scrollTo({ top: 0 });
   }
 
-  function handleAlbumSelect(album: Album) {
-    searchQuery = "";
-    activeView = "Albums";
-    selectedAlbumId = album.id;
+  function handleHomeSongsViewAll(sortKey: SongSortKey, direction: SortDirection) {
+    activeView = "Songs";
+    selectedAlbumId = null;
     selectedArtistName = null;
     selectedGenreName = null;
     clearGenreEditState();
-    albumGenreDraft = genreDraftForTracks(tracks.filter((track) => albumIdForTrack(track) === album.id));
+    isLikedSongsOpen = false;
+    isMixBuilderOpen = false;
+    isLibraryHealthOpen = false;
+    searchQuery = "";
+    songSort = sortKey;
+    songSortDirection = direction;
+    mainElement?.scrollTo({ top: 0 });
+  }
+
+  function handleHomeAlbumsViewAll() {
+    handleNavigate("Albums");
+  }
+
+  function handleHomeArtistsViewAll() {
+    handleNavigate("Artists");
+  }
+
+  function handleAlbumSelect(album: Album) {
+    selectAlbumId(album.id);
+  }
+
+  function handleTrackAlbumSelect(track: Track) {
+    selectAlbumId(albumIdForTrack(track));
+  }
+
+  function selectAlbumId(albumId: string) {
+    searchQuery = "";
+    activeView = "Albums";
+    selectedAlbumId = albumId;
+    selectedArtistName = null;
+    selectedGenreName = null;
+    clearGenreEditState();
+    albumGenreDraft = genreDraftForTracks(tracks.filter((track) => albumIdForTrack(track) === albumId));
     isLikedSongsOpen = false;
     isMixBuilderOpen = false;
     isLibraryHealthOpen = false;
@@ -371,13 +416,21 @@
   }
 
   function handleArtistSelect(artist: Artist) {
+    selectArtistName(artist.name);
+  }
+
+  function handleTrackArtistSelect(track: Track) {
+    selectArtistName(artistNameForTrack(track));
+  }
+
+  function selectArtistName(artistName: string) {
     searchQuery = "";
     activeView = "Artists";
-    selectedArtistName = artist.name;
+    selectedArtistName = artistName;
     selectedAlbumId = null;
     selectedGenreName = null;
     clearGenreEditState();
-    artistGenreDraft = genreDraftForTracks(tracks.filter((track) => artistNameForTrack(track) === artist.name));
+    artistGenreDraft = genreDraftForTracks(tracks.filter((track) => artistNameForTrack(track) === artistName));
     isLikedSongsOpen = false;
     isMixBuilderOpen = false;
     isLibraryHealthOpen = false;
@@ -483,6 +536,8 @@
     }
 
     const track = playbackQueue[queueIndex];
+    await finalizePlaybackListenSession();
+
     const trackIndex = tracks.findIndex((candidate) => candidate.id === track.id);
     playbackError = null;
     currentTrack = track;
@@ -492,6 +547,7 @@
     positionSeconds = 0;
     isPlaying = false;
     hasCurrentTrackEnded = false;
+    resetPlaybackListenSession(track);
 
     try {
       const status = await playTrack(track.filePath);
@@ -503,6 +559,8 @@
   }
 
   async function handlePlaybackStatusUpdate(status: PlaybackStatus) {
+    await maybeRecordTrackPlay();
+
     if (!status.hasEnded || !currentTrack || status.filePath !== currentTrack.filePath) {
       return;
     }
@@ -537,6 +595,68 @@
     if (currentTrack?.id === trackId) {
       currentTrack = { ...currentTrack, isFavorite };
     }
+  }
+
+  async function maybeRecordTrackPlay() {
+    if (
+      !currentTrack
+      || countedPlaybackTrackId === currentTrack.id
+      || !hasReachedPlayCountThreshold(currentTrack)
+    ) {
+      return;
+    }
+
+    countedPlaybackTrackId = currentTrack.id;
+
+    try {
+      applyUpdatedTrack(await recordTrackPlay(currentTrack.id));
+    } catch (error) {
+      countedPlaybackTrackId = null;
+      playbackError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  async function finalizePlaybackListenSession() {
+    updatePlaybackListenClock(false);
+    await maybeRecordTrackPlay();
+  }
+
+  function resetPlaybackListenSession(track: Track | null) {
+    playbackSessionTrackId = track?.id ?? null;
+    playbackSessionListenedSeconds = 0;
+    playbackSessionStartedAtMs = null;
+    countedPlaybackTrackId = null;
+  }
+
+  function updatePlaybackListenClock(nextIsPlaying = isPlaying) {
+    const now = performance.now();
+
+    if (!currentTrack) {
+      playbackSessionTrackId = null;
+      playbackSessionListenedSeconds = 0;
+      playbackSessionStartedAtMs = null;
+      return;
+    }
+
+    if (playbackSessionTrackId !== currentTrack.id) {
+      playbackSessionTrackId = currentTrack.id;
+      playbackSessionListenedSeconds = 0;
+      playbackSessionStartedAtMs = null;
+      countedPlaybackTrackId = null;
+    }
+
+    if (isPlaying && playbackSessionStartedAtMs !== null) {
+      playbackSessionListenedSeconds += Math.max(0, (now - playbackSessionStartedAtMs) / 1000);
+    }
+
+    playbackSessionStartedAtMs = nextIsPlaying ? now : null;
+  }
+
+  function hasReachedPlayCountThreshold(track: Track) {
+    const duration = durationSeconds ?? track.durationSeconds;
+    const threshold = duration && duration > 0 ? Math.min(30, duration * 0.5) : 30;
+
+    return playbackSessionTrackId === track.id && playbackSessionListenedSeconds >= threshold;
   }
 
   async function handleSaveAlbumGenres() {
@@ -596,6 +716,16 @@
     if (currentTrack) {
       currentTrack = tracksById.get(currentTrack.id) ?? currentTrack;
       currentTrackIndex = tracks.findIndex((track) => track.id === currentTrack?.id);
+    }
+  }
+
+  function applyUpdatedTrack(updatedTrack: Track) {
+    tracks = tracks.map((track) => (track.id === updatedTrack.id ? updatedTrack : track));
+    playbackQueue = playbackQueue.map((track) => (track.id === updatedTrack.id ? updatedTrack : track));
+
+    if (currentTrack?.id === updatedTrack.id) {
+      currentTrack = updatedTrack;
+      currentTrackIndex = tracks.findIndex((track) => track.id === updatedTrack.id);
     }
   }
 
@@ -730,6 +860,7 @@
     try {
       const status = isPlaying ? await pausePlayback() : await resumePlayback();
       applyPlaybackStatus(status);
+      await maybeRecordTrackPlay();
     } catch (error) {
       playbackError = error instanceof Error ? error.message : String(error);
     }
@@ -760,6 +891,7 @@
 
     try {
       applyPlaybackStatus(await pausePlayback());
+      await maybeRecordTrackPlay();
       applyPlaybackStatus(await seekPlayback(0));
       positionSeconds = 0;
       hasCurrentTrackEnded = false;
@@ -769,10 +901,18 @@
   }
 
   async function handleSeek(nextPositionSeconds: number) {
+    const duration = durationSeconds ?? currentTrack?.durationSeconds ?? null;
+
+    if (!currentTrack || !duration || duration <= 0 || !Number.isFinite(nextPositionSeconds)) {
+      return;
+    }
+
+    const clampedPositionSeconds = Math.min(Math.max(nextPositionSeconds, 0), duration);
     playbackError = null;
 
     try {
-      applyPlaybackStatus(await seekPlayback(nextPositionSeconds));
+      applyPlaybackStatus(await seekPlayback(clampedPositionSeconds));
+      await maybeRecordTrackPlay();
       hasCurrentTrackEnded = false;
     } catch (error) {
       playbackError = error instanceof Error ? error.message : String(error);
@@ -791,6 +931,7 @@
   }
 
   function applyPlaybackStatus(status: PlaybackStatus) {
+    updatePlaybackListenClock(status.isPlaying);
     isPlaying = status.isPlaying;
     positionSeconds = status.positionSeconds;
     durationSeconds = status.durationSeconds ?? currentTrack?.durationSeconds ?? null;
@@ -810,7 +951,7 @@
       return true;
     }
 
-    return ["INPUT", "TEXTAREA", "SELECT", "BUTTON"].includes(target.tagName);
+    return ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName);
   }
 
   function albumDetail(album: Album) {
@@ -1128,6 +1269,16 @@
     return direction === "asc" ? "Asc" : "Desc";
   }
 
+  function handleSongSortChange(event: Event) {
+    const nextSort = event.currentTarget instanceof HTMLSelectElement
+      ? event.currentTarget.value as SongSortKey
+      : songSort;
+
+    if ((nextSort === "recentlyAdded" || nextSort === "recentlyPlayed" || nextSort === "playCount") && songSortDirection === "asc") {
+      songSortDirection = "desc";
+    }
+  }
+
   function nextRepeatMode(mode: RepeatMode): RepeatMode {
     if (mode === "off") {
       return "all";
@@ -1261,9 +1412,47 @@
         return applySortDirection(result, direction);
       }
 
+      if (sortKey === "recentlyAdded") {
+        result = (left.scannedAt ?? left.modifiedTime ?? 0) - (right.scannedAt ?? right.modifiedTime ?? 0)
+          || compareText(left.title, right.title);
+        return applySortDirection(result, direction);
+      }
+
+      if (sortKey === "recentlyPlayed") {
+        result = (left.lastPlayedAt ?? 0) - (right.lastPlayedAt ?? 0)
+          || compareText(left.title, right.title);
+        return applySortDirection(result, direction);
+      }
+
+      if (sortKey === "playCount") {
+        result = left.playCount - right.playCount
+          || (left.lastPlayedAt ?? 0) - (right.lastPlayedAt ?? 0)
+          || compareText(left.title, right.title);
+        return applySortDirection(result, direction);
+      }
+
       result = compareText(left.title, right.title);
       return applySortDirection(result, direction);
     });
+  }
+
+  function recentlyPlayed(libraryTracks: Track[]) {
+    return [...libraryTracks]
+      .filter((track) => track.lastPlayedAt !== null)
+      .sort((left, right) =>
+        (right.lastPlayedAt ?? 0) - (left.lastPlayedAt ?? 0)
+        || compareText(left.title, right.title),
+      );
+  }
+
+  function mostPlayed(libraryTracks: Track[]) {
+    return [...libraryTracks]
+      .filter((track) => track.playCount > 0)
+      .sort((left, right) =>
+        right.playCount - left.playCount
+        || (right.lastPlayedAt ?? 0) - (left.lastPlayedAt ?? 0)
+        || compareText(left.title, right.title),
+      );
   }
 
   function sortAlbums(albums: Album[], sortKey: AlbumSortKey, direction: SortDirection) {
@@ -1483,6 +1672,8 @@
                 isScanning={false}
                 selectedTrackId={currentTrack?.id}
                 onTrackSelect={handleTrackSelect}
+                onArtistSelect={handleTrackArtistSelect}
+                onAlbumSelect={handleTrackAlbumSelect}
                 onToggleFavorite={handleToggleFavorite}
               />
             {/if}
@@ -1570,17 +1761,57 @@
           </div>
         {/if}
       {:else if activeView === "Home"}
-        <LibrarySection title="Recently Added">
+        <LibrarySection title="Recently Played" onViewAll={() => handleHomeSongsViewAll("recentlyPlayed", "desc")}>
+          {#if recentlyPlayedTracks.length === 0}
+            <div class="group-empty">
+              <h3>No playback history yet</h3>
+              <p>Played songs will appear here after they pass the listening threshold.</p>
+            </div>
+          {:else}
+            <TrackList
+              tracks={recentlyPlayedTracks}
+              {isScanning}
+              selectedTrackId={currentTrack?.id}
+              onTrackSelect={handleTrackSelect}
+              onArtistSelect={handleTrackArtistSelect}
+              onAlbumSelect={handleTrackAlbumSelect}
+              onToggleFavorite={handleToggleFavorite}
+            />
+          {/if}
+        </LibrarySection>
+
+        <LibrarySection title="Most Played" onViewAll={() => handleHomeSongsViewAll("playCount", "desc")}>
+          {#if mostPlayedTracks.length === 0}
+            <div class="group-empty">
+              <h3>No play counts yet</h3>
+              <p>Play counts begin once a song reaches 30 seconds or half its duration.</p>
+            </div>
+          {:else}
+            <TrackList
+              tracks={mostPlayedTracks}
+              {isScanning}
+              selectedTrackId={currentTrack?.id}
+              onTrackSelect={handleTrackSelect}
+              onArtistSelect={handleTrackArtistSelect}
+              onAlbumSelect={handleTrackAlbumSelect}
+              onToggleFavorite={handleToggleFavorite}
+            />
+          {/if}
+        </LibrarySection>
+
+        <LibrarySection title="Recently Added" onViewAll={() => handleHomeSongsViewAll("recentlyAdded", "desc")}>
           <TrackList
             tracks={homeTracks}
             {isScanning}
             selectedTrackId={currentTrack?.id}
             onTrackSelect={handleTrackSelect}
+            onArtistSelect={handleTrackArtistSelect}
+            onAlbumSelect={handleTrackAlbumSelect}
             onToggleFavorite={handleToggleFavorite}
           />
         </LibrarySection>
 
-        <LibrarySection title="Albums" viewAllLabel="Preview">
+        <LibrarySection title="Albums" onViewAll={handleHomeAlbumsViewAll}>
           {#if homeAlbums.length === 0}
             <div class="group-empty">
               <h3>No albums found</h3>
@@ -1610,7 +1841,7 @@
           {/if}
         </LibrarySection>
 
-        <LibrarySection title="Artists" viewAllLabel="Preview">
+        <LibrarySection title="Artists" onViewAll={handleHomeArtistsViewAll}>
           {#if homeArtists.length === 0}
             <div class="group-empty">
               <h3>No artists found</h3>
@@ -1685,6 +1916,8 @@
                 isScanning={false}
                 selectedTrackId={currentTrack?.id}
                 onTrackSelect={handleTrackSelect}
+                onArtistSelect={handleTrackArtistSelect}
+                onAlbumSelect={handleTrackAlbumSelect}
                 onToggleFavorite={handleToggleFavorite}
               />
             </LibrarySection>
@@ -1814,6 +2047,8 @@
                 isScanning={false}
                 selectedTrackId={currentTrack?.id}
                 onTrackSelect={handleTrackSelect}
+                onArtistSelect={handleTrackArtistSelect}
+                onAlbumSelect={handleTrackAlbumSelect}
                 onToggleFavorite={handleToggleFavorite}
               />
             </LibrarySection>
@@ -1944,6 +2179,8 @@
                 isScanning={false}
                 selectedTrackId={currentTrack?.id}
                 onTrackSelect={handleTrackSelect}
+                onArtistSelect={handleTrackArtistSelect}
+                onAlbumSelect={handleTrackAlbumSelect}
                 onToggleFavorite={handleToggleFavorite}
               />
             </LibrarySection>
@@ -1996,11 +2233,14 @@
           <div class="control-bar">
             <label>
               <span>Sort</span>
-              <select bind:value={songSort}>
+              <select bind:value={songSort} onchange={handleSongSortChange}>
                 <option value="title">Title</option>
                 <option value="artist">Artist</option>
                 <option value="album">Album</option>
                 <option value="duration">Duration</option>
+                <option value="recentlyAdded">Recently added</option>
+                <option value="recentlyPlayed">Recently played</option>
+                <option value="playCount">Most played</option>
               </select>
             </label>
             <button
@@ -2025,6 +2265,8 @@
             {isScanning}
             selectedTrackId={currentTrack?.id}
             onTrackSelect={handleTrackSelect}
+            onArtistSelect={handleTrackArtistSelect}
+            onAlbumSelect={handleTrackAlbumSelect}
             onToggleFavorite={handleToggleFavorite}
           />
         </LibrarySection>
@@ -2053,6 +2295,8 @@
                   isScanning={false}
                   selectedTrackId={currentTrack?.id}
                   onTrackSelect={handleTrackSelect}
+                  onArtistSelect={handleTrackArtistSelect}
+                  onAlbumSelect={handleTrackAlbumSelect}
                   onToggleFavorite={handleToggleFavorite}
                 />
               {/if}
@@ -2256,6 +2500,8 @@
                   isScanning={false}
                   selectedTrackId={currentTrack?.id}
                   onTrackSelect={handleTrackSelect}
+                  onArtistSelect={handleTrackArtistSelect}
+                  onAlbumSelect={handleTrackAlbumSelect}
                   onToggleFavorite={handleToggleFavorite}
                 />
               {/if}
@@ -2286,6 +2532,8 @@
                   isScanning={false}
                   selectedTrackId={currentTrack?.id}
                   onTrackSelect={handleTrackSelect}
+                  onArtistSelect={handleTrackArtistSelect}
+                  onAlbumSelect={handleTrackAlbumSelect}
                   onToggleFavorite={handleToggleFavorite}
                 />
               {/if}
@@ -2295,7 +2543,15 @@
               {#if libraryDiagnostics.unknownArtistTracks.length === 0}
                 <div class="group-empty compact"><h3>No issues found</h3><p>No tracks have an empty or unknown artist.</p></div>
               {:else}
-                <TrackList tracks={libraryDiagnostics.unknownArtistTracks} isScanning={false} selectedTrackId={currentTrack?.id} onTrackSelect={handleTrackSelect} onToggleFavorite={handleToggleFavorite} />
+                <TrackList
+                  tracks={libraryDiagnostics.unknownArtistTracks}
+                  isScanning={false}
+                  selectedTrackId={currentTrack?.id}
+                  onTrackSelect={handleTrackSelect}
+                  onArtistSelect={handleTrackArtistSelect}
+                  onAlbumSelect={handleTrackAlbumSelect}
+                  onToggleFavorite={handleToggleFavorite}
+                />
               {/if}
             </LibrarySection>
 
@@ -2303,7 +2559,15 @@
               {#if libraryDiagnostics.unknownAlbumTracks.length === 0}
                 <div class="group-empty compact"><h3>No issues found</h3><p>No tracks have an empty or unknown album.</p></div>
               {:else}
-                <TrackList tracks={libraryDiagnostics.unknownAlbumTracks} isScanning={false} selectedTrackId={currentTrack?.id} onTrackSelect={handleTrackSelect} onToggleFavorite={handleToggleFavorite} />
+                <TrackList
+                  tracks={libraryDiagnostics.unknownAlbumTracks}
+                  isScanning={false}
+                  selectedTrackId={currentTrack?.id}
+                  onTrackSelect={handleTrackSelect}
+                  onArtistSelect={handleTrackArtistSelect}
+                  onAlbumSelect={handleTrackAlbumSelect}
+                  onToggleFavorite={handleToggleFavorite}
+                />
               {/if}
             </LibrarySection>
 
@@ -2311,7 +2575,15 @@
               {#if libraryDiagnostics.missingTrackNumberTracks.length === 0}
                 <div class="group-empty compact"><h3>No issues found</h3><p>All cached tracks have track numbers.</p></div>
               {:else}
-                <TrackList tracks={libraryDiagnostics.missingTrackNumberTracks} isScanning={false} selectedTrackId={currentTrack?.id} onTrackSelect={handleTrackSelect} onToggleFavorite={handleToggleFavorite} />
+                <TrackList
+                  tracks={libraryDiagnostics.missingTrackNumberTracks}
+                  isScanning={false}
+                  selectedTrackId={currentTrack?.id}
+                  onTrackSelect={handleTrackSelect}
+                  onArtistSelect={handleTrackArtistSelect}
+                  onAlbumSelect={handleTrackAlbumSelect}
+                  onToggleFavorite={handleToggleFavorite}
+                />
               {/if}
             </LibrarySection>
 
@@ -2319,7 +2591,15 @@
               {#if libraryDiagnostics.missingYearTracks.length === 0}
                 <div class="group-empty compact"><h3>No issues found</h3><p>All cached tracks have year metadata.</p></div>
               {:else}
-                <TrackList tracks={libraryDiagnostics.missingYearTracks} isScanning={false} selectedTrackId={currentTrack?.id} onTrackSelect={handleTrackSelect} onToggleFavorite={handleToggleFavorite} />
+                <TrackList
+                  tracks={libraryDiagnostics.missingYearTracks}
+                  isScanning={false}
+                  selectedTrackId={currentTrack?.id}
+                  onTrackSelect={handleTrackSelect}
+                  onArtistSelect={handleTrackArtistSelect}
+                  onAlbumSelect={handleTrackAlbumSelect}
+                  onToggleFavorite={handleToggleFavorite}
+                />
               {/if}
             </LibrarySection>
 
@@ -2595,6 +2875,56 @@
     outline: none;
   }
 
+  :global(select) {
+    appearance: none;
+    -webkit-appearance: none;
+    min-height: 36px;
+    border: 1px solid #303844;
+    border-radius: 8px;
+    background-color: #12161c;
+    background-image:
+      linear-gradient(45deg, transparent 50%, #aeb9c6 50%),
+      linear-gradient(135deg, #aeb9c6 50%, transparent 50%);
+    background-position:
+      calc(100% - 14px) 50%,
+      calc(100% - 9px) 50%;
+    background-repeat: no-repeat;
+    background-size: 5px 5px;
+    color: #f4f7fb;
+    color-scheme: dark;
+    font: inherit;
+    font-size: 0.86rem;
+    font-weight: 750;
+    outline: none;
+    padding: 0 32px 0 10px;
+  }
+
+  :global(select:not(:disabled):hover) {
+    border-color: #35544f;
+    background-color: #1b2027;
+  }
+
+  :global(select:focus-visible),
+  :global(select:focus) {
+    border-color: #2f8f83;
+    box-shadow: 0 0 0 2px rgba(47, 143, 131, 0.18);
+  }
+
+  :global(select:disabled) {
+    border-color: #252c35;
+    background-color: #10141a;
+    color: #66717f;
+  }
+
+  :global(select option) {
+    background-color: #12161c;
+    color: #f4f7fb;
+  }
+
+  :global(select option:disabled) {
+    color: #66717f;
+  }
+
   .control-bar {
     display: flex;
     flex-wrap: wrap;
@@ -2616,13 +2946,13 @@
     min-height: 36px;
     border: 1px solid #303844;
     border-radius: 8px;
-    background: #12161c;
+    background-color: #12161c;
     color: #f4f7fb;
     font: inherit;
     font-size: 0.86rem;
     font-weight: 750;
     outline: none;
-    padding: 0 10px;
+    padding: 0 32px 0 10px;
   }
 
   .control-bar select:focus {
@@ -3123,13 +3453,13 @@
     min-height: 36px;
     border: 1px solid #303844;
     border-radius: 8px;
-    background: #0f1318;
+    background-color: #0f1318;
     color: #f4f7fb;
     font: inherit;
     font-size: 0.86rem;
     font-weight: 750;
     outline: none;
-    padding: 0 10px;
+    padding: 0 32px 0 10px;
   }
 
   .mix-builder-controls select:focus {

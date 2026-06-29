@@ -4,16 +4,21 @@
   type Props = {
     title: string;
     viewAllLabel?: string;
+    onViewAll?: () => void;
     children: Snippet;
   };
 
-  let { title, viewAllLabel = "View all", children }: Props = $props();
+  let { title, viewAllLabel = "View all", onViewAll, children }: Props = $props();
 </script>
 
 <section class="library-section" aria-labelledby={title.toLowerCase().replaceAll(" ", "-")}>
   <div class="section-header">
     <h2 id={title.toLowerCase().replaceAll(" ", "-")}>{title}</h2>
-    <button type="button">{viewAllLabel}</button>
+    {#if onViewAll}
+      <button type="button" onclick={onViewAll}>{viewAllLabel}</button>
+    {:else}
+      <span class="section-label">{viewAllLabel}</span>
+    {/if}
   </div>
 
   {@render children()}
@@ -39,7 +44,8 @@
     line-height: 1.25;
   }
 
-  button {
+  button,
+  .section-label {
     min-height: 32px;
     border: 1px solid #303844;
     border-radius: 8px;
@@ -50,5 +56,18 @@
     font-size: 0.84rem;
     font-weight: 700;
     padding: 0 12px;
+  }
+
+  .section-label {
+    display: inline-flex;
+    align-items: center;
+  }
+
+  button:hover,
+  button:focus-visible {
+    border-color: #35544f;
+    background: #1b2027;
+    color: #d5dce5;
+    outline: none;
   }
 </style>
