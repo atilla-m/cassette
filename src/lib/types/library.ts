@@ -16,6 +16,8 @@ export type Track = {
   fileSize: number | null;
   scannedAt: number | null;
   coverArtPath: string | null;
+  lyricsPath: string | null;
+  lyricsKind: "synced" | "plain" | null;
   isFavorite: boolean;
   playCount: number;
   lastPlayedAt: number | null;
@@ -73,4 +75,15 @@ export type LibraryCache = {
   playlists: Playlist[];
   lastScannedFolder: string | null;
   lastScannedAt: number | null;
+};
+
+export type TrackLyrics = {
+  path: string;
+  kind: "synced" | "plain";
+  text: string;
+};
+
+export type AutoLyricsResult = {
+  status: "existing" | "synced" | "plain" | "not_found";
+  lyrics: TrackLyrics | null;
 };

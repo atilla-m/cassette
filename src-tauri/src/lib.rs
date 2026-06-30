@@ -5,13 +5,13 @@ use lofty::picture::Picture;
 use lofty::probe::Probe;
 use lofty::tag::{Accessor, ItemKey, Tag};
 use rusqlite::{params, Connection, OptionalExtension};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Manager, State};
 
 mod mpris;
@@ -22,6 +22,7 @@ const SUPPORTED_EXTENSIONS: &[&str] = &["flac", "mp3", "ogg", "opus", "wav", "m4
 const COVER_IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "webp"];
 const PREFERRED_COVER_NAMES: &[&str] = &["cover", "folder", "front", "album"];
 const MAX_FOLDER_COVER_BYTES: u64 = 25 * 1024 * 1024;
+const MAX_LYRICS_BYTES: u64 = 1024 * 1024;
 const GENRE_SCOPE_ALBUM: &str = "album";
 const GENRE_SCOPE_ARTIST: &str = "artist";
 
@@ -45,6 +46,8 @@ struct Track {
     file_size: Option<i64>,
     scanned_at: Option<i64>,
     cover_art_path: Option<String>,
+    lyrics_path: Option<String>,
+    lyrics_kind: Option<String>,
     is_favorite: bool,
     play_count: i64,
     last_played_at: Option<i64>,
@@ -88,6 +91,44 @@ struct FolderCoverArt {
     path: PathBuf,
     extension: &'static str,
     priority: CoverArtPriority,
+}
+
+#[derive(Debug)]
+struct LyricsFile {
+    path: PathBuf,
+    kind: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TrackLyrics {
+    path: String,
+    kind: String,
+    text: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AutoLyricsResult {
+    status: String,
+    lyrics: Option<TrackLyrics>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LrclibLyrics {
+    track_name: Option<String>,
+    artist_name: Option<String>,
+    album_name: Option<String>,
+    duration: Option<f64>,
+    plain_lyrics: Option<String>,
+    synced_lyrics: Option<String>,
+}
+
+#[derive(Debug)]
+struct FoundLyrics {
+    kind: &'static str,
+    text: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -322,6 +363,80 @@ fn move_playlist_track(
     library.move_playlist_track(&playlist_id, &track_id, &direction)
 }
 
+#[tauri::command]
+fn read_track_lyrics(
+    track_path: String,
+    app: AppHandle,
+    library: State<'_, Mutex<LibraryDatabase>>,
+) -> Result<Option<TrackLyrics>, String> {
+    let track = library
+        .lock()
+        .ok()
+        .and_then(|library| library.track_by_id(&track_path).ok().flatten());
+    let track_path = track
+        .as_ref()
+        .map(|track| PathBuf::from(&track.file_path))
+        .unwrap_or_else(|| PathBuf::from(&track_path));
+    let track_title = track
+        .as_ref()
+        .map(|track| track.title.clone())
+        .unwrap_or_else(|| title_from_path(&track_path));
+    let lyrics_file = track
+        .as_ref()
+        .and_then(cached_lyrics_file)
+        .or_else(|| lyrics_file_for_track(&track_path, &track_title))
+        .or_else(|| {
+            track
+                .as_ref()
+                .and_then(|track| app_lyrics_file_for_track(&app, track))
+        });
+
+    Ok(lyrics_file.and_then(read_lyrics_file))
+}
+
+#[tauri::command]
+fn auto_find_track_lyrics(
+    track_path: String,
+    app: AppHandle,
+    library: State<'_, Mutex<LibraryDatabase>>,
+) -> Result<AutoLyricsResult, String> {
+    let track = library
+        .lock()
+        .map_err(|_| "Library cache is unavailable.".to_owned())?
+        .track_by_id(&track_path)?
+        .ok_or_else(|| "Track is not in the library cache.".to_owned())?;
+    let existing_lyrics = cached_lyrics_file(&track)
+        .or_else(|| lyrics_file_for_track(Path::new(&track.file_path), &track.title))
+        .or_else(|| app_lyrics_file_for_track(&app, &track))
+        .and_then(read_lyrics_file);
+
+    if let Some(lyrics) = existing_lyrics {
+        return Ok(AutoLyricsResult {
+            status: "existing".to_owned(),
+            lyrics: Some(lyrics),
+        });
+    }
+
+    let Some(found_lyrics) = find_lrclib_lyrics(&track)? else {
+        return Ok(AutoLyricsResult {
+            status: "not_found".to_owned(),
+            lyrics: None,
+        });
+    };
+
+    let saved_lyrics = save_app_lyrics(&app, &track, found_lyrics)?;
+    let status = if saved_lyrics.kind == "synced" {
+        "synced"
+    } else {
+        "plain"
+    };
+
+    Ok(AutoLyricsResult {
+        status: status.to_owned(),
+        lyrics: Some(saved_lyrics),
+    })
+}
+
 impl LibraryDatabase {
     fn open(path: PathBuf) -> Result<Self, String> {
         if let Some(parent) = path.parent() {
@@ -363,6 +478,8 @@ impl LibraryDatabase {
                 file_size INTEGER,
                 scanned_at INTEGER NOT NULL,
                 cover_art_path TEXT,
+                lyrics_path TEXT,
+                lyrics_kind TEXT,
                 is_favorite INTEGER NOT NULL DEFAULT 0,
                 play_count INTEGER NOT NULL DEFAULT 0,
                 last_played_at INTEGER
@@ -402,6 +519,16 @@ impl LibraryDatabase {
         if !self.has_column("tracks", "cover_art_path")? {
             self.connection
                 .execute("ALTER TABLE tracks ADD COLUMN cover_art_path TEXT", [])?;
+        }
+
+        if !self.has_column("tracks", "lyrics_path")? {
+            self.connection
+                .execute("ALTER TABLE tracks ADD COLUMN lyrics_path TEXT", [])?;
+        }
+
+        if !self.has_column("tracks", "lyrics_kind")? {
+            self.connection
+                .execute("ALTER TABLE tracks ADD COLUMN lyrics_kind TEXT", [])?;
         }
 
         if !self.has_column("tracks", "is_favorite")? {
@@ -470,6 +597,8 @@ impl LibraryDatabase {
                     file_size,
                     scanned_at,
                     cover_art_path,
+                    lyrics_path,
+                    lyrics_kind,
                     is_favorite,
                     genres,
                     play_count,
@@ -539,10 +668,12 @@ impl LibraryDatabase {
                         file_size,
                         scanned_at,
                         cover_art_path,
+                        lyrics_path,
+                        lyrics_kind,
                         is_favorite,
                         play_count,
                         last_played_at
-                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)
                     ",
                 )
                 .map_err(|error| format!("Could not prepare library cache update: {error}"))?;
@@ -574,6 +705,8 @@ impl LibraryDatabase {
                         track.file_size,
                         track.scanned_at,
                         &track.cover_art_path,
+                        &track.lyrics_path,
+                        &track.lyrics_kind,
                         track.is_favorite,
                         track.play_count,
                         track.last_played_at,
@@ -657,6 +790,8 @@ impl LibraryDatabase {
                     file_size,
                     scanned_at,
                     cover_art_path,
+                    lyrics_path,
+                    lyrics_kind,
                     is_favorite,
                     genres,
                     play_count,
@@ -1476,10 +1611,12 @@ fn row_to_track(row: &rusqlite::Row<'_>) -> rusqlite::Result<Track> {
         file_size: row.get(13)?,
         scanned_at: row.get(14)?,
         cover_art_path: row.get(15)?,
-        is_favorite: row.get(16)?,
-        genres: parse_cached_genres(row.get(17)?),
-        play_count: row.get(18)?,
-        last_played_at: row.get(19)?,
+        lyrics_path: row.get(16)?,
+        lyrics_kind: row.get(17)?,
+        is_favorite: row.get(18)?,
+        genres: parse_cached_genres(row.get(19)?),
+        play_count: row.get(20)?,
+        last_played_at: row.get(21)?,
     })
 }
 
@@ -1685,9 +1822,19 @@ fn track_from_path(path: PathBuf, scanned_at: i64) -> Option<(Track, Option<Embe
         file_size: file_info.file_size,
         scanned_at: Some(scanned_at),
         cover_art_path: None,
+        lyrics_path: None,
+        lyrics_kind: None,
         is_favorite: false,
         play_count: 0,
         last_played_at: None,
+    };
+    let lyrics = lyrics_file_for_track(&path, &track.title);
+    let track = Track {
+        lyrics_path: lyrics
+            .as_ref()
+            .map(|lyrics| lyrics.path.to_string_lossy().into_owned()),
+        lyrics_kind: lyrics.as_ref().map(|lyrics| lyrics.kind.to_owned()),
+        ..track
     };
 
     Some((track, metadata.embedded_cover_art))
@@ -1865,6 +2012,339 @@ fn folder_cover_art(track_path: &Path) -> Option<FolderCoverArt> {
     entries
         .iter()
         .find_map(|path| valid_folder_cover_art(path, CoverArtPriority::FolderFallback))
+}
+
+fn cached_lyrics_file(track: &Track) -> Option<LyricsFile> {
+    let path = PathBuf::from(track.lyrics_path.as_ref()?);
+    let kind = track.lyrics_kind.as_deref()?;
+
+    if !is_valid_lyrics_file(&path) {
+        return None;
+    }
+
+    match kind {
+        "synced" => Some(LyricsFile {
+            path,
+            kind: "synced",
+        }),
+        "plain" => Some(LyricsFile {
+            path,
+            kind: "plain",
+        }),
+        _ => None,
+    }
+}
+
+fn lyrics_file_for_track(track_path: &Path, track_title: &str) -> Option<LyricsFile> {
+    let directory = track_path.parent()?;
+    let basename = track_path.file_stem()?.to_string_lossy();
+    let candidates = [
+        (basename.as_ref(), "lrc", "synced"),
+        (basename.as_ref(), "txt", "plain"),
+        (track_title, "lrc", "synced"),
+        (track_title, "txt", "plain"),
+        ("lyrics", "lrc", "synced"),
+        ("lyrics", "txt", "plain"),
+    ];
+
+    candidates
+        .iter()
+        .find_map(|(stem, extension, kind)| lyrics_candidate(directory, stem, extension, kind))
+}
+
+fn lyrics_candidate(
+    directory: &Path,
+    expected_stem: &str,
+    expected_extension: &str,
+    kind: &'static str,
+) -> Option<LyricsFile> {
+    let entries = fs::read_dir(directory).ok()?;
+
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        let file_type = entry.file_type().ok()?;
+
+        if !file_type.is_file() {
+            continue;
+        }
+
+        let stem_matches = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .map(|stem| stem.eq_ignore_ascii_case(expected_stem))
+            .unwrap_or(false);
+        let extension_matches = path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .map(|extension| extension.eq_ignore_ascii_case(expected_extension))
+            .unwrap_or(false);
+
+        if stem_matches && extension_matches && is_valid_lyrics_file(&path) {
+            return Some(LyricsFile { path, kind });
+        }
+    }
+
+    None
+}
+
+fn is_valid_lyrics_file(path: &Path) -> bool {
+    let Some(kind) = lyrics_kind_for_path(path) else {
+        return false;
+    };
+    let Ok(metadata) = fs::metadata(path) else {
+        return false;
+    };
+
+    matches!(kind, "synced" | "plain")
+        && metadata.is_file()
+        && metadata.len() > 0
+        && metadata.len() <= MAX_LYRICS_BYTES
+}
+
+fn lyrics_kind_for_path(path: &Path) -> Option<&'static str> {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .and_then(|extension| {
+            if extension.eq_ignore_ascii_case("lrc") {
+                Some("synced")
+            } else if extension.eq_ignore_ascii_case("txt") {
+                Some("plain")
+            } else {
+                None
+            }
+        })
+}
+
+fn read_lyrics_file(lyrics_file: LyricsFile) -> Option<TrackLyrics> {
+    let text = fs::read_to_string(&lyrics_file.path).ok()?;
+
+    Some(TrackLyrics {
+        path: lyrics_file.path.to_string_lossy().into_owned(),
+        kind: lyrics_file.kind.to_owned(),
+        text,
+    })
+}
+
+fn app_lyrics_file_for_track(app: &AppHandle, track: &Track) -> Option<LyricsFile> {
+    let lyrics_dir = app.path().app_data_dir().ok()?.join("lyrics");
+    let cache_key = format!("{:016x}", stable_hash(&track.file_path));
+    let synced_path = lyrics_dir.join(format!("{cache_key}.lrc"));
+    let plain_path = lyrics_dir.join(format!("{cache_key}.txt"));
+
+    if is_valid_lyrics_file(&synced_path) {
+        return Some(LyricsFile {
+            path: synced_path,
+            kind: "synced",
+        });
+    }
+
+    if is_valid_lyrics_file(&plain_path) {
+        return Some(LyricsFile {
+            path: plain_path,
+            kind: "plain",
+        });
+    }
+
+    None
+}
+
+fn find_lrclib_lyrics(track: &Track) -> Result<Option<FoundLyrics>, String> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(12))
+        .user_agent("Cassette/0.1.0 local lyrics lookup")
+        .build()
+        .map_err(|error| format!("Could not prepare lyrics lookup: {error}"))?;
+
+    if let Some(lyrics) = get_lrclib_lyrics(&client, track)? {
+        return Ok(Some(lyrics));
+    }
+
+    search_lrclib_lyrics(&client, track)
+}
+
+fn get_lrclib_lyrics(
+    client: &reqwest::blocking::Client,
+    track: &Track,
+) -> Result<Option<FoundLyrics>, String> {
+    let query = lrclib_query(track);
+
+    if query.len() < 2 {
+        return Ok(None);
+    }
+
+    let url = reqwest::Url::parse_with_params("https://lrclib.net/api/get", &query)
+        .map_err(|error| format!("Could not prepare LRCLIB request: {error}"))?;
+    let response = client
+        .get(url)
+        .send()
+        .map_err(|_| "Could not reach LRCLIB. Check your connection.".to_owned())?;
+
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+
+    if !response.status().is_success() {
+        return Err("LRCLIB did not return lyrics for this track.".to_owned());
+    }
+
+    let lyrics = response
+        .json::<LrclibLyrics>()
+        .map_err(|_| "LRCLIB returned an unreadable lyrics response.".to_owned())?;
+
+    Ok(found_lyrics_from_lrclib(&lyrics))
+}
+
+fn search_lrclib_lyrics(
+    client: &reqwest::blocking::Client,
+    track: &Track,
+) -> Result<Option<FoundLyrics>, String> {
+    let query = lrclib_query(track);
+
+    if query.len() < 2 {
+        return Ok(None);
+    }
+
+    let url = reqwest::Url::parse_with_params("https://lrclib.net/api/search", &query)
+        .map_err(|error| format!("Could not prepare LRCLIB request: {error}"))?;
+    let response = client
+        .get(url)
+        .send()
+        .map_err(|_| "Could not reach LRCLIB. Check your connection.".to_owned())?;
+
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+
+    if !response.status().is_success() {
+        return Err("LRCLIB search failed. Try again later.".to_owned());
+    }
+
+    let mut results = response
+        .json::<Vec<LrclibLyrics>>()
+        .map_err(|_| "LRCLIB returned an unreadable search response.".to_owned())?;
+
+    results.sort_by(|left, right| {
+        lrclib_result_score(right, track).cmp(&lrclib_result_score(left, track))
+    });
+
+    Ok(results.iter().find_map(found_lyrics_from_lrclib))
+}
+
+fn lrclib_query(track: &Track) -> Vec<(&'static str, String)> {
+    let mut query = Vec::new();
+
+    query.push(("track_name", track.title.clone()));
+
+    if let Some(artist) = track.artist.as_ref().or(track.album_artist.as_ref()) {
+        query.push(("artist_name", artist.clone()));
+    }
+
+    if let Some(album) = track.album.as_ref() {
+        query.push(("album_name", album.clone()));
+    }
+
+    if let Some(duration) = track.duration_seconds {
+        query.push(("duration", duration.to_string()));
+    }
+
+    query
+}
+
+fn lrclib_result_score(result: &LrclibLyrics, track: &Track) -> i64 {
+    let mut score = 0;
+
+    if result
+        .synced_lyrics
+        .as_deref()
+        .map(|lyrics| !lyrics.trim().is_empty())
+        .unwrap_or(false)
+    {
+        score += 10_000;
+    }
+
+    if text_matches(result.track_name.as_deref(), &track.title) {
+        score += 1_000;
+    }
+
+    if let Some(artist) = track.artist.as_ref().or(track.album_artist.as_ref()) {
+        if text_matches(result.artist_name.as_deref(), artist) {
+            score += 500;
+        }
+    }
+
+    if let Some(album) = track.album.as_ref() {
+        if text_matches(result.album_name.as_deref(), album) {
+            score += 250;
+        }
+    }
+
+    if let (Some(left), Some(right)) = (result.duration, track.duration_seconds) {
+        let difference = (left - f64::from(right)).abs().round() as i64;
+        score += 100_i64.saturating_sub(difference.min(100));
+    }
+
+    score
+}
+
+fn text_matches(left: Option<&str>, right: &str) -> bool {
+    left.map(|left| left.trim().eq_ignore_ascii_case(right.trim()))
+        .unwrap_or(false)
+}
+
+fn found_lyrics_from_lrclib(lyrics: &LrclibLyrics) -> Option<FoundLyrics> {
+    if let Some(text) = lyrics
+        .synced_lyrics
+        .as_deref()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+    {
+        return Some(FoundLyrics {
+            kind: "synced",
+            text: text.to_owned(),
+        });
+    }
+
+    lyrics
+        .plain_lyrics
+        .as_deref()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(|text| FoundLyrics {
+            kind: "plain",
+            text: text.to_owned(),
+        })
+}
+
+fn save_app_lyrics(
+    app: &AppHandle,
+    track: &Track,
+    lyrics: FoundLyrics,
+) -> Result<TrackLyrics, String> {
+    let lyrics_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("Could not resolve Cassette data folder: {error}"))?
+        .join("lyrics");
+    fs::create_dir_all(&lyrics_dir)
+        .map_err(|error| format!("Could not create lyrics cache folder: {error}"))?;
+
+    let cache_key = format!("{:016x}", stable_hash(&track.file_path));
+    let extension = if lyrics.kind == "synced" { "lrc" } else { "txt" };
+    let path = lyrics_dir.join(format!("{cache_key}.{extension}"));
+
+    if path.exists() {
+        return Err("Lyrics are already cached for this track.".to_owned());
+    }
+
+    let text = lyrics.text;
+    fs::write(&path, &text)
+        .map_err(|error| format!("Could not save lyrics cache: {error}"))?;
+
+    Ok(TrackLyrics {
+        path: path.to_string_lossy().into_owned(),
+        kind: lyrics.kind.to_owned(),
+        text,
+    })
 }
 
 fn folder_image_candidates(directory: &Path) -> Option<Vec<PathBuf>> {
@@ -2136,6 +2616,8 @@ pub fn run() {
             add_track_to_playlist,
             remove_track_from_playlist,
             move_playlist_track,
+            read_track_lyrics,
+            auto_find_track_lyrics,
             play_track,
             pause_playback,
             resume_playback,

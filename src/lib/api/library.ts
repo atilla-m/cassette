@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import type { LibraryCache, Playlist, Track } from "$lib/types/library";
+import type { AutoLyricsResult, LibraryCache, Playlist, Track, TrackLyrics } from "$lib/types/library";
 
 export async function chooseLibraryFolder(): Promise<string | null> {
   const selected = await open({
@@ -63,4 +63,12 @@ export async function movePlaylistTrack(
   direction: "up" | "down",
 ): Promise<Playlist> {
   return invoke<Playlist>("move_playlist_track", { playlistId, trackId, direction });
+}
+
+export async function readTrackLyrics(trackPath: string): Promise<TrackLyrics | null> {
+  return invoke<TrackLyrics | null>("read_track_lyrics", { trackPath });
+}
+
+export async function autoFindTrackLyrics(trackPath: string): Promise<AutoLyricsResult> {
+  return invoke<AutoLyricsResult>("auto_find_track_lyrics", { trackPath });
 }

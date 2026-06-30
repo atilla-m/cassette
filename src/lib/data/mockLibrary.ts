@@ -119,6 +119,8 @@ export const nowPlaying: Track = {
   fileSize: null,
   scannedAt: null,
   coverArtPath: null,
+  lyricsPath: null,
+  lyricsKind: null,
   isFavorite: false,
   playCount: 0,
   lastPlayedAt: null,

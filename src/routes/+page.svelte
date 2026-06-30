@@ -1,12 +1,14 @@
 <script lang="ts">
   import {
     addTrackToPlaylist,
+    autoFindTrackLyrics,
     chooseLibraryFolder,
     createPlaylist,
     deletePlaylist,
     getLibraryCache,
     movePlaylistTrack,
     recordTrackPlay,
+    readTrackLyrics,
     removeTrackFromPlaylist,
     renamePlaylist,
     scanLibrary,
@@ -29,7 +31,7 @@
   import TrackList from "$lib/components/TrackList.svelte";
   import { buildAlbums, buildArtists, buildGenres } from "$lib/data/libraryViews";
   import { albums as mockAlbums, artists as mockArtists, genres as mockGenres, navItems } from "$lib/data/mockLibrary";
-  import type { Album, Artist, Genre, PlaybackStatus, Playlist, Track } from "$lib/types/library";
+  import type { Album, Artist, Genre, PlaybackStatus, Playlist, Track, TrackLyrics } from "$lib/types/library";
   import { localImageSource } from "$lib/utils/localImage";
   import { listen } from "@tauri-apps/api/event";
   import { onMount } from "svelte";
@@ -95,6 +97,10 @@
     genre: Genre;
     totalPlays: number;
     songCount: number;
+  };
+  type SyncedLyricLine = {
+    timeSeconds: number;
+    text: string;
   };
   type ShortcutItem = {
     keys: string[];
@@ -202,8 +208,14 @@
   let durationSeconds = $state<number | null>(null);
   let volume = $state(1);
   let contextMenu = $state<ContextMenuState | null>(null);
+  let currentLyrics = $state<TrackLyrics | null>(null);
+  let isLoadingLyrics = $state(false);
+  let isAutoFindingLyrics = $state(false);
+  let lyricsLookupMessage = $state<string | null>(null);
+  let lyricsLookupError = $state<string | null>(null);
   let shortcutModalElement: HTMLElement | undefined = $state();
   let deletePlaylistModalElement: HTMLElement | undefined = $state();
+  let lyricsPanelElement: HTMLElement | undefined = $state();
   let albumGenreInput: HTMLInputElement | undefined = $state();
   let displayAlbums = $derived(!hasLoadedCache ? mockAlbums : buildAlbums(tracks));
   let displayArtists = $derived(!hasLoadedCache ? mockArtists : buildArtists(tracks));
@@ -317,6 +329,8 @@
   let currentTrackGenres = $derived(currentTrack ? trackGenres(currentTrack).filter((genre) => genre !== "Unknown Genre") : []);
   let currentTrackCoverArtSrc = $derived(localImageSource(currentTrack?.coverArtPath));
   let currentTrackDuration = $derived(durationSeconds ?? currentTrack?.durationSeconds ?? null);
+  let syncedLyricLines = $derived(currentLyrics?.kind === "synced" ? parseLrcLyrics(currentLyrics.text) : []);
+  let activeLyricIndex = $derived(activeSyncedLyricIndex(syncedLyricLines, positionSeconds));
   let canPlayPrevious = $derived(
     currentQueueIndex !== null
       && playbackQueue.length > 1
@@ -328,6 +342,7 @@
       && (currentOrderIndex < playbackOrder.length - 1 || repeatMode === "all"),
   );
   let hadSearchQuery = false;
+  let lyricsRequestId = 0;
 
   $effect(() => {
     const hasSearchQuery = normalizedSearchQuery.length > 0;
@@ -357,6 +372,19 @@
     window.requestAnimationFrame(() => {
       deletePlaylistModalElement?.focus();
     });
+  });
+
+  $effect(() => {
+    void loadCurrentTrackLyrics(currentTrack?.filePath ?? null);
+  });
+
+  $effect(() => {
+    if (activeLyricIndex < 0 || !lyricsPanelElement) {
+      return;
+    }
+
+    const activeLine = lyricsPanelElement.querySelector<HTMLElement>("[data-active='true']");
+    activeLine?.scrollIntoView({ block: "center", behavior: "smooth" });
   });
 
   $effect(() => {
@@ -484,6 +512,73 @@
       hasLoadedCache = true;
       scanCount = 0;
       lastScannedAt = null;
+    }
+  }
+
+  async function loadCurrentTrackLyrics(trackPath: string | null) {
+    const requestId = ++lyricsRequestId;
+
+    if (!trackPath) {
+      currentLyrics = null;
+      isLoadingLyrics = false;
+      isAutoFindingLyrics = false;
+      lyricsLookupMessage = null;
+      lyricsLookupError = null;
+      return;
+    }
+
+    isLoadingLyrics = true;
+    isAutoFindingLyrics = false;
+    lyricsLookupMessage = null;
+    lyricsLookupError = null;
+
+    try {
+      const lyrics = await readTrackLyrics(trackPath);
+
+      if (requestId === lyricsRequestId) {
+        currentLyrics = lyrics;
+      }
+    } catch {
+      if (requestId === lyricsRequestId) {
+        currentLyrics = null;
+      }
+    } finally {
+      if (requestId === lyricsRequestId) {
+        isLoadingLyrics = false;
+      }
+    }
+  }
+
+  async function handleAutoFindLyrics() {
+    if (!currentTrack || currentLyrics || isAutoFindingLyrics) {
+      return;
+    }
+
+    isAutoFindingLyrics = true;
+    lyricsLookupMessage = "Searching LRCLIB...";
+    lyricsLookupError = null;
+
+    try {
+      const result = await autoFindTrackLyrics(currentTrack.filePath);
+
+      if (result.lyrics) {
+        currentLyrics = result.lyrics;
+      }
+
+      if (result.status === "synced") {
+        lyricsLookupMessage = "Synced lyrics found.";
+      } else if (result.status === "plain") {
+        lyricsLookupMessage = "Plain lyrics found.";
+      } else if (result.status === "existing") {
+        lyricsLookupMessage = "Lyrics are already available for this track.";
+      } else {
+        lyricsLookupMessage = "No lyrics found on LRCLIB.";
+      }
+    } catch (error) {
+      lyricsLookupMessage = null;
+      lyricsLookupError = error instanceof Error ? error.message : "Could not search LRCLIB. Check your connection.";
+    } finally {
+      isAutoFindingLyrics = false;
     }
   }
 
@@ -1886,6 +1981,55 @@
     }).format(new Date(timestampSeconds * 1000));
   }
 
+  function parseLrcLyrics(text: string): SyncedLyricLine[] {
+    return text
+      .split(/\r?\n/)
+      .flatMap((line) => parseLrcLine(line))
+      .sort((left, right) => left.timeSeconds - right.timeSeconds || compareText(left.text, right.text));
+  }
+
+  function parseLrcLine(line: string): SyncedLyricLine[] {
+    const timestampPattern = /\[(\d{1,2}):(\d{2})(?:\.(\d{1,3}))?\]/g;
+    const timestamps: number[] = [];
+    let match: RegExpExecArray | null;
+
+    while ((match = timestampPattern.exec(line)) !== null) {
+      const minutes = Number.parseInt(match[1], 10);
+      const seconds = Number.parseInt(match[2], 10);
+      const fraction = match[3] ? Number.parseFloat(`0.${match[3].padEnd(3, "0")}`) : 0;
+
+      if (Number.isFinite(minutes) && Number.isFinite(seconds)) {
+        timestamps.push(minutes * 60 + seconds + fraction);
+      }
+    }
+
+    if (timestamps.length === 0) {
+      return [];
+    }
+
+    const text = line.replace(timestampPattern, "").trim();
+
+    if (!text) {
+      return [];
+    }
+
+    return timestamps.map((timeSeconds) => ({ timeSeconds, text }));
+  }
+
+  function activeSyncedLyricIndex(lines: SyncedLyricLine[], currentPositionSeconds: number) {
+    let activeIndex = -1;
+
+    for (let index = 0; index < lines.length; index += 1) {
+      if (lines[index].timeSeconds <= currentPositionSeconds + 0.15) {
+        activeIndex = index;
+      } else {
+        break;
+      }
+    }
+
+    return activeIndex;
+  }
+
   function playCountLabel(track: Track) {
     return `${track.playCount} ${track.playCount === 1 ? "play" : "plays"}`;
   }
@@ -3015,6 +3159,54 @@
                 </div>
               </div>
             </div>
+
+            <section class="lyrics-panel" aria-labelledby="lyrics-title">
+              <div class="lyrics-header">
+                <div>
+                  <p class="eyebrow">Local Lyrics</p>
+                  <h3 id="lyrics-title">Lyrics</h3>
+                </div>
+                {#if currentLyrics}
+                  <span>{currentLyrics.kind === "synced" ? "LRC" : "TXT"}</span>
+                {/if}
+              </div>
+
+              {#if lyricsLookupMessage}
+                <p class="lyrics-lookup-message">{lyricsLookupMessage}</p>
+              {:else if lyricsLookupError}
+                <p class="lyrics-lookup-message error">{lyricsLookupError}</p>
+              {/if}
+
+              {#if isLoadingLyrics}
+                <div class="group-empty compact" role="status">
+                  <h3>Loading lyrics...</h3>
+                  <p>Checking for local .lrc and .txt files next to this track.</p>
+                </div>
+              {:else if currentLyrics?.kind === "synced" && syncedLyricLines.length > 0}
+                <div class="synced-lyrics" bind:this={lyricsPanelElement}>
+                  {#each syncedLyricLines as line, index}
+                    <p class:active={index === activeLyricIndex} data-active={index === activeLyricIndex ? "true" : undefined}>
+                      {line.text}
+                    </p>
+                  {/each}
+                </div>
+              {:else if currentLyrics?.kind === "plain"}
+                <pre class="plain-lyrics">{currentLyrics.text}</pre>
+              {:else if currentLyrics?.kind === "synced"}
+                <div class="group-empty compact">
+                  <h3>No lyric lines found</h3>
+                  <p>This .lrc file was found, but it does not contain timestamped lyric lines.</p>
+                </div>
+              {:else}
+                <div class="group-empty compact">
+                  <h3>No local lyrics found</h3>
+                  <p>Add a matching .lrc or .txt file next to the song, such as the same filename or lyrics.txt.</p>
+                  <button class="auto-lyrics-button" type="button" disabled={isAutoFindingLyrics} onclick={() => void handleAutoFindLyrics()}>
+                    {isAutoFindingLyrics ? "Searching..." : "Auto Find Lyrics"}
+                  </button>
+                </div>
+              {/if}
+            </section>
 
             <section class="now-playing-info-panel" aria-label="Playback status">
               <div>
@@ -5429,6 +5621,119 @@
     border-color: #303844;
     background: #151a21;
     color: #626c79;
+  }
+
+  .lyrics-panel {
+    display: grid;
+    gap: 14px;
+    border: 1px solid #242b35;
+    border-radius: 8px;
+    background: #12161c;
+    padding: 16px;
+  }
+
+  .lyrics-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+  }
+
+  .lyrics-header h3 {
+    margin: 0;
+    color: #f4f7fb;
+    font-size: 1.05rem;
+  }
+
+  .lyrics-header > span {
+    display: inline-flex;
+    align-items: center;
+    min-height: 28px;
+    border: 1px solid #303844;
+    border-radius: 999px;
+    background: #11161d;
+    color: #b9c3cf;
+    font-size: 0.76rem;
+    font-weight: 850;
+    padding: 0 10px;
+  }
+
+  .lyrics-lookup-message {
+    margin: 0;
+    color: #9ee3d9;
+    font-size: 0.9rem;
+    font-weight: 750;
+  }
+
+  .lyrics-lookup-message.error {
+    color: #ffcbc8;
+  }
+
+  .auto-lyrics-button {
+    justify-self: center;
+    min-height: 38px;
+    margin-top: 12px;
+    border: 1px solid #35544f;
+    border-radius: 8px;
+    background: #17332f;
+    color: #d8fffa;
+    cursor: default;
+    font: inherit;
+    font-size: 0.86rem;
+    font-weight: 850;
+    padding: 0 13px;
+  }
+
+  .auto-lyrics-button:hover,
+  .auto-lyrics-button:focus-visible {
+    border-color: #4d766f;
+    background: #1b403b;
+    outline: none;
+  }
+
+  .auto-lyrics-button:disabled {
+    border-color: #303844;
+    background: #151a21;
+    color: #626c79;
+  }
+
+  .synced-lyrics {
+    display: grid;
+    gap: 4px;
+    max-height: 320px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding: 24px 6px;
+  }
+
+  .synced-lyrics p {
+    margin: 0;
+    border-radius: 8px;
+    color: #7f8996;
+    font-size: 1rem;
+    font-weight: 750;
+    line-height: 1.5;
+    padding: 7px 10px;
+    transition:
+      background 150ms ease,
+      color 150ms ease;
+  }
+
+  .synced-lyrics p.active {
+    background: #17332f;
+    color: #d8fffa;
+  }
+
+  .plain-lyrics {
+    max-height: 360px;
+    overflow: auto;
+    margin: 0;
+    color: #d5dce5;
+    font: inherit;
+    font-size: 0.98rem;
+    font-weight: 650;
+    line-height: 1.65;
+    white-space: pre-wrap;
   }
 
   .now-playing-info-panel {
