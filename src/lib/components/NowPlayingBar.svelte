@@ -26,6 +26,7 @@
     onToggleQueue?: () => void;
     onToggleShuffle?: () => void;
     onToggleRepeat?: () => void;
+    onOpenNowPlaying?: () => void;
   };
 
   let {
@@ -49,6 +50,7 @@
     onToggleQueue,
     onToggleShuffle,
     onToggleRepeat,
+    onOpenNowPlaying,
   }: Props = $props();
 
   let localVolume = $state(1);
@@ -292,15 +294,17 @@
 
 <footer class="player" aria-label="Now playing">
   <div class="track">
-    <div class="cover" aria-hidden="true">
-      {#if coverArtSrc}
-        <img src={coverArtSrc} alt="" onload={showLoadedImage} onerror={hideBrokenImage} />
-      {/if}
-    </div>
-    <div class="track-copy">
-      <p>{track?.title ?? "No track selected"}</p>
-      <span>{displayArtist(track)}{displayAlbum(track)}</span>
-    </div>
+    <button class="track-open" type="button" aria-label="Open Now Playing" onclick={onOpenNowPlaying}>
+      <span class="cover" aria-hidden="true">
+        {#if coverArtSrc}
+          <img src={coverArtSrc} alt="" onload={showLoadedImage} onerror={hideBrokenImage} />
+        {/if}
+      </span>
+      <span class="track-copy">
+        <span>{track?.title ?? "No track selected"}</span>
+        <small>{displayArtist(track)}{displayAlbum(track)}</small>
+      </span>
+    </button>
     <button
       class:active={track?.isFavorite}
       class="favorite"
@@ -413,6 +417,31 @@
     min-width: 0;
   }
 
+  .track-open {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-width: 0;
+    width: 100%;
+    height: auto;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    padding: 0;
+    text-align: left;
+  }
+
+  .track-open:hover .track-copy > span,
+  .track-open:focus-visible .track-copy > span {
+    color: #ffffff;
+  }
+
+  .track-open:focus-visible {
+    outline: 2px solid rgba(47, 143, 131, 0.55);
+    outline-offset: 4px;
+  }
+
   .cover {
     position: relative;
     width: 54px;
@@ -439,21 +468,21 @@
     min-width: 0;
   }
 
-  .track-copy p,
-  .track-copy span {
+  .track-copy > span,
+  .track-copy small {
     display: block;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
 
-  .track-copy p {
+  .track-copy > span {
     margin: 0 0 4px;
     color: #f5f7fb;
     font-weight: 750;
   }
 
-  .track-copy span,
+  .track-copy small,
   .progress-area span,
   .volume span {
     color: #919ba9;
@@ -542,6 +571,16 @@
   button:disabled {
     color: #626c79;
     background: #151a21;
+  }
+
+  button.track-open {
+    display: flex;
+    width: 100%;
+    height: auto;
+    justify-content: flex-start;
+    border: 0;
+    background: transparent;
+    padding: 0;
   }
 
   button.play {

@@ -278,6 +278,9 @@
   );
   let currentOrderIndex = $derived(queueOrderIndex(playbackOrder, currentQueueIndex));
   let queuePanelEntries = $derived(buildQueuePanelEntries(playbackQueue, playbackOrder, currentQueueIndex));
+  let currentTrackGenres = $derived(currentTrack ? trackGenres(currentTrack).filter((genre) => genre !== "Unknown Genre") : []);
+  let currentTrackCoverArtSrc = $derived(localImageSource(currentTrack?.coverArtPath));
+  let currentTrackDuration = $derived(durationSeconds ?? currentTrack?.durationSeconds ?? null);
   let canPlayPrevious = $derived(
     currentQueueIndex !== null
       && playbackQueue.length > 1
@@ -604,6 +607,10 @@
     mainElement?.scrollTo({ top: 0 });
   }
 
+  function handleNowPlayingSelect() {
+    handleNavigate("Now Playing");
+  }
+
   function handleHomeSongsViewAll(sortKey: SongSortKey, direction: SortDirection) {
     activeView = "Songs";
     selectedAlbumId = null;
@@ -680,6 +687,30 @@
 
   function handleTrackAlbumSelect(track: Track) {
     selectAlbumId(albumIdForTrack(track));
+  }
+
+  function handleNowPlayingArtistSelect() {
+    if (!currentTrack) {
+      return;
+    }
+
+    selectArtistName(artistNameForTrack(currentTrack));
+  }
+
+  function handleNowPlayingAlbumSelect() {
+    if (!currentTrack) {
+      return;
+    }
+
+    selectAlbumId(albumIdForTrack(currentTrack));
+  }
+
+  function handleNowPlayingGenreSelect(genreName: string) {
+    const genre = displayGenres.find((candidate) => candidate.name === genreName);
+
+    if (genre) {
+      handleGenreSelect(genre);
+    }
   }
 
   function selectAlbumId(albumId: string) {
@@ -1166,6 +1197,12 @@
       applyTrackFavorite(track.id, isFavorite);
     } catch (error) {
       playbackError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  function handleToggleCurrentTrackFavorite() {
+    if (currentTrack) {
+      void handleToggleFavorite(currentTrack);
     }
   }
 
@@ -1762,6 +1799,14 @@
     const seconds = Math.floor(totalSeconds % 60);
 
     return `${minutes}:${seconds.toString().padStart(2, "0")}`;
+  }
+
+  function formatPlaybackTime(seconds: number | null | undefined) {
+    return seconds === null || seconds === undefined ? "--:--" : formatTrackDuration(seconds);
+  }
+
+  function playCountLabel(track: Track) {
+    return `${track.playCount} ${track.playCount === 1 ? "play" : "plays"}`;
   }
 
   function albumFormatSummary(albumTracks: Track[]) {
@@ -2723,6 +2768,113 @@
             <p>Search looks at song titles, artists, albums, album artists, genres, and file names.</p>
           </div>
         {/if}
+      {:else if activeView === "Now Playing"}
+        <section class="now-playing-page" aria-labelledby="now-playing-title">
+          {#if currentTrack}
+            <div class="now-playing-hero">
+              <div class="now-playing-cover" aria-hidden="true">
+                {#if currentTrackCoverArtSrc}
+                  <img
+                    src={currentTrackCoverArtSrc}
+                    alt=""
+                    onload={showLoadedImage}
+                    onerror={hideBrokenImage}
+                  />
+                {/if}
+                <span></span>
+              </div>
+
+              <div class="now-playing-copy">
+                <p class="eyebrow">Now Playing</p>
+                <h3 id="now-playing-title">{currentTrack.title}</h3>
+                <div class="now-playing-links">
+                  <button type="button" onclick={handleNowPlayingArtistSelect}>
+                    {currentTrack.artist ?? currentTrack.albumArtist ?? "Unknown Artist"}
+                  </button>
+                  {#if currentTrack.album}
+                    <span aria-hidden="true">·</span>
+                    <button type="button" onclick={handleNowPlayingAlbumSelect}>{currentTrack.album}</button>
+                  {/if}
+                  {#if currentTrack.year}
+                    <span aria-hidden="true">·</span>
+                    <span>{currentTrack.year}</span>
+                  {/if}
+                </div>
+
+                {#if currentTrackGenres.length > 0}
+                  <div class="now-playing-genres" aria-label="Genres">
+                    {#each currentTrackGenres as genre}
+                      <button type="button" onclick={() => handleNowPlayingGenreSelect(genre)}>{genre}</button>
+                    {/each}
+                  </div>
+                {/if}
+
+                <div class="now-playing-stats">
+                  <span>{formatPlaybackTime(positionSeconds)} / {formatPlaybackTime(currentTrackDuration)}</span>
+                  {#if currentTrack.playCount > 0}
+                    <span>{playCountLabel(currentTrack)}</span>
+                  {/if}
+                  <span>{currentTrack.extension.toUpperCase()}</span>
+                </div>
+
+                <div class="now-playing-actions">
+                  <button
+                    class:active={currentTrack.isFavorite}
+                    type="button"
+                    aria-label={currentTrack.isFavorite ? "Remove from liked songs" : "Add to liked songs"}
+                    onclick={handleToggleCurrentTrackFavorite}
+                  >
+                    {currentTrack.isFavorite ? "★ Liked" : "☆ Like"}
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <section class="now-playing-info-panel" aria-label="Playback status">
+              <div>
+                <p class="eyebrow">Playback</p>
+                <h3>{isPlaying ? "Playing" : "Paused"}</h3>
+              </div>
+              <p>{formatPlaybackTime(positionSeconds)} elapsed of {formatPlaybackTime(currentTrackDuration)}. Use the player bar below for playback controls.</p>
+            </section>
+
+            <LibrarySection title="Up Next" viewAllLabel={`${queuePanelEntries.length} ${queuePanelEntries.length === 1 ? "track" : "tracks"}`}>
+              {#if queuePanelEntries.length === 0}
+                <div class="group-empty">
+                  <h3>No queued songs</h3>
+                  <p>Play a song from any list to build an Up Next queue.</p>
+                </div>
+              {:else}
+                <div class="now-playing-queue-list">
+                  {#each queuePanelEntries as entry (entry.track.id)}
+                    <button
+                      class:active={entry.queueIndex === currentQueueIndex}
+                      type="button"
+                      title={entry.track.filePath}
+                      onclick={() => void playQueuedTrackAtIndex(entry.queueIndex)}
+                    >
+                      <span>{queuePositionLabel(entry.offset)}</span>
+                      <div>
+                        <strong>{entry.track.title}</strong>
+                        <small>{entry.track.artist ?? "Unknown Artist"}{entry.track.album ? ` · ${entry.track.album}` : ""}</small>
+                      </div>
+                      <small>{formatPlaybackTime(entry.track.durationSeconds)}</small>
+                    </button>
+                  {/each}
+                </div>
+              {/if}
+            </LibrarySection>
+          {:else}
+            <div class="now-playing-empty">
+              <div class="now-playing-empty-mark" aria-hidden="true">N</div>
+              <div>
+                <p class="eyebrow">Now Playing</p>
+                <h3 id="now-playing-title">No track playing</h3>
+                <p>Select a song from the library to start playback.</p>
+              </div>
+            </div>
+          {/if}
+        </section>
       {:else if activeView === "Home"}
         <LibrarySection title="Recently Played" onViewAll={() => handleHomeSongsViewAll("recentlyPlayed", "desc")}>
           {#if recentlyPlayedTracks.length === 0}
@@ -3998,6 +4150,7 @@
     onToggleQueue={handleToggleQueue}
     onToggleShuffle={handleToggleShuffle}
     onToggleRepeat={handleToggleRepeat}
+    onOpenNowPlaying={handleNowPlayingSelect}
   />
 </div>
 
@@ -4607,6 +4760,293 @@
   .detail-view {
     display: grid;
     gap: 22px;
+  }
+
+  .now-playing-page {
+    display: grid;
+    gap: 22px;
+  }
+
+  .now-playing-hero {
+    display: grid;
+    grid-template-columns: minmax(220px, 340px) minmax(0, 1fr);
+    gap: 26px;
+    align-items: center;
+  }
+
+  .now-playing-cover {
+    position: relative;
+    display: grid;
+    aspect-ratio: 1;
+    overflow: hidden;
+    place-items: center;
+    border-radius: 8px;
+    background:
+      linear-gradient(135deg, rgba(255, 255, 255, 0.18), transparent 46%),
+      #2f8f83;
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.14);
+  }
+
+  .now-playing-cover img {
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+
+  .now-playing-cover span {
+    display: block;
+    width: 34%;
+    aspect-ratio: 1;
+    border: 14px solid rgba(13, 15, 19, 0.55);
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.6);
+  }
+
+  .now-playing-copy {
+    min-width: 0;
+  }
+
+  .now-playing-copy h3 {
+    margin: 0 0 12px;
+    overflow-wrap: anywhere;
+    color: #f7f9fc;
+    font-size: clamp(2.1rem, 5vw, 4.8rem);
+    line-height: 1.02;
+  }
+
+  .now-playing-links,
+  .now-playing-genres,
+  .now-playing-stats,
+  .now-playing-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .now-playing-links {
+    color: #9aa4b1;
+    font-size: 1rem;
+    font-weight: 750;
+  }
+
+  .now-playing-links button,
+  .now-playing-genres button {
+    border: 0;
+    background: transparent;
+    color: #d5dce5;
+    cursor: default;
+    font: inherit;
+    font-weight: 800;
+    padding: 0;
+  }
+
+  .now-playing-links button:hover,
+  .now-playing-links button:focus-visible,
+  .now-playing-genres button:hover,
+  .now-playing-genres button:focus-visible {
+    color: #ffffff;
+    outline: none;
+    text-decoration: underline;
+    text-underline-offset: 3px;
+  }
+
+  .now-playing-genres {
+    margin-top: 16px;
+  }
+
+  .now-playing-genres button {
+    min-height: 30px;
+    border: 1px solid #35544f;
+    border-radius: 8px;
+    background: #17332f;
+    color: #d8fffa;
+    font-size: 0.82rem;
+    padding: 0 10px;
+  }
+
+  .now-playing-stats {
+    margin-top: 16px;
+    color: #9aa4b1;
+    font-size: 0.9rem;
+    font-weight: 750;
+  }
+
+  .now-playing-stats span {
+    min-height: 28px;
+    border: 1px solid #242b35;
+    border-radius: 8px;
+    background: #12161c;
+    padding: 4px 9px;
+  }
+
+  .now-playing-actions {
+    margin-top: 18px;
+  }
+
+  .now-playing-actions button,
+  .now-playing-info-panel {
+    min-height: 38px;
+    border: 1px solid #303844;
+    border-radius: 8px;
+    background: #161a20;
+    color: #d5dce5;
+    cursor: default;
+    font: inherit;
+    font-size: 0.86rem;
+    font-weight: 850;
+    padding: 0 13px;
+  }
+
+  .now-playing-actions button:hover,
+  .now-playing-actions button:focus-visible,
+  .now-playing-actions button.active {
+    border-color: #35544f;
+    background: #17332f;
+    color: #d8fffa;
+    outline: none;
+  }
+
+  .now-playing-actions button:disabled {
+    border-color: #303844;
+    background: #151a21;
+    color: #626c79;
+  }
+
+  .now-playing-info-panel {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 18px;
+    border: 1px solid #242b35;
+    background: #12161c;
+    padding: 16px;
+  }
+
+  .now-playing-info-panel h3,
+  .now-playing-info-panel p {
+    margin: 0;
+  }
+
+  .now-playing-info-panel h3 {
+    color: #f4f7fb;
+    font-size: 1.05rem;
+  }
+
+  .now-playing-info-panel > p {
+    max-width: 620px;
+    color: #9aa4b1;
+    font-size: 0.92rem;
+    font-weight: 700;
+    text-align: right;
+  }
+
+  .now-playing-queue-list {
+    display: grid;
+    gap: 8px;
+  }
+
+  .now-playing-queue-list button {
+    display: grid;
+    grid-template-columns: 54px minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 12px;
+    min-height: 56px;
+    border: 1px solid #242b35;
+    border-radius: 8px;
+    background: #151a21;
+    color: inherit;
+    cursor: default;
+    font: inherit;
+    padding: 9px 12px;
+    text-align: left;
+  }
+
+  .now-playing-queue-list button:hover,
+  .now-playing-queue-list button:focus-visible,
+  .now-playing-queue-list button.active {
+    border-color: #35544f;
+    background: #1b2027;
+    outline: none;
+  }
+
+  .now-playing-queue-list button > span {
+    display: grid;
+    min-height: 32px;
+    place-items: center;
+    border-radius: 7px;
+    background: #1d252e;
+    color: #8f9aa8;
+    font-size: 0.76rem;
+    font-weight: 900;
+  }
+
+  .now-playing-queue-list button.active > span {
+    background: #17332f;
+    color: #d8fffa;
+  }
+
+  .now-playing-queue-list div {
+    min-width: 0;
+  }
+
+  .now-playing-queue-list strong,
+  .now-playing-queue-list small {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .now-playing-queue-list strong {
+    color: #f4f7fb;
+    font-size: 0.94rem;
+    line-height: 1.25;
+  }
+
+  .now-playing-queue-list small {
+    color: #8f9aa8;
+    font-size: 0.82rem;
+    font-weight: 700;
+  }
+
+  .now-playing-empty {
+    display: flex;
+    align-items: center;
+    gap: 18px;
+    min-height: 220px;
+    border: 1px dashed #303844;
+    border-radius: 8px;
+    background: rgba(18, 22, 28, 0.74);
+    padding: 24px;
+  }
+
+  .now-playing-empty-mark {
+    display: grid;
+    width: 76px;
+    height: 76px;
+    flex: 0 0 auto;
+    place-items: center;
+    border-radius: 8px;
+    background: #1b2633;
+    color: #8fb9f2;
+    font-size: 1.6rem;
+    font-weight: 900;
+  }
+
+  .now-playing-empty h3 {
+    margin: 0 0 6px;
+    color: #f4f7fb;
+    font-size: 1.35rem;
+  }
+
+  .now-playing-empty p:not(.eyebrow) {
+    margin: 0;
+    color: #98a3b0;
+    font-weight: 650;
   }
 
   .back-button {
@@ -5809,6 +6249,18 @@
       align-self: flex-start;
     }
 
+    .now-playing-hero {
+      grid-template-columns: 1fr;
+    }
+
+    .now-playing-cover {
+      width: min(100%, 320px);
+    }
+
+    .now-playing-copy h3 {
+      font-size: 2.3rem;
+    }
+
     .album-detail-header,
     .artist-detail-header,
     .genre-detail-header,
@@ -5878,6 +6330,19 @@
     }
 
     .genre-editor form {
+      flex-direction: column;
+    }
+
+    .now-playing-queue-list button {
+      grid-template-columns: 42px minmax(0, 1fr);
+    }
+
+    .now-playing-queue-list button > small {
+      display: none;
+    }
+
+    .now-playing-empty {
+      align-items: flex-start;
       flex-direction: column;
     }
 
