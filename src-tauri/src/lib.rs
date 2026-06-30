@@ -1263,6 +1263,7 @@ impl PlaybackState {
         {
             let playbin = self.playbin()?;
             set_gst_state(playbin, gst::State::Null)?;
+            drain_playback_bus(playbin);
             playbin.set_property("uri", uri.as_str());
             set_gst_state(playbin, gst::State::Playing)?;
             check_for_playback_error(playbin)?;
@@ -1301,7 +1302,7 @@ impl PlaybackState {
             return Ok(());
         };
 
-        if let Some(message) = playbin.bus().and_then(|bus| {
+        while let Some(message) = playbin.bus().and_then(|bus| {
             bus.timed_pop_filtered(
                 gst::ClockTime::ZERO,
                 &[gst::MessageType::Error, gst::MessageType::Eos],
@@ -1416,6 +1417,20 @@ fn playback_details(playbin: &gst::Element) -> (u64, Option<u64>, f64) {
     let volume = playbin.property::<f64>("volume").clamp(0.0, 1.0);
 
     (position_seconds, duration_seconds, volume)
+}
+
+fn drain_playback_bus(playbin: &gst::Element) {
+    let Some(bus) = playbin.bus() else {
+        return;
+    };
+
+    while bus
+        .timed_pop_filtered(
+            gst::ClockTime::ZERO,
+            &[gst::MessageType::Error, gst::MessageType::Eos],
+        )
+        .is_some()
+    {}
 }
 
 fn set_gst_state(playbin: &gst::Element, state: gst::State) -> Result<(), String> {

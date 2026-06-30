@@ -138,6 +138,7 @@
   let isShuffleEnabled = $state(false);
   let shuffledQueueOrder = $state<number[]>([]);
   let repeatMode = $state<RepeatMode>("off");
+  let isHandlingTrackEnd = $state(false);
   let mainElement: HTMLElement | undefined = $state();
   let activeView = $state("Home");
   let selectedAlbumId = $state<string | null>(null);
@@ -342,14 +343,14 @@
     ];
 
     const statusIntervalId = window.setInterval(async () => {
-      if (!currentTrack || !isPlaying) {
+      if (!currentTrack || (!isPlaying && !hasCurrentTrackEnded)) {
         return;
       }
 
       try {
         const status = await getPlaybackStatus();
         applyPlaybackStatus(status);
-        await handlePlaybackStatusUpdate(status);
+        await handlePlaybackStatusUpdate(status, "status");
       } catch (error) {
         playbackError = error instanceof Error ? error.message : String(error);
       }
@@ -366,6 +367,10 @@
       const duration = durationSeconds ?? currentTrack.durationSeconds;
       const nextPosition = positionSeconds + 0.25;
       positionSeconds = duration ? Math.min(nextPosition, duration) : nextPosition;
+
+      if (duration && nextPosition >= duration) {
+        void handleTrackEnd("duration");
+      }
     }, 250);
 
     function handleKeydown(event: KeyboardEvent) {
@@ -1159,6 +1164,7 @@
     positionSeconds = 0;
     isPlaying = false;
     hasCurrentTrackEnded = false;
+    isHandlingTrackEnd = false;
     resetPlaybackListenSession(track);
 
     try {
@@ -1170,19 +1176,37 @@
     }
   }
 
-  async function handlePlaybackStatusUpdate(status: PlaybackStatus) {
+  async function handlePlaybackStatusUpdate(status: PlaybackStatus, source: "status" | "duration") {
     await maybeRecordTrackPlay();
 
     if (!status.hasEnded || !currentTrack || status.filePath !== currentTrack.filePath) {
       return;
     }
 
+    await handleTrackEnd(source);
+  }
+
+  async function handleTrackEnd(source: "status" | "duration") {
+    if (!currentTrack || isHandlingTrackEnd || hasCurrentTrackEnded) {
+      return;
+    }
+
+    const duration = durationSeconds ?? currentTrack.durationSeconds;
+
+    if (source === "duration" && (!duration || positionSeconds < duration)) {
+      return;
+    }
+
+    isHandlingTrackEnd = true;
     hasCurrentTrackEnded = true;
+    isPlaying = false;
+    positionSeconds = duration ?? positionSeconds;
+    await maybeRecordTrackPlay();
+
     const nextQueueIndex = getNextQueueIndex(true);
 
     if (nextQueueIndex === null) {
-      isPlaying = false;
-      positionSeconds = durationSeconds ?? positionSeconds;
+      isHandlingTrackEnd = false;
       return;
     }
 

@@ -63,6 +63,9 @@
   let seekHoldTimeoutId: number | null = null;
   let lastTrackId: string | null = null;
   let coverArtSrc = $derived(localImageSource(track?.coverArtPath));
+  let effectiveDuration = $derived(durationSeconds ?? track?.durationSeconds ?? null);
+  let progressFillPercent = $derived(rangeFillPercent(localPosition, effectiveDuration ?? 0));
+  let volumeFillPercent = $derived(rangeFillPercent(localVolume, 1));
 
   $effect(() => {
     localVolume = volume;
@@ -110,6 +113,14 @@
     const remainingSeconds = wholeSeconds % 60;
 
     return `${minutes}:${remainingSeconds.toString().padStart(2, "0")}`;
+  }
+
+  function rangeFillPercent(value: number, max: number) {
+    if (!max || max <= 0 || !Number.isFinite(value)) {
+      return 0;
+    }
+
+    return Math.min(100, Math.max(0, (value / max) * 100));
   }
 
   function canSyncBackendPosition() {
@@ -357,10 +368,11 @@
       class="progress"
       type="range"
       min="0"
-      max={durationSeconds ?? 0}
+      max={effectiveDuration ?? 0}
       step="0.1"
       bind:value={localPosition}
-      disabled={!track || !durationSeconds}
+      style={`--range-fill: ${progressFillPercent}%`}
+      disabled={!track || !effectiveDuration}
       aria-label="Playback progress"
       onpointerdown={handleSeekStart}
       onpointerup={handleSeekEnd}
@@ -369,7 +381,7 @@
       oninput={handleSeekInput}
       onchange={handleSeekChange}
     />
-    <span>{formatDuration(durationSeconds ?? track?.durationSeconds)}</span>
+    <span>{formatDuration(effectiveDuration)}</span>
   </div>
 
   <div class="volume" aria-label="Volume">
@@ -391,6 +403,7 @@
       max="1"
       step="0.01"
       bind:value={localVolume}
+      style={`--range-fill: ${volumeFillPercent}%`}
       disabled={!track}
       aria-label="Volume"
       oninput={handleVolumeInput}
@@ -614,7 +627,14 @@
     overflow: hidden;
     border: 0;
     border-radius: 999px;
-    background: #2a313c;
+    background:
+      linear-gradient(
+        to right,
+        #2f8f83 0%,
+        #2f8f83 var(--range-fill, 0%),
+        #2a313c var(--range-fill, 0%),
+        #2a313c 100%
+      );
     accent-color: #2f8f83;
   }
 
@@ -630,7 +650,6 @@
     height: 12px;
     border-radius: 50%;
     background: #d8dde4;
-    box-shadow: -220px 0 0 214px #d8dde4;
   }
 
   .progress::-moz-range-thumb,
