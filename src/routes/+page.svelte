@@ -33,6 +33,7 @@
   import { localImageSource } from "$lib/utils/localImage";
   import { listen } from "@tauri-apps/api/event";
   import { onMount } from "svelte";
+  import packageInfo from "../../package.json";
 
   type SongSortKey = "title" | "artist" | "album" | "duration" | "recentlyAdded" | "recentlyPlayed" | "playCount";
   type AlbumSortKey = "title" | "artist" | "year" | "trackCount";
@@ -89,6 +90,7 @@
   };
 
   const mixFormatOptions = ["All", "FLAC", "MP3", "OGG", "OPUS", "WAV", "M4A"];
+  const appVersion = packageInfo.version?.trim() || "Development build";
   const shortcutGroups: ShortcutGroup[] = [
     {
       title: "Playback",
@@ -127,6 +129,7 @@
   let genreEditError = $state<string | null>(null);
   let genreEditMessage = $state<string | null>(null);
   let scannedFolder = $state<string | null>(null);
+  let lastScannedAt = $state<number | null>(null);
   let scanCount = $state<number | null>(null);
   let hasLoadedCache = $state(false);
   let playlists = $state<Playlist[]>([]);
@@ -264,6 +267,15 @@
   let canCreatePlaylist = $derived(normalizePlaylistName(playlistNameDraft).length > 0);
   let libraryDiagnostics = $derived(buildLibraryDiagnostics(tracks, displayAlbums, displayArtists));
   let libraryHealthIssueCount = $derived(libraryHealthTotalIssueCount(libraryDiagnostics));
+  let librarySettingsStats = $derived([
+    { label: "Tracks", value: String(hasLoadedCache ? tracks.length : 0) },
+    { label: "Albums", value: String(hasLoadedCache ? displayAlbums.length : 0) },
+    { label: "Artists", value: String(hasLoadedCache ? displayArtists.length : 0) },
+    { label: "Genres", value: String(hasLoadedCache ? displayGenres.length : 0) },
+  ]);
+  let queueLengthLabel = $derived(`${playbackQueue.length} ${playbackQueue.length === 1 ? "track" : "tracks"}`);
+  let volumePercentLabel = $derived(`${Math.round(volume * 100)}%`);
+  let lastScanLabel = $derived(lastScannedAt ? formatDateTime(lastScannedAt) : "Not available");
   let mixSelectedGenreSet = $derived(new Set(mixSelectedGenres));
   let mixSelectedArtistSet = $derived(new Set(mixSelectedArtists));
   let mixSelectedAlbumSet = $derived(new Set(mixSelectedAlbums));
@@ -441,12 +453,14 @@
       tracks = cache.tracks;
       playlists = cache.playlists;
       scannedFolder = cache.lastScannedFolder;
+      lastScannedAt = cache.lastScannedAt;
       scanCount = cache.tracks.length;
       hasLoadedCache = true;
     } catch (error) {
       scanError = error instanceof Error ? error.message : String(error);
       hasLoadedCache = true;
       scanCount = 0;
+      lastScannedAt = null;
     }
   }
 
@@ -486,6 +500,7 @@
       const scannedTracks = await scanLibrary(folder);
       tracks = scannedTracks;
       scanCount = scannedTracks.length;
+      lastScannedAt = Math.floor(Date.now() / 1000);
     } catch (error) {
       scanError = error instanceof Error ? error.message : String(error);
       scanCount = null;
@@ -1470,6 +1485,18 @@
     isQueueOpen = false;
   }
 
+  function handleSettingsClearQueue() {
+    if (playbackQueue.length === 0) {
+      return;
+    }
+
+    const confirmed = window.confirm("Clear the current Up Next queue? Playback will not delete any files.");
+
+    if (confirmed) {
+      handleClearQueue();
+    }
+  }
+
   async function playTrackSet(libraryTracks: Track[], shouldShuffle = false) {
     const queue = shouldShuffle ? shuffleTracks(libraryTracks) : orderedContextTracks(libraryTracks);
 
@@ -1827,6 +1854,13 @@
 
   function formatPlaybackTime(seconds: number | null | undefined) {
     return seconds === null || seconds === undefined ? "--:--" : formatTrackDuration(seconds);
+  }
+
+  function formatDateTime(timestampSeconds: number) {
+    return new Intl.DateTimeFormat(undefined, {
+      dateStyle: "medium",
+      timeStyle: "short",
+    }).format(new Date(timestampSeconds * 1000));
   }
 
   function playCountLabel(track: Track) {
@@ -3982,36 +4016,183 @@
             </LibrarySection>
           </section>
         {:else}
-          <section class="placeholder-panel settings-panel" aria-labelledby="settings-title">
-            <p class="eyebrow">Library</p>
-            <h3 id="settings-title">Settings</h3>
-            <div class="settings-grid">
-              <div>
-                <span>Library folder</span>
-                <p>{scannedFolder ?? "No folder scanned"}</p>
-              </div>
-              <div>
-                <span>Tracks</span>
-                <p>{scanCount ?? tracks.length}</p>
-              </div>
+          <section class="settings-panel" aria-labelledby="settings-title">
+            <div class="settings-intro">
+              <p class="eyebrow">Control Center</p>
+              <h3 id="settings-title">Settings</h3>
+              <p>Manage Cassette's local library, playback state, app tools, and build details.</p>
             </div>
-            <button class="health-card" type="button" onclick={handleLibraryHealthSelect}>
-              <span class="health-mark" aria-hidden="true">H</span>
-              <span>
-                <span class="eyebrow">Diagnostics</span>
-                <strong>Library Health</strong>
-                <small>{libraryHealthIssueCount} {libraryHealthIssueCount === 1 ? "issue" : "issues"} found · {libraryDiagnostics.totalAlbums} {libraryDiagnostics.totalAlbums === 1 ? "album" : "albums"} · {libraryDiagnostics.totalArtists} {libraryDiagnostics.totalArtists === 1 ? "artist" : "artists"}</small>
-              </span>
-            </button>
-            <button class="health-card shortcut-card" type="button" onclick={openShortcutHelp}>
-              <span class="shortcut-mark" aria-hidden="true">?</span>
-              <span>
-                <span class="eyebrow">Keyboard</span>
-                <strong>Keyboard Shortcuts</strong>
-                <small>Space for playback · arrows for previous and next · ? for this guide</small>
-              </span>
-            </button>
-            <p>More playback, library, and appearance settings will live here later.</p>
+
+            <section class="settings-section" aria-labelledby="settings-library-title">
+              <div class="settings-section-header">
+                <div>
+                  <p class="eyebrow">Library</p>
+                  <h4 id="settings-library-title">Local library</h4>
+                </div>
+                <span class="settings-pill">{hasLoadedCache ? "Cache loaded" : "Loading cache"}</span>
+              </div>
+
+              <div class="library-folder-card">
+                <span>Current folder</span>
+                <strong>{scannedFolder ?? "No library folder selected"}</strong>
+              </div>
+
+              <div class="settings-stat-grid" aria-label="Library summary">
+                {#each librarySettingsStats as stat}
+                  <div class="settings-stat-tile">
+                    <span>{stat.label}</span>
+                    <strong>{stat.value}</strong>
+                  </div>
+                {/each}
+                <div class="settings-stat-tile wide">
+                  <span>Last scan</span>
+                  <strong>{lastScanLabel}</strong>
+                </div>
+              </div>
+
+              <div class="settings-actions">
+                <button class="primary" type="button" disabled={isScanning} onclick={handleScanLibrary}>
+                  {isScanning ? "Scanning..." : scannedFolder ? "Rescan Library" : "Scan Library"}
+                </button>
+                <button type="button" disabled={isScanning} onclick={handleScanLibrary}>
+                  Change Library Folder
+                </button>
+                <button class="primary" type="button" onclick={handleLibraryHealthSelect}>
+                  Open Library Health
+                </button>
+                <button class="danger" type="button" disabled title="Coming later: needs a safe cache-only migration path">
+                  Clear Library Cache
+                  <span>Coming later</span>
+                </button>
+              </div>
+            </section>
+
+            <section class="settings-section" aria-labelledby="settings-playback-title">
+              <div class="settings-section-header">
+                <div>
+                  <p class="eyebrow">Playback</p>
+                  <h4 id="settings-playback-title">Current session</h4>
+                </div>
+                <span class="settings-pill">{isPlaying ? "Playing" : currentTrack ? "Paused" : "Idle"}</span>
+              </div>
+
+              <div class="settings-status-list">
+                <div>
+                  <span>Shuffle</span>
+                  <strong>{isShuffleEnabled ? "On" : "Off"}</strong>
+                </div>
+                <div>
+                  <span>Repeat</span>
+                  <strong>{repeatMode}</strong>
+                </div>
+                <div>
+                  <span>Volume</span>
+                  <strong>{volumePercentLabel}</strong>
+                </div>
+                <div>
+                  <span>Queue</span>
+                  <strong>{queueLengthLabel}</strong>
+                </div>
+              </div>
+
+              <div class="settings-actions">
+                <button type="button" disabled={playbackQueue.length === 0} onclick={handleSettingsClearQueue}>
+                  Clear Queue
+                </button>
+                <button class="primary" type="button" onclick={openShortcutHelp}>
+                  Keyboard Shortcut Help
+                </button>
+                <button type="button" disabled title="Coming later: reset needs explicit playback-engine semantics">
+                  Reset Playback State
+                  <span>Coming later</span>
+                </button>
+              </div>
+            </section>
+
+            <section class="settings-section" aria-labelledby="settings-interface-title">
+              <div class="settings-section-header">
+                <div>
+                  <p class="eyebrow">Interface</p>
+                  <h4 id="settings-interface-title">Display preferences</h4>
+                </div>
+                <span class="settings-pill">Dark UI</span>
+              </div>
+
+              <div class="settings-control-list">
+                <div>
+                  <span>Theme</span>
+                  <strong>Dark only</strong>
+                </div>
+                <div>
+                  <span>Accent color</span>
+                  <strong><span class="accent-swatch" aria-hidden="true"></span> Teal</strong>
+                  <small>Coming later</small>
+                </div>
+                <div>
+                  <span>Compact mode</span>
+                  <strong>Off</strong>
+                  <small>Coming later</small>
+                </div>
+                <div>
+                  <span>Album track numbers</span>
+                  <strong>Enabled</strong>
+                  <small>Always shown in album detail</small>
+                </div>
+              </div>
+            </section>
+
+            <section class="settings-section" aria-labelledby="settings-tools-title">
+              <div class="settings-section-header">
+                <div>
+                  <p class="eyebrow">Tools</p>
+                  <h4 id="settings-tools-title">Library utilities</h4>
+                </div>
+              </div>
+
+              <div class="settings-tool-grid">
+                <button type="button" onclick={handleLibraryHealthSelect}>
+                  <span class="health-mark" aria-hidden="true">H</span>
+                  <strong>Library Health</strong>
+                  <small>{libraryHealthIssueCount} {libraryHealthIssueCount === 1 ? "issue" : "issues"} found</small>
+                </button>
+                <button type="button" onclick={openShortcutHelp}>
+                  <span class="shortcut-mark" aria-hidden="true">?</span>
+                  <strong>Keyboard Shortcuts</strong>
+                  <small>Show the shortcut overlay</small>
+                </button>
+                <button type="button" onclick={handleMixBuilderSelect}>
+                  <span class="mix-tool-mark" aria-hidden="true">M</span>
+                  <strong>Mix Builder</strong>
+                  <small>Build a local queue from genres, artists, and albums</small>
+                </button>
+              </div>
+            </section>
+
+            <section class="settings-section about-section" aria-labelledby="settings-about-title">
+              <div class="settings-section-header">
+                <div>
+                  <p class="eyebrow">About</p>
+                  <h4 id="settings-about-title">Cassette</h4>
+                </div>
+                <span class="settings-pill">Version {appVersion}</span>
+              </div>
+
+              <div class="about-grid">
+                <div>
+                  <span>Description</span>
+                  <strong>Local-first music player</strong>
+                </div>
+                <div>
+                  <span>Platform</span>
+                  <strong>Linux-first</strong>
+                </div>
+                <div>
+                  <span>Tech stack</span>
+                  <strong>Tauri, Svelte, Rust, GStreamer</strong>
+                </div>
+              </div>
+              <p class="settings-note">Cassette does not modify your audio files unless future tag editing is explicitly used.</p>
+            </section>
           </section>
         {/if}
       {/if}
@@ -4469,7 +4650,6 @@
   }
 
   .scan-error + :global(.library-section),
-  .scan-error + .placeholder-panel,
   .playlist-warning + :global(.library-section) {
     margin-top: 16px;
   }
@@ -5618,42 +5798,68 @@
     margin-top: 8px;
   }
 
-  .placeholder-panel {
+  .settings-panel {
+    display: grid;
+    max-width: 1040px;
+    gap: 16px;
+  }
+
+  .settings-intro {
     max-width: 760px;
+  }
+
+  .settings-intro h3 {
+    margin: 0 0 8px;
+    color: #f4f7fb;
+    font-size: 1.55rem;
+  }
+
+  .settings-intro p:not(.eyebrow),
+  .settings-note {
+    margin: 0;
+    color: #98a3b0;
+    font-weight: 650;
+    line-height: 1.45;
+  }
+
+  .settings-section {
+    display: grid;
+    gap: 14px;
     border: 1px solid #242b35;
     border-radius: 8px;
     background: #151a21;
-    padding: 22px;
+    padding: 18px;
   }
 
-  .placeholder-panel h3 {
-    margin: 0 0 8px;
-    font-size: 1.3rem;
+  .settings-section-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
   }
 
-  .placeholder-panel p {
-    max-width: 620px;
+  .settings-section-header h4 {
     margin: 0;
-    color: #98a3b0;
-    font-weight: 620;
+    color: #f4f7fb;
+    font-size: 1.08rem;
+    line-height: 1.2;
   }
 
-  .placeholder-panel .eyebrow {
-    margin-bottom: 8px;
+  .settings-pill {
+    display: inline-flex;
+    align-items: center;
+    min-height: 28px;
+    border: 1px solid #303844;
+    border-radius: 999px;
+    background: #11161d;
+    color: #b9c3cf;
+    font-size: 0.78rem;
+    font-weight: 850;
+    padding: 0 10px;
+    white-space: nowrap;
   }
 
-  .settings-panel {
-    max-width: 960px;
-  }
-
-  .settings-grid {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 12px;
-    margin: 16px 0;
-  }
-
-  .settings-grid div {
+  .library-folder-card {
     min-width: 0;
     border: 1px solid #2a313c;
     border-radius: 8px;
@@ -5661,74 +5867,207 @@
     padding: 14px;
   }
 
-  .settings-grid span {
+  .library-folder-card span,
+  .settings-stat-tile span,
+  .settings-status-list span,
+  .settings-control-list span,
+  .about-grid span {
     display: block;
     margin-bottom: 5px;
     color: #8f9aa8;
-    font-size: 0.78rem;
-    font-weight: 800;
+    font-size: 0.76rem;
+    font-weight: 850;
     text-transform: uppercase;
   }
 
-  .settings-grid p {
+  .library-folder-card strong {
+    display: block;
     overflow: hidden;
-    margin: 0;
     color: #f4f7fb;
+    font-size: 0.95rem;
+    font-weight: 760;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
 
-  .health-card {
-    display: flex;
-    align-items: center;
-    gap: 14px;
-    width: 100%;
-    min-height: 112px;
-    margin: 18px 0;
+  .settings-stat-grid,
+  .settings-status-list,
+  .settings-control-list,
+  .about-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 10px;
+  }
+
+  .settings-control-list,
+  .about-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .settings-stat-tile,
+  .settings-status-list > div,
+  .settings-control-list > div,
+  .about-grid > div {
+    min-width: 0;
     border: 1px solid #2a313c;
     border-radius: 8px;
     background: #12161c;
-    color: inherit;
-    cursor: default;
-    font: inherit;
-    padding: 16px;
-    text-align: left;
+    padding: 14px;
   }
 
-  .shortcut-card {
-    margin-top: 0;
+  .settings-stat-tile.wide {
+    grid-column: span 2;
   }
 
-  .health-card:hover,
-  .health-card:focus-visible {
-    border-color: #35544f;
-    background: #171d24;
-    outline: none;
-  }
-
-  .health-card > span:last-child {
-    display: grid;
-    min-width: 0;
-    gap: 4px;
-  }
-
-  .health-card strong,
-  .health-card small {
+  .settings-stat-tile strong,
+  .settings-status-list strong,
+  .settings-control-list strong,
+  .about-grid strong {
+    display: flex;
+    align-items: center;
+    gap: 8px;
     overflow: hidden;
+    color: #f4f7fb;
+    font-size: 0.98rem;
+    font-weight: 820;
+    line-height: 1.25;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
 
-  .health-card strong {
+  .settings-stat-tile strong {
+    font-size: 1.35rem;
+  }
+
+  .settings-control-list small {
+    display: block;
+    margin-top: 6px;
+    color: #8f9aa8;
+    font-size: 0.8rem;
+    font-weight: 760;
+  }
+
+  .accent-swatch {
+    width: 14px;
+    height: 14px;
+    flex: 0 0 auto;
+    border-radius: 50%;
+    background: #2f8f83;
+    box-shadow: 0 0 0 2px rgba(47, 143, 131, 0.22);
+  }
+
+  .settings-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+
+  .settings-actions button,
+  .settings-tool-grid button {
+    min-height: 40px;
+    border: 1px solid #303844;
+    border-radius: 8px;
+    background: #161a20;
+    color: #d5dce5;
+    cursor: default;
+    font: inherit;
+    font-size: 0.86rem;
+    font-weight: 850;
+  }
+
+  .settings-actions button {
+    padding: 0 13px;
+  }
+
+  .settings-actions button:hover:not(:disabled),
+  .settings-actions button:focus-visible:not(:disabled),
+  .settings-tool-grid button:hover,
+  .settings-tool-grid button:focus-visible {
+    border-color: #35544f;
+    background: #1b2027;
+    outline: none;
+  }
+
+  .settings-actions button.primary {
+    border-color: #35544f;
+    background: #17332f;
+    color: #d8fffa;
+  }
+
+  .settings-actions button.danger {
+    border-color: #4a3030;
+    color: #ffc8c8;
+  }
+
+  .settings-actions button:disabled {
+    border-color: #2a313c;
+    background: #11161d;
+    color: #6d7784;
+  }
+
+  .settings-actions button span {
+    margin-left: 8px;
+    color: #8f9aa8;
+    font-size: 0.76rem;
+    font-weight: 850;
+  }
+
+  .settings-tool-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 10px;
+  }
+
+  .settings-tool-grid button {
+    display: grid;
+    min-width: 0;
+    min-height: 138px;
+    gap: 8px;
+    justify-items: start;
+    padding: 14px;
+    text-align: left;
+  }
+
+  .settings-tool-grid .health-mark,
+  .settings-tool-grid .shortcut-mark,
+  .mix-tool-mark {
+    width: 48px;
+    height: 48px;
+    font-size: 1.18rem;
+  }
+
+  .settings-tool-grid strong,
+  .settings-tool-grid small {
+    overflow: hidden;
+    max-width: 100%;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .settings-tool-grid strong {
     color: #f4f7fb;
-    font-size: 1.08rem;
+    font-size: 0.98rem;
     line-height: 1.2;
   }
 
-  .health-card small {
+  .settings-tool-grid small {
     color: #8f9aa8;
-    font-size: 0.88rem;
-    font-weight: 700;
+    font-size: 0.8rem;
+    font-weight: 750;
+  }
+
+  .mix-tool-mark {
+    display: grid;
+    flex: 0 0 auto;
+    place-items: center;
+    border-radius: 8px;
+    background: #17332f;
+    color: #9ee3d9;
+    font-weight: 900;
+  }
+
+  .about-section {
+    margin-bottom: 8px;
   }
 
   .shortcut-mark {
@@ -6244,6 +6583,12 @@
     .diagnostic-album-list {
       grid-template-columns: repeat(2, minmax(0, 1fr));
     }
+
+    .settings-stat-grid,
+    .settings-status-list,
+    .settings-tool-grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
   }
 
   @media (max-width: 760px) {
@@ -6326,6 +6671,15 @@
       grid-template-columns: repeat(2, minmax(0, 1fr));
     }
 
+    .settings-section-header {
+      display: grid;
+    }
+
+    .settings-control-list,
+    .about-grid {
+      grid-template-columns: 1fr;
+    }
+
     .queue-panel {
       left: 16px;
       right: 16px;
@@ -6349,8 +6703,14 @@
     .mix-option-grid,
     .health-summary-grid,
     .diagnostic-album-list,
-    .settings-grid {
+    .settings-stat-grid,
+    .settings-status-list,
+    .settings-tool-grid {
       grid-template-columns: 1fr;
+    }
+
+    .settings-stat-tile.wide {
+      grid-column: auto;
     }
 
     .genre-editor form {
