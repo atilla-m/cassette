@@ -69,6 +69,6 @@ export async function readTrackLyrics(trackPath: string): Promise<TrackLyrics | 
   return invoke<TrackLyrics | null>("read_track_lyrics", { trackPath });
 }
 
-export async function autoFindTrackLyrics(trackPath: string): Promise<AutoLyricsResult> {
-  return invoke<AutoLyricsResult>("auto_find_track_lyrics", { trackPath });
+export async function autoFindTrackLyrics(trackPath: string, replaceCached = false): Promise<AutoLyricsResult> {
+  return invoke<AutoLyricsResult>("auto_find_track_lyrics", { trackPath, replaceCached });
 }

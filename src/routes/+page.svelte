@@ -331,6 +331,8 @@
   let currentTrackDuration = $derived(durationSeconds ?? currentTrack?.durationSeconds ?? null);
   let syncedLyricLines = $derived(currentLyrics?.kind === "synced" ? parseLrcLyrics(currentLyrics.text) : []);
   let activeLyricIndex = $derived(activeSyncedLyricIndex(syncedLyricLines, positionSeconds));
+  let lyricsBadgeLabel = $derived(currentLyrics ? lyricsKindLabel(currentLyrics) : null);
+  let cachedLyricsLabel = $derived(currentLyrics?.source === "lrclib" ? cachedLyricsStatus(currentLyrics) : null);
   let canPlayPrevious = $derived(
     currentQueueIndex !== null
       && playbackQueue.length > 1
@@ -549,17 +551,17 @@
     }
   }
 
-  async function handleAutoFindLyrics() {
-    if (!currentTrack || currentLyrics || isAutoFindingLyrics) {
+  async function handleAutoFindLyrics(replaceCached = false) {
+    if (!currentTrack || isAutoFindingLyrics || (currentLyrics && !replaceCached)) {
       return;
     }
 
     isAutoFindingLyrics = true;
-    lyricsLookupMessage = "Searching LRCLIB...";
+    lyricsLookupMessage = replaceCached ? "Searching LRCLIB for replacement lyrics..." : "Searching LRCLIB...";
     lyricsLookupError = null;
 
     try {
-      const result = await autoFindTrackLyrics(currentTrack.filePath);
+      const result = await autoFindTrackLyrics(currentTrack.filePath, replaceCached);
 
       if (result.lyrics) {
         currentLyrics = result.lyrics;
@@ -1774,6 +1776,10 @@
     }
   }
 
+  function handleLyricLineSeek(timeSeconds: number) {
+    void handleSeek(timeSeconds);
+  }
+
   async function handleVolumeChange(nextVolume: number) {
     playbackError = null;
     volume = nextVolume;
@@ -2028,6 +2034,19 @@
     }
 
     return activeIndex;
+  }
+
+  function lyricsKindLabel(lyrics: TrackLyrics) {
+    const kindLabel = lyrics.kind === "synced" ? "LRC" : "TXT";
+    return lyrics.source === "lrclib" ? `${kindLabel} · LRCLIB` : kindLabel;
+  }
+
+  function cachedLyricsStatus(lyrics: TrackLyrics) {
+    if (lyrics.fetchedAt) {
+      return `Cached from LRCLIB · ${formatDateTime(lyrics.fetchedAt)}`;
+    }
+
+    return "Cached from LRCLIB";
   }
 
   function playCountLabel(track: Track) {
@@ -3166,15 +3185,24 @@
                   <p class="eyebrow">Local Lyrics</p>
                   <h3 id="lyrics-title">Lyrics</h3>
                 </div>
-                {#if currentLyrics}
-                  <span>{currentLyrics.kind === "synced" ? "LRC" : "TXT"}</span>
-                {/if}
+                <div class="lyrics-header-actions">
+                  {#if currentLyrics?.source === "lrclib"}
+                    <button type="button" disabled={isAutoFindingLyrics} onclick={() => void handleAutoFindLyrics(true)}>
+                      {isAutoFindingLyrics ? "Searching..." : "Find Again"}
+                    </button>
+                  {/if}
+                  {#if lyricsBadgeLabel}
+                    <span>{lyricsBadgeLabel}</span>
+                  {/if}
+                </div>
               </div>
 
               {#if lyricsLookupMessage}
                 <p class="lyrics-lookup-message">{lyricsLookupMessage}</p>
               {:else if lyricsLookupError}
                 <p class="lyrics-lookup-message error">{lyricsLookupError}</p>
+              {:else if cachedLyricsLabel}
+                <p class="lyrics-lookup-message cached">{cachedLyricsLabel}</p>
               {/if}
 
               {#if isLoadingLyrics}
@@ -3185,9 +3213,14 @@
               {:else if currentLyrics?.kind === "synced" && syncedLyricLines.length > 0}
                 <div class="synced-lyrics" bind:this={lyricsPanelElement}>
                   {#each syncedLyricLines as line, index}
-                    <p class:active={index === activeLyricIndex} data-active={index === activeLyricIndex ? "true" : undefined}>
+                    <button
+                      class:active={index === activeLyricIndex}
+                      data-active={index === activeLyricIndex ? "true" : undefined}
+                      type="button"
+                      onclick={() => handleLyricLineSeek(line.timeSeconds)}
+                    >
                       {line.text}
-                    </p>
+                    </button>
                   {/each}
                 </div>
               {:else if currentLyrics?.kind === "plain"}
@@ -5645,7 +5678,14 @@
     font-size: 1.05rem;
   }
 
-  .lyrics-header > span {
+  .lyrics-header-actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 8px;
+  }
+
+  .lyrics-header-actions > span {
     display: inline-flex;
     align-items: center;
     min-height: 28px;
@@ -5658,6 +5698,32 @@
     padding: 0 10px;
   }
 
+  .lyrics-header-actions button {
+    min-height: 28px;
+    border: 1px solid #303844;
+    border-radius: 8px;
+    background: #161a20;
+    color: #d5dce5;
+    cursor: default;
+    font: inherit;
+    font-size: 0.78rem;
+    font-weight: 850;
+    padding: 0 10px;
+  }
+
+  .lyrics-header-actions button:hover,
+  .lyrics-header-actions button:focus-visible {
+    border-color: #35544f;
+    background: #1b2027;
+    outline: none;
+  }
+
+  .lyrics-header-actions button:disabled {
+    border-color: #303844;
+    background: #151a21;
+    color: #626c79;
+  }
+
   .lyrics-lookup-message {
     margin: 0;
     color: #9ee3d9;
@@ -5667,6 +5733,10 @@
 
   .lyrics-lookup-message.error {
     color: #ffcbc8;
+  }
+
+  .lyrics-lookup-message.cached {
+    color: #9aa4b1;
   }
 
   .auto-lyrics-button {
@@ -5706,20 +5776,33 @@
     padding: 24px 6px;
   }
 
-  .synced-lyrics p {
+  .synced-lyrics button {
+    width: 100%;
+    border: 0;
     margin: 0;
     border-radius: 8px;
+    background: transparent;
     color: #7f8996;
+    cursor: default;
+    font: inherit;
     font-size: 1rem;
     font-weight: 750;
     line-height: 1.5;
     padding: 7px 10px;
+    text-align: left;
     transition:
       background 150ms ease,
       color 150ms ease;
   }
 
-  .synced-lyrics p.active {
+  .synced-lyrics button:hover,
+  .synced-lyrics button:focus-visible {
+    background: #171d24;
+    color: #d5dce5;
+    outline: none;
+  }
+
+  .synced-lyrics button.active {
     background: #17332f;
     color: #d8fffa;
   }

@@ -81,6 +81,9 @@ export type TrackLyrics = {
   path: string;
   kind: "synced" | "plain";
   text: string;
+  source: "local" | "lrclib";
+  fetchedAt: number | null;
+  trackPath: string | null;
 };
 
 export type AutoLyricsResult = {
