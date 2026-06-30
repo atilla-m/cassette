@@ -8,6 +8,7 @@ export const navItems: NavItem[] = [
   { label: "Genres", icon: "G" },
   { label: "Songs", icon: "S" },
   { label: "Playlists", icon: "P" },
+  { label: "Stats", icon: "D" },
   { label: "Settings", icon: "T" },
 ];
 

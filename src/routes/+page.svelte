@@ -80,6 +80,22 @@
     missingYearTracks: Track[];
     duplicateAlbumGroups: DuplicateAlbumGroup[];
   };
+  type TopArtistStat = {
+    name: string;
+    color: string;
+    totalPlays: number;
+    songCount: number;
+  };
+  type TopAlbumStat = {
+    album: Album;
+    totalPlays: number;
+    songCount: number;
+  };
+  type TopGenreStat = {
+    genre: Genre;
+    totalPlays: number;
+    songCount: number;
+  };
   type ShortcutItem = {
     keys: string[];
     description: string;
@@ -202,6 +218,13 @@
   let homeTracks = $derived(tracks.slice(0, 8));
   let recentlyPlayedTracks = $derived(recentlyPlayed(tracks).slice(0, 8));
   let mostPlayedTracks = $derived(mostPlayed(tracks).slice(0, 8));
+  let statsTopTracks = $derived(mostPlayed(tracks).slice(0, 10));
+  let statsRecentlyPlayedTracks = $derived(recentlyPlayed(tracks).slice(0, 10));
+  let statsTopArtists = $derived(buildTopArtistStats(tracks, displayArtists).slice(0, 8));
+  let statsTopAlbums = $derived(buildTopAlbumStats(tracks, displayAlbums).slice(0, 8));
+  let statsTopGenres = $derived(buildTopGenreStats(tracks, displayGenres).slice(0, 8));
+  let statsTotalPlays = $derived(tracks.reduce((total, track) => total + track.playCount, 0));
+  let statsRecentlyPlayedCount = $derived(tracks.filter((track) => track.lastPlayedAt !== null).length);
   let homeAlbums = $derived(sortedAlbums.slice(0, 4));
   let homeArtists = $derived(sortedArtists.slice(0, 4));
   let normalizedSearchQuery = $derived(normalizeSearch(searchQuery));
@@ -1867,6 +1890,14 @@
     return `${track.playCount} ${track.playCount === 1 ? "play" : "plays"}`;
   }
 
+  function playsLabel(totalPlays: number) {
+    return `${totalPlays} ${totalPlays === 1 ? "play" : "plays"}`;
+  }
+
+  function lastPlayedLabel(track: Track) {
+    return track.lastPlayedAt === null ? "Not played yet" : formatDateTime(track.lastPlayedAt);
+  }
+
   function albumFormatSummary(albumTracks: Track[]) {
     const formats = Array.from(new Set(albumTracks.map((track) => track.extension.toUpperCase()))).sort();
 
@@ -2400,6 +2431,99 @@
       );
   }
 
+  function buildTopArtistStats(libraryTracks: Track[], artists: Artist[]): TopArtistStat[] {
+    const artistsByName = new Map(artists.map((artist) => [artist.name, artist]));
+    const statsByName = new Map<string, TopArtistStat>();
+
+    for (const track of libraryTracks) {
+      const name = artistNameForTrack(track);
+      const artist = artistsByName.get(name);
+      const current = statsByName.get(name) ?? {
+        name,
+        color: artist?.color ?? "#2f8f83",
+        totalPlays: 0,
+        songCount: 0,
+      };
+
+      current.totalPlays += track.playCount;
+      current.songCount += 1;
+      statsByName.set(name, current);
+    }
+
+    return Array.from(statsByName.values())
+      .filter((stat) => stat.totalPlays > 0)
+      .sort((left, right) =>
+        right.totalPlays - left.totalPlays
+        || right.songCount - left.songCount
+        || compareText(left.name, right.name),
+      );
+  }
+
+  function buildTopAlbumStats(libraryTracks: Track[], albums: Album[]): TopAlbumStat[] {
+    const albumsById = new Map(albums.map((album) => [album.id, album]));
+    const statsByAlbumId = new Map<string, TopAlbumStat>();
+
+    for (const track of libraryTracks) {
+      const albumId = albumIdForTrack(track);
+      const album = albumsById.get(albumId);
+
+      if (!album) {
+        continue;
+      }
+
+      const current = statsByAlbumId.get(albumId) ?? {
+        album,
+        totalPlays: 0,
+        songCount: 0,
+      };
+
+      current.totalPlays += track.playCount;
+      current.songCount += 1;
+      statsByAlbumId.set(albumId, current);
+    }
+
+    return Array.from(statsByAlbumId.values())
+      .filter((stat) => stat.totalPlays > 0)
+      .sort((left, right) =>
+        right.totalPlays - left.totalPlays
+        || right.songCount - left.songCount
+        || compareText(left.album.title, right.album.title),
+      );
+  }
+
+  function buildTopGenreStats(libraryTracks: Track[], genres: Genre[]): TopGenreStat[] {
+    const genresByName = new Map(genres.map((genre) => [genre.name, genre]));
+    const statsByGenreName = new Map<string, TopGenreStat>();
+
+    for (const track of libraryTracks) {
+      for (const genreName of trackGenres(track)) {
+        const genre = genresByName.get(genreName);
+
+        if (!genre) {
+          continue;
+        }
+
+        const current = statsByGenreName.get(genreName) ?? {
+          genre,
+          totalPlays: 0,
+          songCount: 0,
+        };
+
+        current.totalPlays += track.playCount;
+        current.songCount += 1;
+        statsByGenreName.set(genreName, current);
+      }
+    }
+
+    return Array.from(statsByGenreName.values())
+      .filter((stat) => stat.totalPlays > 0)
+      .sort((left, right) =>
+        right.totalPlays - left.totalPlays
+        || right.songCount - left.songCount
+        || compareText(left.genre.name, right.genre.name),
+      );
+  }
+
   function sortAlbums(albums: Album[], sortKey: AlbumSortKey, direction: SortDirection) {
     return [...albums].sort((left, right) => {
       let result = 0;
@@ -2654,6 +2778,10 @@
       return scannedFolder
         ? `Library folder: ${scannedFolder}`
         : "No library folder is cached yet.";
+    }
+
+    if (activeView === "Stats") {
+      return `${playsLabel(statsTotalPlays)} across ${tracks.length} ${tracks.length === 1 ? "track" : "tracks"}.`;
     }
 
     if (scanCount !== null && scannedFolder) {
@@ -3039,6 +3167,189 @@
             </div>
           {/if}
         </LibrarySection>
+      {:else if activeView === "Stats"}
+        <section class="stats-page" aria-label="Listening and library statistics">
+          <div class="stats-overview-grid" aria-label="Library and listening overview">
+            <div class="stats-overview-card">
+              <span>Total tracks</span>
+              <strong>{tracks.length}</strong>
+            </div>
+            <div class="stats-overview-card">
+              <span>Total albums</span>
+              <strong>{hasLoadedCache ? displayAlbums.length : 0}</strong>
+            </div>
+            <div class="stats-overview-card">
+              <span>Total artists</span>
+              <strong>{hasLoadedCache ? displayArtists.length : 0}</strong>
+            </div>
+            <div class="stats-overview-card">
+              <span>Total genres</span>
+              <strong>{hasLoadedCache ? displayGenres.length : 0}</strong>
+            </div>
+            <div class="stats-overview-card">
+              <span>Total plays</span>
+              <strong>{statsTotalPlays}</strong>
+            </div>
+            <div class="stats-overview-card">
+              <span>Liked songs</span>
+              <strong>{favoriteTracks.length}</strong>
+            </div>
+            <div class="stats-overview-card">
+              <span>Recently played</span>
+              <strong>{statsRecentlyPlayedCount}</strong>
+            </div>
+            <div class="stats-overview-card muted">
+              <span>Listening time</span>
+              <strong>Coming later</strong>
+            </div>
+          </div>
+
+          <LibrarySection title="Top Tracks" viewAllLabel="All time">
+            {#if statsTopTracks.length === 0}
+              <div class="group-empty">
+                <h3>No top tracks yet</h3>
+                <p>Tracks appear here after they pass the play-count threshold.</p>
+              </div>
+            {:else}
+              <TrackList
+                tracks={statsTopTracks}
+                isScanning={false}
+                selectedTrackId={currentTrack?.id}
+                onTrackSelect={handleTrackSelect}
+                onTrackContextMenu={openTrackContextMenu}
+                onArtistSelect={handleTrackArtistSelect}
+                onAlbumSelect={handleTrackAlbumSelect}
+                onToggleFavorite={handleToggleFavorite}
+              />
+            {/if}
+          </LibrarySection>
+
+          <div class="stats-section-grid">
+            <LibrarySection title="Top Artists" viewAllLabel="By total plays">
+              {#if statsTopArtists.length === 0}
+                <div class="group-empty compact">
+                  <h3>No artist play data yet</h3>
+                  <p>Artist totals will appear after songs are played.</p>
+                </div>
+              {:else}
+                <div class="stats-rank-list">
+                  {#each statsTopArtists as stat, index}
+                    <button class="stats-rank-card" type="button" onclick={() => selectArtistName(stat.name)}>
+                      <span class="stats-rank-number">{index + 1}</span>
+                      <span class="artist-avatar stats-avatar" style={`--item-color: ${stat.color}`} aria-hidden="true">
+                        {stat.name.slice(0, 1)}
+                      </span>
+                      <span class="stats-rank-copy">
+                        <strong>{stat.name}</strong>
+                        <small>{playsLabel(stat.totalPlays)} · {songCountLabel(stat.songCount)}</small>
+                      </span>
+                    </button>
+                  {/each}
+                </div>
+              {/if}
+            </LibrarySection>
+
+            <LibrarySection title="Top Albums" viewAllLabel="By total plays">
+              {#if statsTopAlbums.length === 0}
+                <div class="group-empty compact">
+                  <h3>No album play data yet</h3>
+                  <p>Album totals will appear after songs are played.</p>
+                </div>
+              {:else}
+                <div class="stats-rank-list">
+                  {#each statsTopAlbums as stat, index}
+                    <button class="stats-rank-card" type="button" onclick={() => handleAlbumSelect(stat.album)}>
+                      <span class="stats-rank-number">{index + 1}</span>
+                      <span class="album-art stats-cover" style={`--item-color: ${stat.album.color}`} aria-hidden="true">
+                        {#if stat.album.coverArtPath}
+                          <img
+                            src={localImageSource(stat.album.coverArtPath) ?? ""}
+                            alt=""
+                            loading="lazy"
+                            onload={showLoadedImage}
+                            onerror={hideBrokenImage}
+                          />
+                        {/if}
+                        <span></span>
+                      </span>
+                      <span class="stats-rank-copy">
+                        <strong>{stat.album.title}</strong>
+                        <small>{stat.album.artist} · {playsLabel(stat.totalPlays)} · {songCountLabel(stat.songCount)}</small>
+                      </span>
+                    </button>
+                  {/each}
+                </div>
+              {/if}
+            </LibrarySection>
+
+            <LibrarySection title="Top Genres" viewAllLabel="By total plays">
+              {#if statsTopGenres.length === 0}
+                <div class="group-empty compact">
+                  <h3>No genre play data yet</h3>
+                  <p>Genre totals will appear after songs with genre data are played.</p>
+                </div>
+              {:else}
+                <div class="stats-rank-list">
+                  {#each statsTopGenres as stat, index}
+                    <button class="stats-rank-card" type="button" onclick={() => handleGenreSelect(stat.genre)}>
+                      <span class="stats-rank-number">{index + 1}</span>
+                      <span class="genre-pill stats-genre-mark" style={`--item-color: ${stat.genre.color}`} aria-hidden="true">
+                        {stat.genre.name.slice(0, 1)}
+                      </span>
+                      <span class="stats-rank-copy">
+                        <strong>{stat.genre.name}</strong>
+                        <small>{playsLabel(stat.totalPlays)} · {songCountLabel(stat.songCount)}</small>
+                      </span>
+                    </button>
+                  {/each}
+                </div>
+              {/if}
+            </LibrarySection>
+
+            <LibrarySection title="Recently Played" viewAllLabel="Most recent">
+              {#if statsRecentlyPlayedTracks.length === 0}
+                <div class="group-empty compact">
+                  <h3>No playback history yet</h3>
+                  <p>Recently played tracks will appear after playback is recorded.</p>
+                </div>
+              {:else}
+                <div class="stats-recent-list">
+                  {#each statsRecentlyPlayedTracks as track}
+                    <button
+                      class="stats-recent-card"
+                      type="button"
+                      title={track.filePath}
+                      onclick={() => void handleTrackSelect(track, statsRecentlyPlayedTracks)}
+                      oncontextmenu={(event) => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        openTrackContextMenu(track, statsRecentlyPlayedTracks, event.clientX, event.clientY);
+                      }}
+                    >
+                      <span class="mini-cover stats-mini-cover" aria-hidden="true">
+                        <span>{track.extension.toUpperCase()}</span>
+                        {#if track.coverArtPath}
+                          <img
+                            src={localImageSource(track.coverArtPath) ?? ""}
+                            alt=""
+                            loading="lazy"
+                            onload={showLoadedImage}
+                            onerror={hideBrokenImage}
+                          />
+                        {/if}
+                      </span>
+                      <span class="stats-rank-copy">
+                        <strong>{track.title}</strong>
+                        <small>{track.artist ?? "Unknown Artist"}{track.album ? ` · ${track.album}` : ""}</small>
+                      </span>
+                      <span class="stats-played-at">{lastPlayedLabel(track)}</span>
+                    </button>
+                  {/each}
+                </div>
+              {/if}
+            </LibrarySection>
+          </div>
+        </section>
       {:else if activeView === "Albums"}
         {#if selectedAlbum}
           <section class="detail-view" aria-labelledby="album-detail-title">
@@ -5798,6 +6109,202 @@
     margin-top: 8px;
   }
 
+  .stats-page {
+    display: grid;
+    gap: 22px;
+    max-width: 1120px;
+  }
+
+  .stats-overview-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 12px;
+  }
+
+  .stats-overview-card {
+    min-width: 0;
+    border: 1px solid #242b35;
+    border-radius: 8px;
+    background: #151a21;
+    padding: 16px;
+  }
+
+  .stats-overview-card.muted {
+    background: #11161d;
+  }
+
+  .stats-overview-card span {
+    display: block;
+    margin-bottom: 8px;
+    color: #8f9aa8;
+    font-size: 0.76rem;
+    font-weight: 850;
+    text-transform: uppercase;
+  }
+
+  .stats-overview-card strong {
+    display: block;
+    overflow: hidden;
+    color: #f4f7fb;
+    font-size: 1.55rem;
+    font-weight: 900;
+    line-height: 1.1;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .stats-overview-card.muted strong {
+    color: #8f9aa8;
+    font-size: 1rem;
+  }
+
+  .stats-section-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 22px;
+  }
+
+  .stats-section-grid :global(.library-section) {
+    min-width: 0;
+  }
+
+  .stats-rank-list,
+  .stats-recent-list {
+    display: grid;
+    gap: 8px;
+  }
+
+  .stats-rank-card,
+  .stats-recent-card {
+    display: grid;
+    align-items: center;
+    width: 100%;
+    min-width: 0;
+    min-height: 68px;
+    border: 1px solid #242b35;
+    border-radius: 8px;
+    background: #151a21;
+    color: inherit;
+    cursor: default;
+    font: inherit;
+    padding: 10px;
+    text-align: left;
+  }
+
+  .stats-rank-card {
+    grid-template-columns: 32px 48px minmax(0, 1fr);
+    gap: 10px;
+  }
+
+  .stats-recent-card {
+    grid-template-columns: 48px minmax(0, 1fr) minmax(120px, auto);
+    gap: 12px;
+  }
+
+  .stats-rank-card:hover,
+  .stats-rank-card:focus-visible,
+  .stats-recent-card:hover,
+  .stats-recent-card:focus-visible {
+    border-color: #35544f;
+    background: #1b2027;
+    outline: none;
+  }
+
+  .stats-rank-number {
+    display: grid;
+    width: 30px;
+    height: 30px;
+    place-items: center;
+    border-radius: 7px;
+    background: #11161d;
+    color: #8f9aa8;
+    font-size: 0.78rem;
+    font-weight: 900;
+  }
+
+  .stats-avatar,
+  .stats-cover,
+  .stats-genre-mark,
+  .stats-mini-cover {
+    width: 48px;
+    height: 48px;
+    margin: 0;
+    flex: 0 0 auto;
+  }
+
+  .stats-cover span {
+    border-width: 7px;
+  }
+
+  .stats-genre-mark,
+  .stats-mini-cover {
+    display: grid;
+    position: relative;
+    overflow: hidden;
+    place-items: center;
+    border-radius: 8px;
+  }
+
+  .stats-genre-mark {
+    background: var(--item-color);
+    color: #0d0f13;
+    font-size: 1.12rem;
+    font-weight: 900;
+  }
+
+  .stats-mini-cover {
+    background: #202832;
+    color: #9aa4b1;
+    font-size: 0.66rem;
+    font-weight: 900;
+  }
+
+  .stats-mini-cover img {
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+
+  .stats-mini-cover > span {
+    z-index: 0;
+  }
+
+  .stats-rank-copy {
+    display: grid;
+    min-width: 0;
+    gap: 3px;
+  }
+
+  .stats-rank-copy strong,
+  .stats-rank-copy small,
+  .stats-played-at {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .stats-rank-copy strong {
+    color: #f4f7fb;
+    font-size: 0.95rem;
+    font-weight: 820;
+    line-height: 1.2;
+  }
+
+  .stats-rank-copy small,
+  .stats-played-at {
+    color: #8f9aa8;
+    font-size: 0.8rem;
+    font-weight: 750;
+  }
+
+  .stats-played-at {
+    justify-self: end;
+    max-width: 180px;
+  }
+
   .settings-panel {
     display: grid;
     max-width: 1040px;
@@ -6586,7 +7093,8 @@
 
     .settings-stat-grid,
     .settings-status-list,
-    .settings-tool-grid {
+    .settings-tool-grid,
+    .stats-overview-grid {
       grid-template-columns: repeat(2, minmax(0, 1fr));
     }
   }
@@ -6676,8 +7184,19 @@
     }
 
     .settings-control-list,
-    .about-grid {
+    .about-grid,
+    .stats-section-grid {
       grid-template-columns: 1fr;
+    }
+
+    .stats-recent-card {
+      grid-template-columns: 48px minmax(0, 1fr);
+    }
+
+    .stats-played-at {
+      grid-column: 2;
+      justify-self: start;
+      max-width: 100%;
     }
 
     .queue-panel {
@@ -6705,7 +7224,8 @@
     .diagnostic-album-list,
     .settings-stat-grid,
     .settings-status-list,
-    .settings-tool-grid {
+    .settings-tool-grid,
+    .stats-overview-grid {
       grid-template-columns: 1fr;
     }
 
