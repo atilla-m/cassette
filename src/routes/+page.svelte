@@ -75,8 +75,46 @@
     missingYearTracks: Track[];
     duplicateAlbumGroups: DuplicateAlbumGroup[];
   };
+  type ShortcutItem = {
+    keys: string[];
+    description: string;
+  };
+  type ShortcutGroup = {
+    title: string;
+    shortcuts: ShortcutItem[];
+  };
 
   const mixFormatOptions = ["All", "FLAC", "MP3", "OGG", "OPUS", "WAV", "M4A"];
+  const shortcutGroups: ShortcutGroup[] = [
+    {
+      title: "Playback",
+      shortcuts: [
+        { keys: ["Space"], description: "Play or pause the current track" },
+        { keys: ["Arrow Right"], description: "Play the next track" },
+        { keys: ["Arrow Left"], description: "Play the previous track" },
+      ],
+    },
+    {
+      title: "Navigation",
+      shortcuts: [
+        { keys: ["?"], description: "Open keyboard shortcuts" },
+        { keys: ["Ctrl", "/"], description: "Open keyboard shortcuts" },
+        { keys: ["Escape"], description: "Close the shortcuts overlay first" },
+      ],
+    },
+    {
+      title: "Library / Search",
+      shortcuts: [
+        { keys: ["Escape"], description: "Clear the active search" },
+      ],
+    },
+    {
+      title: "Queue / Panels",
+      shortcuts: [
+        { keys: ["Escape"], description: "Close context menus and overlays" },
+      ],
+    },
+  ];
 
   let tracks = $state<Track[]>([]);
   let isScanning = $state(false);
@@ -105,6 +143,7 @@
   let isMixBuilderOpen = $state(false);
   let isLibraryHealthOpen = $state(false);
   let selectedPlaylistId = $state<string | null>(null);
+  let isShortcutHelpOpen = $state(false);
   let searchQuery = $state("");
   let playlistNameDraft = $state("");
   let playlistMessage = $state<string | null>(null);
@@ -137,6 +176,7 @@
   let durationSeconds = $state<number | null>(null);
   let volume = $state(1);
   let contextMenu = $state<ContextMenuState | null>(null);
+  let shortcutModalElement: HTMLElement | undefined = $state();
   let displayAlbums = $derived(!hasLoadedCache ? mockAlbums : buildAlbums(tracks));
   let displayArtists = $derived(!hasLoadedCache ? mockArtists : buildArtists(tracks));
   let displayGenres = $derived(!hasLoadedCache ? mockGenres : buildGenres(tracks));
@@ -232,6 +272,16 @@
   });
 
   $effect(() => {
+    if (!isShortcutHelpOpen) {
+      return;
+    }
+
+    window.requestAnimationFrame(() => {
+      shortcutModalElement?.focus();
+    });
+  });
+
+  $effect(() => {
     if (!availableFormats.includes(songFormatFilter)) {
       songFormatFilter = "All";
     }
@@ -277,6 +327,16 @@
     }, 250);
 
     function handleKeydown(event: KeyboardEvent) {
+      if (isShortcutHelpOpen) {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          event.stopPropagation();
+          closeShortcutHelp();
+        }
+
+        return;
+      }
+
       if (event.key === "Escape" && normalizedSearchQuery) {
         event.preventDefault();
         clearSearch();
@@ -287,7 +347,11 @@
         return;
       }
 
-      if (event.code === "Space") {
+      if (isShortcutHelpEvent(event)) {
+        event.preventDefault();
+        event.stopPropagation();
+        openShortcutHelp();
+      } else if (event.code === "Space") {
         event.preventDefault();
         event.stopPropagation();
         void handleTogglePlayback();
@@ -887,6 +951,21 @@
     mainElement?.scrollTo({ top: 0 });
   }
 
+  function openShortcutHelp() {
+    contextMenu = null;
+    isShortcutHelpOpen = true;
+  }
+
+  function closeShortcutHelp() {
+    isShortcutHelpOpen = false;
+  }
+
+  function handleShortcutBackdropClick(event: MouseEvent) {
+    if (event.target === event.currentTarget) {
+      closeShortcutHelp();
+    }
+  }
+
   function clearSearch() {
     searchQuery = "";
   }
@@ -1388,6 +1467,11 @@
     }
 
     return ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName);
+  }
+
+  function isShortcutHelpEvent(event: KeyboardEvent) {
+    const isModifiedSlash = event.key === "/" && (event.ctrlKey || event.metaKey);
+    return event.key === "?" || isModifiedSlash;
   }
 
   function albumDetail(album: Album) {
@@ -3291,6 +3375,14 @@
                 <small>{libraryHealthIssueCount} {libraryHealthIssueCount === 1 ? "issue" : "issues"} found · {libraryDiagnostics.totalAlbums} {libraryDiagnostics.totalAlbums === 1 ? "album" : "albums"} · {libraryDiagnostics.totalArtists} {libraryDiagnostics.totalArtists === 1 ? "artist" : "artists"}</small>
               </span>
             </button>
+            <button class="health-card shortcut-card" type="button" onclick={openShortcutHelp}>
+              <span class="shortcut-mark" aria-hidden="true">?</span>
+              <span>
+                <span class="eyebrow">Keyboard</span>
+                <strong>Keyboard Shortcuts</strong>
+                <small>Space for playback · arrows for previous and next · ? for this guide</small>
+              </span>
+            </button>
             <p>More playback, library, and appearance settings will live here later.</p>
           </section>
         {/if}
@@ -3344,6 +3436,50 @@
       items={contextMenu.items}
       onClose={closeContextMenu}
     />
+  {/if}
+
+  {#if isShortcutHelpOpen}
+    <div class="shortcuts-backdrop" role="presentation" onclick={handleShortcutBackdropClick}>
+      <div
+        bind:this={shortcutModalElement}
+        class="shortcuts-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="shortcuts-title"
+        tabindex="-1"
+      >
+        <header class="shortcuts-header">
+          <div>
+            <p class="eyebrow">Keyboard</p>
+            <h3 id="shortcuts-title">Keyboard Shortcuts</h3>
+          </div>
+          <button type="button" aria-label="Close keyboard shortcuts" onclick={closeShortcutHelp}>Close</button>
+        </header>
+
+        <div class="shortcut-group-list">
+          {#each shortcutGroups as group}
+            <section class="shortcut-group" aria-labelledby={`shortcut-group-${group.title.toLowerCase().replaceAll(" / ", "-").replaceAll(" ", "-")}`}>
+              <h4 id={`shortcut-group-${group.title.toLowerCase().replaceAll(" / ", "-").replaceAll(" ", "-")}`}>{group.title}</h4>
+              <div class="shortcut-list">
+                {#each group.shortcuts as shortcut}
+                  <div class="shortcut-row">
+                    <div class="shortcut-keys" aria-label={shortcut.keys.join(" plus ")}>
+                      {#each shortcut.keys as key, index}
+                        {#if index > 0}
+                          <span class="shortcut-plus" aria-hidden="true">+</span>
+                        {/if}
+                        <kbd>{key}</kbd>
+                      {/each}
+                    </div>
+                    <p>{shortcut.description}</p>
+                  </div>
+                {/each}
+              </div>
+            </section>
+          {/each}
+        </div>
+      </div>
+    </div>
   {/if}
 
   <NowPlayingBar
@@ -4415,6 +4551,10 @@
     text-align: left;
   }
 
+  .shortcut-card {
+    margin-top: 0;
+  }
+
   .health-card:hover,
   .health-card:focus-visible {
     border-color: #35544f;
@@ -4445,6 +4585,144 @@
     color: #8f9aa8;
     font-size: 0.88rem;
     font-weight: 700;
+  }
+
+  .shortcut-mark {
+    display: grid;
+    flex: 0 0 auto;
+    width: 54px;
+    height: 54px;
+    place-items: center;
+    border-radius: 8px;
+    background: #27303b;
+    color: #dbe7f3;
+    font-size: 1.35rem;
+    font-weight: 900;
+  }
+
+  .shortcuts-backdrop {
+    position: fixed;
+    z-index: 80;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    overflow: auto;
+    background: rgba(5, 7, 10, 0.72);
+    padding: 24px;
+  }
+
+  .shortcuts-modal {
+    width: min(720px, 100%);
+    max-height: min(720px, calc(100dvh - 48px));
+    overflow: auto;
+    border: 1px solid #303844;
+    border-radius: 8px;
+    background: #12161c;
+    box-shadow: 0 24px 70px rgba(0, 0, 0, 0.46);
+    outline: none;
+    padding: 22px;
+  }
+
+  .shortcuts-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 18px;
+    margin-bottom: 18px;
+  }
+
+  .shortcuts-header h3 {
+    margin: 0;
+    color: #f4f7fb;
+    font-size: 1.35rem;
+    line-height: 1.2;
+  }
+
+  .shortcuts-header button {
+    min-height: 34px;
+    border: 1px solid #303844;
+    border-radius: 8px;
+    background: #171d24;
+    color: #d5dce5;
+    cursor: default;
+    font: inherit;
+    font-size: 0.84rem;
+    font-weight: 800;
+    padding: 0 12px;
+  }
+
+  .shortcuts-header button:hover,
+  .shortcuts-header button:focus-visible {
+    border-color: #35544f;
+    background: #1d242c;
+    color: #f4f7fb;
+    outline: none;
+  }
+
+  .shortcut-group-list {
+    display: grid;
+    gap: 14px;
+  }
+
+  .shortcut-group {
+    border: 1px solid #242b35;
+    border-radius: 8px;
+    background: #151a21;
+    padding: 14px;
+  }
+
+  .shortcut-group h4 {
+    margin: 0 0 10px;
+    color: #f4f7fb;
+    font-size: 0.94rem;
+  }
+
+  .shortcut-list {
+    display: grid;
+    gap: 8px;
+  }
+
+  .shortcut-row {
+    display: grid;
+    grid-template-columns: minmax(150px, 0.45fr) minmax(0, 1fr);
+    align-items: center;
+    gap: 14px;
+    min-height: 38px;
+  }
+
+  .shortcut-keys {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .shortcut-plus {
+    color: #6f7b88;
+    font-size: 0.78rem;
+    font-weight: 900;
+  }
+
+  kbd {
+    min-width: 28px;
+    border: 1px solid #3a4350;
+    border-bottom-color: #242b35;
+    border-radius: 6px;
+    background: #0d1117;
+    color: #eef3f8;
+    font-family: inherit;
+    font-size: 0.78rem;
+    font-weight: 850;
+    line-height: 1;
+    padding: 7px 9px;
+    text-align: center;
+  }
+
+  .shortcut-row p {
+    margin: 0;
+    color: #aab4c0;
+    font-size: 0.9rem;
+    font-weight: 650;
   }
 
   .health-summary-grid {
@@ -4822,6 +5100,11 @@
       width: auto;
       max-height: calc(100dvh - 178px);
     }
+
+    .shortcuts-backdrop {
+      align-items: start;
+      padding: 16px;
+    }
   }
 
   @media (max-width: 520px) {
@@ -4838,6 +5121,25 @@
 
     .genre-editor form {
       flex-direction: column;
+    }
+
+    .shortcuts-modal {
+      max-height: calc(100dvh - 32px);
+      padding: 18px;
+    }
+
+    .shortcuts-header {
+      align-items: stretch;
+      flex-direction: column;
+    }
+
+    .shortcuts-header button {
+      width: fit-content;
+    }
+
+    .shortcut-row {
+      grid-template-columns: 1fr;
+      gap: 6px;
     }
   }
 </style>
