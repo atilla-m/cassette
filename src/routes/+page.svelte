@@ -145,6 +145,8 @@
   let selectedPlaylistId = $state<string | null>(null);
   let isShortcutHelpOpen = $state(false);
   let searchQuery = $state("");
+  let playlistPendingDelete = $state<Playlist | null>(null);
+  let isDeletingPlaylist = $state(false);
   let playlistNameDraft = $state("");
   let playlistMessage = $state<string | null>(null);
   let playlistError = $state<string | null>(null);
@@ -177,6 +179,7 @@
   let volume = $state(1);
   let contextMenu = $state<ContextMenuState | null>(null);
   let shortcutModalElement: HTMLElement | undefined = $state();
+  let deletePlaylistModalElement: HTMLElement | undefined = $state();
   let displayAlbums = $derived(!hasLoadedCache ? mockAlbums : buildAlbums(tracks));
   let displayArtists = $derived(!hasLoadedCache ? mockArtists : buildArtists(tracks));
   let displayGenres = $derived(!hasLoadedCache ? mockGenres : buildGenres(tracks));
@@ -214,6 +217,13 @@
   let selectedGenre = $derived(displayGenres.find((genre) => genre.name === selectedGenreName) ?? null);
   let selectedPlaylist = $derived(playlists.find((playlist) => playlist.id === selectedPlaylistId) ?? null);
   let selectedPlaylistTracks = $derived(selectedPlaylist ? tracksForPlaylist(selectedPlaylist) : []);
+  let isSearchingSelectedPlaylist = $derived(Boolean(selectedPlaylist && normalizedSearchQuery));
+  let isGlobalSearchActive = $derived(Boolean(normalizedSearchQuery && !isSearchingSelectedPlaylist));
+  let selectedPlaylistSearchTracks = $derived(
+    isSearchingSelectedPlaylist
+      ? selectedPlaylistTracks.filter((track) => trackMatchesSearch(track, normalizedSearchQuery))
+      : selectedPlaylistTracks,
+  );
   let selectedAlbumTracks = $derived(
     selectedAlbum ? tracks.filter((track) => albumIdForTrack(track) === selectedAlbum.id) : [],
   );
@@ -282,6 +292,16 @@
   });
 
   $effect(() => {
+    if (!playlistPendingDelete) {
+      return;
+    }
+
+    window.requestAnimationFrame(() => {
+      deletePlaylistModalElement?.focus();
+    });
+  });
+
+  $effect(() => {
     if (!availableFormats.includes(songFormatFilter)) {
       songFormatFilter = "All";
     }
@@ -327,6 +347,16 @@
     }, 250);
 
     function handleKeydown(event: KeyboardEvent) {
+      if (playlistPendingDelete) {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          event.stopPropagation();
+          closeDeletePlaylistConfirmation();
+        }
+
+        return;
+      }
+
       if (isShortcutHelpOpen) {
         if (event.key === "Escape") {
           event.preventDefault();
@@ -537,7 +567,7 @@
       { label: "Shuffle playlist", disabled: playlistTracks.length === 0, action: () => playTrackSet(playlistTracks, true) },
       { label: "Add playlist to queue", disabled: playlistTracks.length === 0, action: () => appendTracksToQueue(playlistTracks) },
       { label: "Rename playlist", action: () => handleRenamePlaylist(playlist) },
-      { label: "Delete playlist", action: () => handleDeletePlaylist(playlist) },
+      { label: "Delete playlist", action: () => openDeletePlaylistConfirmation(playlist) },
     ]);
   }
 
@@ -873,29 +903,33 @@
   }
 
   async function handleDeletePlaylist(playlist: Playlist) {
-    const shouldDelete = window.confirm(`Delete "${playlist.name}"? This will not delete any songs or audio files.`);
-
-    if (!shouldDelete) {
+    if (isDeletingPlaylist) {
       return;
     }
 
     playlistError = null;
     playlistMessage = null;
+    isDeletingPlaylist = true;
 
     try {
       await deletePlaylist(playlist.id);
       playlists = playlists.filter((candidate) => candidate.id !== playlist.id);
+      playlistPendingDelete = null;
 
       if (selectedPlaylistId === playlist.id) {
         selectedPlaylistId = null;
       }
 
+      activeView = "Playlists";
       isLikedSongsOpen = false;
       isMixBuilderOpen = false;
+      searchQuery = "";
       playlistMessage = `${playlist.name} deleted.`;
       mainElement?.scrollTo({ top: 0 });
     } catch (error) {
       playlistError = error instanceof Error ? error.message : String(error);
+    } finally {
+      isDeletingPlaylist = false;
     }
   }
 
@@ -964,6 +998,35 @@
     if (event.target === event.currentTarget) {
       closeShortcutHelp();
     }
+  }
+
+  function openDeletePlaylistConfirmation(playlist: Playlist) {
+    contextMenu = null;
+    playlistError = null;
+    playlistMessage = null;
+    playlistPendingDelete = playlist;
+  }
+
+  function closeDeletePlaylistConfirmation() {
+    if (isDeletingPlaylist) {
+      return;
+    }
+
+    playlistPendingDelete = null;
+  }
+
+  function handleDeletePlaylistBackdropClick(event: MouseEvent) {
+    if (event.target === event.currentTarget) {
+      closeDeletePlaylistConfirmation();
+    }
+  }
+
+  function confirmPendingPlaylistDelete() {
+    if (!playlistPendingDelete) {
+      return;
+    }
+
+    void handleDeletePlaylist(playlistPendingDelete);
   }
 
   function clearSearch() {
@@ -2153,7 +2216,7 @@
   }
 
   function viewTitle() {
-    if (normalizedSearchQuery) {
+    if (isGlobalSearchActive) {
       return "Search Results";
     }
 
@@ -2165,7 +2228,7 @@
   }
 
   function viewEyebrow() {
-    if (normalizedSearchQuery) {
+    if (isGlobalSearchActive) {
       return "Search";
     }
 
@@ -2173,7 +2236,7 @@
   }
 
   function viewStatus() {
-    if (normalizedSearchQuery) {
+    if (isGlobalSearchActive) {
       const total = searchTracks.length + searchAlbums.length + searchArtists.length + searchGenres.length;
       return `${total} ${total === 1 ? "match" : "matches"} for "${searchQuery.trim()}"`;
     }
@@ -2257,7 +2320,7 @@
         <div class="scan-error status-message" role="status">{playlistMessage}</div>
       {/if}
 
-      {#if normalizedSearchQuery}
+      {#if isGlobalSearchActive}
         {#if hasSearchResults}
           <LibrarySection title="Songs" viewAllLabel={`${searchTracks.length} ${searchTracks.length === 1 ? "match" : "matches"}`}>
             {#if searchTracks.length === 0}
@@ -2923,7 +2986,7 @@
               <button class="back-button accent" type="button" onclick={() => void handleRenamePlaylist(selectedPlaylist)}>
                 Rename
               </button>
-              <button class="back-button destructive" type="button" onclick={() => void handleDeletePlaylist(selectedPlaylist)}>
+              <button class="back-button destructive" type="button" onclick={() => openDeletePlaylistConfirmation(selectedPlaylist)}>
                 Delete Playlist
               </button>
             </div>
@@ -2947,7 +3010,7 @@
               </div>
             {/if}
 
-            <LibrarySection title="Songs" viewAllLabel={`${selectedPlaylistTracks.length} playable`}>
+            <LibrarySection title="Songs" viewAllLabel={isSearchingSelectedPlaylist ? `${selectedPlaylistSearchTracks.length} ${selectedPlaylistSearchTracks.length === 1 ? "match" : "matches"}` : `${selectedPlaylistTracks.length} playable`}>
               {#if selectedPlaylistTracks.length === 0}
                 <div class="group-empty">
                   {#if selectedPlaylist.trackIds.length > 0}
@@ -2958,9 +3021,14 @@
                     <p>Add songs from a track context menu.</p>
                   {/if}
                 </div>
+              {:else if selectedPlaylistSearchTracks.length === 0}
+                <div class="group-empty">
+                  <h3>No songs matched</h3>
+                  <p>Search is limited to songs in this playlist.</p>
+                </div>
               {:else}
                 <TrackList
-                  tracks={selectedPlaylistTracks}
+                  tracks={selectedPlaylistSearchTracks}
                   isScanning={false}
                   selectedTrackId={currentTrack?.id}
                   onTrackSelect={handleTrackSelect}
@@ -3436,6 +3504,49 @@
       items={contextMenu.items}
       onClose={closeContextMenu}
     />
+  {/if}
+
+  {#if playlistPendingDelete}
+    <div class="confirmation-backdrop" role="presentation" onclick={handleDeletePlaylistBackdropClick}>
+      <div
+        bind:this={deletePlaylistModalElement}
+        class="confirmation-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="delete-playlist-title"
+        aria-describedby="delete-playlist-description"
+        tabindex="-1"
+      >
+        <header class="confirmation-header">
+          <div>
+            <p class="eyebrow">Playlist</p>
+            <h3 id="delete-playlist-title">Delete Playlist?</h3>
+          </div>
+        </header>
+
+        <p id="delete-playlist-description">
+          Delete "{playlistPendingDelete.name}" from Cassette? Songs and audio files will stay in your library.
+        </p>
+
+        {#if playlistError}
+          <div class="scan-error" role="alert">{playlistError}</div>
+        {/if}
+
+        <div class="confirmation-actions">
+          <button type="button" disabled={isDeletingPlaylist} onclick={closeDeletePlaylistConfirmation}>
+            Cancel
+          </button>
+          <button
+            class="destructive"
+            type="button"
+            disabled={isDeletingPlaylist}
+            onclick={confirmPendingPlaylistDelete}
+          >
+            {isDeletingPlaylist ? "Deleting..." : "Confirm Delete"}
+          </button>
+        </div>
+      </div>
+    </div>
   {/if}
 
   {#if isShortcutHelpOpen}
@@ -4600,7 +4711,8 @@
     font-weight: 900;
   }
 
-  .shortcuts-backdrop {
+  .shortcuts-backdrop,
+  .confirmation-backdrop {
     position: fixed;
     z-index: 80;
     inset: 0;
@@ -4611,7 +4723,8 @@
     padding: 24px;
   }
 
-  .shortcuts-modal {
+  .shortcuts-modal,
+  .confirmation-modal {
     width: min(720px, 100%);
     max-height: min(720px, calc(100dvh - 48px));
     overflow: auto;
@@ -4623,7 +4736,12 @@
     padding: 22px;
   }
 
-  .shortcuts-header {
+  .confirmation-modal {
+    width: min(460px, 100%);
+  }
+
+  .shortcuts-header,
+  .confirmation-header {
     display: flex;
     align-items: flex-start;
     justify-content: space-between;
@@ -4631,11 +4749,69 @@
     margin-bottom: 18px;
   }
 
-  .shortcuts-header h3 {
+  .shortcuts-header h3,
+  .confirmation-header h3 {
     margin: 0;
     color: #f4f7fb;
     font-size: 1.35rem;
     line-height: 1.2;
+  }
+
+  .confirmation-modal > p {
+    margin: 0 0 18px;
+    color: #aab4c0;
+    font-size: 0.95rem;
+    font-weight: 650;
+  }
+
+  .confirmation-modal .scan-error {
+    margin-bottom: 18px;
+  }
+
+  .confirmation-actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 10px;
+  }
+
+  .confirmation-actions button {
+    min-height: 38px;
+    border: 1px solid #303844;
+    border-radius: 8px;
+    background: #171d24;
+    color: #d5dce5;
+    cursor: default;
+    font: inherit;
+    font-size: 0.86rem;
+    font-weight: 850;
+    padding: 0 13px;
+  }
+
+  .confirmation-actions button:hover,
+  .confirmation-actions button:focus-visible {
+    border-color: #35544f;
+    background: #1d242c;
+    color: #f4f7fb;
+    outline: none;
+  }
+
+  .confirmation-actions button.destructive {
+    border-color: #5b3434;
+    background: #2a1718;
+    color: #ffcbc8;
+  }
+
+  .confirmation-actions button.destructive:hover,
+  .confirmation-actions button.destructive:focus-visible {
+    border-color: #7a3a3a;
+    background: #341c1e;
+  }
+
+  .confirmation-actions button:disabled {
+    border-color: #303844;
+    background: #151a21;
+    color: #626c79;
   }
 
   .shortcuts-header button {
@@ -5101,7 +5277,8 @@
       max-height: calc(100dvh - 178px);
     }
 
-    .shortcuts-backdrop {
+    .shortcuts-backdrop,
+    .confirmation-backdrop {
       align-items: start;
       padding: 16px;
     }
@@ -5123,12 +5300,14 @@
       flex-direction: column;
     }
 
-    .shortcuts-modal {
+    .shortcuts-modal,
+    .confirmation-modal {
       max-height: calc(100dvh - 32px);
       padding: 18px;
     }
 
-    .shortcuts-header {
+    .shortcuts-header,
+    .confirmation-header {
       align-items: stretch;
       flex-direction: column;
     }
