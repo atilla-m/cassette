@@ -5,10 +5,12 @@
     chooseCoverImage,
     chooseOutputFolder,
     chooseLibraryFolder,
+    chooseVideoFolder,
     createPlaylist,
     deletePlaylist,
     detectAudioCd,
     getLibraryCache,
+    getVideoLibrary,
     lookupCdMetadata,
     lookupCdCover,
     movePlaylistTrack,
@@ -19,9 +21,12 @@
     ripCdToFlac,
     inspectCoverImage,
     scanLibrary,
+    scanVideoFolder,
     setAlbumGenres,
     setArtistGenres,
     toggleTrackFavorite,
+    updateVideoInfo,
+    updateVideoProgress,
   } from "$lib/api/library";
   import {
     getPlaybackStatus,
@@ -55,9 +60,13 @@
     Playlist,
     Track,
     TrackLyrics,
+    VideoEntry,
+    VideoInfoUpdate,
+    VideoLibrary,
   } from "$lib/types/library";
   import { localImageSource } from "$lib/utils/localImage";
   import { listen } from "@tauri-apps/api/event";
+  import { openPath } from "@tauri-apps/plugin-opener";
   import { onMount } from "svelte";
   import packageInfo from "../../package.json";
 
@@ -65,6 +74,7 @@
   type AlbumSortKey = "title" | "artist" | "year" | "trackCount";
   type ArtistSortKey = "name" | "songCount" | "albumCount";
   type GenreSortKey = "name" | "songCount" | "artistCount" | "albumCount";
+  type VideoSortKey = "title" | "artist" | "year" | "recentlyPlayed" | "duration";
   type SortDirection = "asc" | "desc";
   type RepeatMode = "off" | "all" | "one";
   type QueuePanelEntry = {
@@ -134,6 +144,16 @@
     title: string;
     shortcuts: ShortcutItem[];
   };
+  type VideoEditDraft = {
+    title: string;
+    artist: string;
+    showTitle: string;
+    albumOrRelease: string;
+    year: string;
+    venue: string;
+    city: string;
+    country: string;
+  };
 
   const mixFormatOptions = ["All", "FLAC", "MP3", "OGG", "OPUS", "WAV", "M4A"];
   const appVersion = packageInfo.version?.trim() || "Development build";
@@ -169,8 +189,29 @@
   ];
 
   let tracks = $state<Track[]>([]);
+  let videos = $state<VideoEntry[]>([]);
   let isScanning = $state(false);
+  let isScanningVideos = $state(false);
   let scanError = $state<string | null>(null);
+  let videoError = $state<string | null>(null);
+  let videoMessage = $state<string | null>(null);
+  let videoFolder = $state<string | null>(null);
+  let lastVideoScannedAt = $state<number | null>(null);
+  let selectedVideoId = $state<string | null>(null);
+  let videoSearchQuery = $state("");
+  let videoSort = $state<VideoSortKey>("title");
+  let videoSortDirection = $state<SortDirection>("asc");
+  let isEditingVideo = $state(false);
+  let isSavingVideoInfo = $state(false);
+  let videoEditDraft = $state<VideoEditDraft>(emptyVideoEditDraft());
+  let videoElement: HTMLVideoElement | undefined = $state();
+  let videoPlaybackError = $state<string | null>(null);
+  let videoPlaybackMessage = $state<string | null>(null);
+  let videoSessionVideoId = $state<string | null>(null);
+  let videoSessionWatchedSeconds = 0;
+  let videoObservedPositionSeconds = 0;
+  let videoLastProgressSaveMs = 0;
+  let videoPlayCountRecorded = false;
   let cdRipError = $state<string | null>(null);
   let cdRipMessage = $state<string | null>(null);
   let isDetectingCd = $state(false);
@@ -306,6 +347,9 @@
   let selectedArtist = $derived(displayArtists.find((artist) => artist.name === selectedArtistName) ?? null);
   let selectedGenre = $derived(displayGenres.find((genre) => genre.name === selectedGenreName) ?? null);
   let selectedPlaylist = $derived(playlists.find((playlist) => playlist.id === selectedPlaylistId) ?? null);
+  let selectedVideo = $derived(videos.find((video) => video.id === selectedVideoId) ?? null);
+  let selectedVideoSrc = $derived(localImageSource(selectedVideo?.filePath));
+  let selectedVideoThumbnailSrc = $derived(localImageSource(selectedVideo?.thumbnailPath));
   let selectedCdRelease = $derived(cdMetadataResults.find((release) => release.id === selectedCdReleaseId) ?? null);
   let selectedCdCover = $derived(activeCdRipMetadata()?.cover ?? null);
   let selectedCdCoverSrc = $derived(localImageSource(selectedCdCover?.path));
@@ -344,6 +388,14 @@
   let visibleAlbums = $derived(searchFilterAlbums(sortedAlbums, normalizedSearchQuery));
   let visibleArtists = $derived(searchFilterArtists(sortedArtists, normalizedSearchQuery));
   let visibleGenres = $derived(searchFilterGenres(sortedGenres, normalizedSearchQuery));
+  let normalizedVideoSearchQuery = $derived(normalizeSearch(videoSearchQuery));
+  let visibleVideos = $derived(searchFilterVideos(sortVideos(videos, videoSort, videoSortDirection), normalizedVideoSearchQuery));
+  let videoLibraryStats = $derived([
+    { label: "Videos", value: String(videos.length) },
+    { label: "Partially watched", value: String(videos.filter((video) => video.lastPositionSeconds > 0).length) },
+    { label: "Played", value: String(videos.filter((video) => video.playCount > 0).length) },
+    { label: "Last scan", value: lastVideoScannedAt ? formatDateTime(lastVideoScannedAt) : "Not available" },
+  ]);
   let selectedAlbumGenreText = $derived(genreDisplayForTracks(selectedAlbumTracks));
   let selectedArtistGenreText = $derived(genreDisplayForTracks(selectedArtistTracks));
   let selectedPlaylistMissingTrackCount = $derived(selectedPlaylist ? missingTrackCountForPlaylist(selectedPlaylist) : 0);
@@ -445,6 +497,7 @@
 
   onMount(() => {
     void loadLibraryCache();
+    void loadVideoLibrary();
     const mprisUnlisteners = [
       listen("mpris-play-pause", () => void handleTogglePlayback()),
       listen("mpris-play", () => void handleMprisPlay()),
@@ -490,6 +543,10 @@
         void handleTrackEnd("duration");
       }
     }, 250);
+
+    const videoProgressIntervalId = window.setInterval(() => {
+      void saveActiveVideoProgress(false);
+    }, 5000);
 
     function handleKeydown(event: KeyboardEvent) {
       if (playlistPendingDelete) {
@@ -546,6 +603,7 @@
     return () => {
       window.clearInterval(statusIntervalId);
       window.clearInterval(progressIntervalId);
+      window.clearInterval(videoProgressIntervalId);
       window.removeEventListener("keydown", handleKeydown, true);
       for (const unlisten of mprisUnlisteners) {
         void unlisten.then((cleanup) => cleanup());
@@ -567,6 +625,25 @@
       hasLoadedCache = true;
       scanCount = 0;
       lastScannedAt = null;
+    }
+  }
+
+  async function loadVideoLibrary() {
+    try {
+      applyVideoLibrary(await getVideoLibrary());
+    } catch (error) {
+      videoError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  function applyVideoLibrary(library: VideoLibrary) {
+    videos = library.videos;
+    videoFolder = library.lastVideoFolder;
+    lastVideoScannedAt = library.lastVideoScannedAt;
+
+    if (selectedVideoId && !videos.some((video) => video.id === selectedVideoId)) {
+      selectedVideoId = null;
+      isEditingVideo = false;
     }
   }
 
@@ -705,6 +782,402 @@
     } finally {
       isScanning = false;
     }
+  }
+
+  async function handleAddVideoFolder() {
+    if (isScanningVideos) {
+      return;
+    }
+
+    videoError = null;
+    videoMessage = null;
+
+    try {
+      const folder = await chooseVideoFolder();
+
+      if (!folder) {
+        return;
+      }
+
+      await scanFolderIntoVideos(folder);
+    } catch (error) {
+      videoMessage = null;
+      videoError = error instanceof Error ? error.message : String(error);
+    } finally {
+      isScanningVideos = false;
+    }
+  }
+
+  async function handleRescanVideos() {
+    if (isScanningVideos) {
+      return;
+    }
+
+    if (!videoFolder) {
+      await handleAddVideoFolder();
+      return;
+    }
+
+    videoError = null;
+    videoMessage = null;
+
+    try {
+      await scanFolderIntoVideos(videoFolder);
+    } catch (error) {
+      videoMessage = null;
+      videoError = error instanceof Error ? error.message : String(error);
+    } finally {
+      isScanningVideos = false;
+    }
+  }
+
+  async function scanFolderIntoVideos(folder: string) {
+    isScanningVideos = true;
+    videoFolder = folder;
+    videoMessage = "Scanning videos...";
+    const library = await scanVideoFolder(folder);
+    applyVideoLibrary(library);
+    videoMessage = `${library.videos.length} ${library.videos.length === 1 ? "video" : "videos"} available.`;
+  }
+
+  function handleVideoSelect(video: VideoEntry) {
+    selectedVideoId = video.id;
+    isEditingVideo = false;
+    videoEditDraft = draftFromVideo(video);
+    videoPlaybackError = null;
+    videoPlaybackMessage = null;
+    mainElement?.scrollTo({ top: 0 });
+  }
+
+  function handleBackToVideos() {
+    void saveActiveVideoProgress(true);
+    selectedVideoId = null;
+    isEditingVideo = false;
+    videoPlaybackError = null;
+    videoPlaybackMessage = null;
+    mainElement?.scrollTo({ top: 0 });
+  }
+
+  function handleEditVideoInfo() {
+    if (!selectedVideo) {
+      return;
+    }
+
+    videoEditDraft = draftFromVideo(selectedVideo);
+    isEditingVideo = true;
+    videoError = null;
+    videoMessage = null;
+  }
+
+  function handleCancelVideoEdit() {
+    isEditingVideo = false;
+    videoEditDraft = selectedVideo ? draftFromVideo(selectedVideo) : emptyVideoEditDraft();
+  }
+
+  async function handleSaveVideoInfo() {
+    const video = selectedVideo;
+
+    if (!video || isSavingVideoInfo) {
+      return;
+    }
+
+    const info = videoInfoUpdateFromDraft(videoEditDraft);
+
+    if (!info.title.trim()) {
+      videoError = "Video title is required.";
+      return;
+    }
+
+    isSavingVideoInfo = true;
+    videoError = null;
+    videoMessage = null;
+
+    try {
+      applyUpdatedVideo(await updateVideoInfo(video.id, info));
+      isEditingVideo = false;
+      videoMessage = "Video info saved.";
+    } catch (error) {
+      videoError = error instanceof Error ? error.message : String(error);
+    } finally {
+      isSavingVideoInfo = false;
+    }
+  }
+
+  async function handleResetVideoProgress() {
+    const video = selectedVideo;
+
+    if (!video) {
+      return;
+    }
+
+    videoPlaybackError = null;
+    videoPlaybackMessage = null;
+
+    if (videoElement) {
+      videoElement.currentTime = 0;
+    }
+
+    try {
+      applyUpdatedVideo(await updateVideoProgress(video.id, 0, false));
+      resetVideoSession(video.id);
+      videoPlaybackMessage = "Progress reset.";
+    } catch (error) {
+      videoPlaybackError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  async function handleVideoPlayFromStart() {
+    await playSelectedVideo(0);
+  }
+
+  async function handleVideoResume() {
+    const video = selectedVideo;
+
+    if (!video) {
+      return;
+    }
+
+    await playSelectedVideo(video.lastPositionSeconds);
+  }
+
+  async function playSelectedVideo(positionSeconds: number) {
+    const video = selectedVideo;
+
+    if (!video || !videoElement) {
+      return;
+    }
+
+    videoPlaybackError = null;
+    videoPlaybackMessage = null;
+
+    try {
+      if (isPlaying) {
+        applyPlaybackStatus(await pausePlayback());
+      }
+
+      videoElement.currentTime = Math.max(0, Math.min(positionSeconds, video.durationSeconds ?? positionSeconds));
+      await videoElement.play();
+    } catch (error) {
+      videoPlaybackError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  async function handleOpenVideoExternal() {
+    const video = selectedVideo;
+
+    if (!video) {
+      return;
+    }
+
+    videoPlaybackError = null;
+    videoPlaybackMessage = null;
+
+    try {
+      if (isPlaying) {
+        applyPlaybackStatus(await pausePlayback());
+      }
+
+      await openPath(video.filePath);
+      videoPlaybackMessage = "Opened in external player.";
+    } catch (error) {
+      videoPlaybackError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  function handleVideoPlay() {
+    const video = selectedVideo;
+
+    if (!video || !videoElement) {
+      return;
+    }
+
+    if (videoSessionVideoId !== video.id) {
+      resetVideoSession(video.id);
+    }
+
+    videoObservedPositionSeconds = videoElement.currentTime;
+  }
+
+  function handleVideoPause() {
+    void saveActiveVideoProgress(true);
+  }
+
+  function handleVideoEnded() {
+    const video = selectedVideo;
+
+    if (!video || !videoElement) {
+      return;
+    }
+
+    videoElement.currentTime = 0;
+    const shouldIncrementPlayCount = !videoPlayCountRecorded;
+    resetVideoSession(video.id);
+    void saveVideoProgress(video, 0, shouldIncrementPlayCount);
+  }
+
+  function handleVideoTimeUpdate() {
+    const video = selectedVideo;
+
+    if (!video || !videoElement) {
+      return;
+    }
+
+    if (videoSessionVideoId !== video.id) {
+      resetVideoSession(video.id);
+    }
+
+    const currentPosition = videoElement.currentTime;
+    const delta = currentPosition - videoObservedPositionSeconds;
+
+    if (delta > 0 && delta < 10) {
+      videoSessionWatchedSeconds += delta;
+    }
+
+    videoObservedPositionSeconds = currentPosition;
+    void saveActiveVideoProgress(false);
+  }
+
+  function handleVideoLoadedMetadata() {
+    const video = selectedVideo;
+
+    if (!video || !videoElement || video.lastPositionSeconds <= 0) {
+      return;
+    }
+
+    const duration = videoElement.duration;
+    const safePosition = Number.isFinite(duration)
+      ? Math.min(video.lastPositionSeconds, Math.max(0, duration - 1))
+      : video.lastPositionSeconds;
+    videoElement.currentTime = safePosition;
+  }
+
+  async function saveActiveVideoProgress(force: boolean) {
+    const video = selectedVideo;
+
+    if (!video || !videoElement || videoElement.ended || (!force && videoElement.paused)) {
+      return;
+    }
+
+    const now = Date.now();
+
+    if (!force && now - videoLastProgressSaveMs < 5000) {
+      return;
+    }
+
+    videoLastProgressSaveMs = now;
+    const threshold = video.durationSeconds ? Math.min(30, video.durationSeconds * 0.5) : 30;
+    const shouldIncrementPlayCount = !videoPlayCountRecorded && videoSessionWatchedSeconds >= threshold;
+
+    await saveVideoProgress(video, Math.floor(videoElement.currentTime), shouldIncrementPlayCount);
+
+    if (shouldIncrementPlayCount) {
+      videoPlayCountRecorded = true;
+    }
+  }
+
+  async function saveVideoProgress(video: VideoEntry, positionSeconds: number, incrementPlayCount: boolean) {
+    try {
+      applyUpdatedVideo(await updateVideoProgress(video.id, Math.max(0, positionSeconds), incrementPlayCount));
+    } catch (error) {
+      videoPlaybackError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  function resetVideoSession(videoId: string | null) {
+    videoSessionVideoId = videoId;
+    videoSessionWatchedSeconds = 0;
+    videoObservedPositionSeconds = 0;
+    videoLastProgressSaveMs = 0;
+    videoPlayCountRecorded = false;
+  }
+
+  function applyUpdatedVideo(updatedVideo: VideoEntry) {
+    videos = videos.some((video) => video.id === updatedVideo.id)
+      ? videos.map((video) => video.id === updatedVideo.id ? updatedVideo : video)
+      : [...videos, updatedVideo];
+
+    if (selectedVideoId === updatedVideo.id) {
+      selectedVideoId = updatedVideo.id;
+    }
+  }
+
+  function updateVideoDraftField(key: keyof VideoEditDraft, value: string) {
+    videoEditDraft = { ...videoEditDraft, [key]: value };
+  }
+
+  function emptyVideoEditDraft(): VideoEditDraft {
+    return {
+      title: "",
+      artist: "",
+      showTitle: "",
+      albumOrRelease: "",
+      year: "",
+      venue: "",
+      city: "",
+      country: "",
+    };
+  }
+
+  function draftFromVideo(video: VideoEntry): VideoEditDraft {
+    return {
+      title: video.title,
+      artist: video.artist ?? "",
+      showTitle: video.showTitle ?? "",
+      albumOrRelease: video.albumOrRelease ?? "",
+      year: video.year?.toString() ?? "",
+      venue: video.venue ?? "",
+      city: video.city ?? "",
+      country: video.country ?? "",
+    };
+  }
+
+  function videoInfoUpdateFromDraft(draft: VideoEditDraft): VideoInfoUpdate {
+    const parsedYear = Number.parseInt(draft.year, 10);
+
+    return {
+      title: draft.title.trim(),
+      artist: nullableDraftValue(draft.artist),
+      showTitle: nullableDraftValue(draft.showTitle),
+      albumOrRelease: nullableDraftValue(draft.albumOrRelease),
+      year: Number.isFinite(parsedYear) && parsedYear > 0 ? parsedYear : null,
+      venue: nullableDraftValue(draft.venue),
+      city: nullableDraftValue(draft.city),
+      country: nullableDraftValue(draft.country),
+    };
+  }
+
+  function nullableDraftValue(value: string) {
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : null;
+  }
+
+  function videoDetailLine(video: VideoEntry) {
+    return [
+      video.artist ?? "Unknown Artist",
+      video.showTitle ?? video.albumOrRelease,
+      video.year?.toString(),
+      videoLocationLine(video),
+    ].filter(Boolean).join(" · ");
+  }
+
+  function videoLocationLine(video: VideoEntry) {
+    return [video.venue, video.city, video.country].filter(Boolean).join(" · ");
+  }
+
+  function videoCardDetail(video: VideoEntry) {
+    return [
+      video.artist ?? "Unknown Artist",
+      video.year?.toString(),
+      video.showTitle ?? video.albumOrRelease,
+    ].filter(Boolean).join(" · ");
+  }
+
+  function videoProgressPercent(video: VideoEntry) {
+    if (!video.durationSeconds || video.durationSeconds <= 0) {
+      return 0;
+    }
+
+    return Math.max(0, Math.min(100, (video.lastPositionSeconds / video.durationSeconds) * 100));
   }
 
   async function handleDetectCd() {
@@ -1282,6 +1755,7 @@
   }
 
   function handleNavigate(label: string) {
+    void saveActiveVideoProgress(true);
     activeView = label;
     selectedAlbumId = null;
     selectedArtistName = null;
@@ -1291,6 +1765,8 @@
     isMixBuilderOpen = false;
     isLibraryHealthOpen = false;
     selectedPlaylistId = null;
+    selectedVideoId = label === "Live Shows" ? selectedVideoId : null;
+    isEditingVideo = false;
     searchQuery = "";
     mainElement?.scrollTo({ top: 0 });
   }
@@ -2528,6 +3004,22 @@
     return seconds === null || seconds === undefined ? "--:--" : formatTrackDuration(seconds);
   }
 
+  function formatVideoDuration(seconds: number | null | undefined) {
+    if (seconds === null || seconds === undefined) {
+      return "--:--";
+    }
+
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    const remainingSeconds = Math.floor(seconds % 60);
+
+    if (hours > 0) {
+      return `${hours}:${minutes.toString().padStart(2, "0")}:${remainingSeconds.toString().padStart(2, "0")}`;
+    }
+
+    return `${minutes}:${remainingSeconds.toString().padStart(2, "0")}`;
+  }
+
   function formatDateTime(timestampSeconds: number) {
     return new Intl.DateTimeFormat(undefined, {
       dateStyle: "medium",
@@ -3303,6 +3795,39 @@
     });
   }
 
+  function sortVideos(videoEntries: VideoEntry[], sortKey: VideoSortKey, direction: SortDirection) {
+    return [...videoEntries].sort((left, right) => {
+      let result = 0;
+
+      if (sortKey === "artist") {
+        result = compareText(left.artist, right.artist) || compareText(left.title, right.title);
+        return applySortDirection(result, direction);
+      }
+
+      if (sortKey === "year") {
+        result = (left.year ?? Number.MAX_SAFE_INTEGER) - (right.year ?? Number.MAX_SAFE_INTEGER)
+          || compareText(left.title, right.title);
+        return applySortDirection(result, direction);
+      }
+
+      if (sortKey === "recentlyPlayed") {
+        result = (left.lastPlayedAt ?? 0) - (right.lastPlayedAt ?? 0)
+          || compareText(left.title, right.title);
+        return applySortDirection(result, direction);
+      }
+
+      if (sortKey === "duration") {
+        result = (left.durationSeconds ?? Number.MAX_SAFE_INTEGER)
+          - (right.durationSeconds ?? Number.MAX_SAFE_INTEGER)
+          || compareText(left.title, right.title);
+        return applySortDirection(result, direction);
+      }
+
+      result = compareText(left.title, right.title);
+      return applySortDirection(result, direction);
+    });
+  }
+
   function normalizeSearch(value: string) {
     return value.trim().normalize("NFKC").toLocaleLowerCase();
   }
@@ -3381,8 +3906,26 @@
     return matchesSearch(query, [genre.name]);
   }
 
+  function videoMatchesSearch(video: VideoEntry, query: string) {
+    return matchesSearch(query, [
+      video.title,
+      video.artist,
+      video.showTitle,
+      video.albumOrRelease,
+      video.venue,
+      video.city,
+      video.country,
+      video.fileName,
+      video.year?.toString(),
+    ]);
+  }
+
   function searchFilterTracks(libraryTracks: Track[], query: string) {
     return query ? libraryTracks.filter((track) => trackMatchesSearch(track, query)) : libraryTracks;
+  }
+
+  function searchFilterVideos(videoEntries: VideoEntry[], query: string) {
+    return query ? videoEntries.filter((video) => videoMatchesSearch(video, query)) : videoEntries;
   }
 
   function searchFilterAlbumTracks(libraryTracks: Track[], query: string) {
@@ -3442,6 +3985,10 @@
       if (isLikedSongsOpen) {
         return "Search liked songs...";
       }
+    }
+
+    if (activeView === "Live Shows") {
+      return "";
     }
 
     return "";
@@ -3507,6 +4054,18 @@
       return "Detect an audio CD, choose an output folder, then rip to FLAC.";
     }
 
+    if (activeView === "Live Shows") {
+      if (isScanningVideos) {
+        return "Scanning local video files...";
+      }
+
+      if (videoFolder) {
+        return `${videos.length} ${videos.length === 1 ? "video" : "videos"} from ${videoFolder}`;
+      }
+
+      return "Add a folder of local live shows or music videos.";
+    }
+
     if (scanCount !== null && scannedFolder) {
       return `Found ${scanCount} ${scanCount === 1 ? "track" : "tracks"} in ${scannedFolder}`;
     }
@@ -3542,9 +4101,15 @@
           <h2>{viewTitle()}</h2>
           <p class="scan-status">{viewStatus()}</p>
         </div>
-        <button type="button" disabled={isScanning} onclick={handleScanLibrary}>
-          {isScanning ? "Scanning..." : "Scan Library"}
-        </button>
+        {#if activeView === "Live Shows"}
+          <button type="button" disabled={isScanningVideos} onclick={() => void (videoFolder ? handleRescanVideos() : handleAddVideoFolder())}>
+            {isScanningVideos ? "Scanning..." : videoFolder ? "Rescan Videos" : "Add Video Folder"}
+          </button>
+        {:else}
+          <button type="button" disabled={isScanning} onclick={handleScanLibrary}>
+            {isScanning ? "Scanning..." : "Scan Library"}
+          </button>
+        {/if}
       </header>
 
       {#if isSearchAvailable()}
@@ -3567,6 +4132,11 @@
       {/if}
       {#if playbackError}
         <div class="scan-error" role="alert">{playbackError}</div>
+      {/if}
+      {#if activeView === "Live Shows" && videoError}
+        <div class="scan-error" role="alert">{videoError}</div>
+      {:else if activeView === "Live Shows" && videoMessage}
+        <div class="scan-error status-message" role="status">{videoMessage}</div>
       {/if}
       {#if activeView !== "Playlists" && playlistError}
         <div class="scan-error" role="alert">{playlistError}</div>
@@ -4922,6 +5492,211 @@
             {/each}
           </section>
         {/if}
+      {:else if activeView === "Live Shows"}
+        <section class="videos-page" aria-labelledby="videos-title">
+          {#if selectedVideo}
+            <button class="back-button" type="button" onclick={handleBackToVideos}>Back to Live Shows</button>
+
+            <section class="video-detail-hero" aria-labelledby="video-detail-title">
+              <div class="video-player-panel">
+                {#if selectedVideoSrc}
+                  <!-- svelte-ignore a11y_media_has_caption -->
+                  <video
+                    bind:this={videoElement}
+                    src={selectedVideoSrc}
+                    poster={selectedVideoThumbnailSrc ?? undefined}
+                    controls
+                    preload="metadata"
+                    onplay={handleVideoPlay}
+                    onpause={handleVideoPause}
+                    onended={handleVideoEnded}
+                    ontimeupdate={handleVideoTimeUpdate}
+                    onloadedmetadata={handleVideoLoadedMetadata}
+                    onerror={() => videoPlaybackError = "Cassette could not play this file in the app. Try opening it in an external player."}
+                  ></video>
+                {:else if selectedVideoThumbnailSrc}
+                  <img src={selectedVideoThumbnailSrc} alt="" onload={showLoadedImage} onerror={hideBrokenImage} />
+                {:else}
+                  <div class="video-placeholder" aria-hidden="true">V</div>
+                {/if}
+              </div>
+
+              <div class="video-detail-copy">
+                <p class="eyebrow">Live Show</p>
+                <h3 id="video-detail-title">{selectedVideo.title}</h3>
+                <p>{videoDetailLine(selectedVideo)}</p>
+                <div class="video-meta-grid">
+                  <div><span>Artist</span><strong>{selectedVideo.artist ?? "Unknown Artist"}</strong></div>
+                  <div><span>Show</span><strong>{selectedVideo.showTitle ?? selectedVideo.albumOrRelease ?? "Not set"}</strong></div>
+                  <div><span>Year</span><strong>{selectedVideo.year ?? "Not set"}</strong></div>
+                  <div><span>Duration</span><strong>{formatVideoDuration(selectedVideo.durationSeconds)}</strong></div>
+                  <div><span>Last watched</span><strong>{formatVideoDuration(selectedVideo.lastPositionSeconds)}</strong></div>
+                  <div><span>Plays</span><strong>{selectedVideo.playCount}</strong></div>
+                </div>
+                {#if videoLocationLine(selectedVideo)}
+                  <p class="video-location">{videoLocationLine(selectedVideo)}</p>
+                {/if}
+                <div class="video-actions">
+                  <button type="button" onclick={() => void handleVideoPlayFromStart()}>Play</button>
+                  <button type="button" disabled={selectedVideo.lastPositionSeconds <= 0} onclick={() => void handleVideoResume()}>Resume</button>
+                  <button type="button" onclick={handleEditVideoInfo}>Edit Info</button>
+                  <button type="button" onclick={() => void handleResetVideoProgress()}>Reset Progress</button>
+                  <button type="button" onclick={() => void handleOpenVideoExternal()}>Open External</button>
+                </div>
+                {#if videoPlaybackError}
+                  <p class="form-message error" role="alert">{videoPlaybackError}</p>
+                {:else if videoPlaybackMessage}
+                  <p class="form-message" role="status">{videoPlaybackMessage}</p>
+                {/if}
+              </div>
+            </section>
+
+            {#if isEditingVideo}
+              <section class="video-edit-panel" aria-labelledby="video-edit-title">
+                <div class="settings-section-header">
+                  <div>
+                    <p class="eyebrow">Manual Metadata</p>
+                    <h4 id="video-edit-title">Edit Info</h4>
+                  </div>
+                  <span class="settings-pill">SQLite only</span>
+                </div>
+                <form class="video-edit-form" onsubmit={(event) => { event.preventDefault(); void handleSaveVideoInfo(); }}>
+                  <label>
+                    <span>Title</span>
+                    <input type="text" value={videoEditDraft.title} oninput={(event) => updateVideoDraftField("title", inputValue(event))} />
+                  </label>
+                  <label>
+                    <span>Artist</span>
+                    <input type="text" value={videoEditDraft.artist} oninput={(event) => updateVideoDraftField("artist", inputValue(event))} />
+                  </label>
+                  <label>
+                    <span>Show title</span>
+                    <input type="text" value={videoEditDraft.showTitle} oninput={(event) => updateVideoDraftField("showTitle", inputValue(event))} />
+                  </label>
+                  <label>
+                    <span>Album/release</span>
+                    <input type="text" value={videoEditDraft.albumOrRelease} oninput={(event) => updateVideoDraftField("albumOrRelease", inputValue(event))} />
+                  </label>
+                  <label>
+                    <span>Year</span>
+                    <input type="number" min="1" max="9999" value={videoEditDraft.year} oninput={(event) => updateVideoDraftField("year", inputValue(event))} />
+                  </label>
+                  <label>
+                    <span>Venue</span>
+                    <input type="text" value={videoEditDraft.venue} oninput={(event) => updateVideoDraftField("venue", inputValue(event))} />
+                  </label>
+                  <label>
+                    <span>City</span>
+                    <input type="text" value={videoEditDraft.city} oninput={(event) => updateVideoDraftField("city", inputValue(event))} />
+                  </label>
+                  <label>
+                    <span>Country</span>
+                    <input type="text" value={videoEditDraft.country} oninput={(event) => updateVideoDraftField("country", inputValue(event))} />
+                  </label>
+                  <div class="video-edit-actions">
+                    <button class="primary" type="submit" disabled={isSavingVideoInfo}>
+                      {isSavingVideoInfo ? "Saving..." : "Save Info"}
+                    </button>
+                    <button type="button" disabled={isSavingVideoInfo} onclick={handleCancelVideoEdit}>Cancel</button>
+                  </div>
+                </form>
+              </section>
+            {/if}
+          {:else}
+            <div class="videos-toolbar">
+              <div class="video-search">
+                <input
+                  type="search"
+                  bind:value={videoSearchQuery}
+                  placeholder="Search videos..."
+                  aria-label="Search videos"
+                />
+                {#if videoSearchQuery}
+                  <button type="button" aria-label="Clear video search" onclick={() => videoSearchQuery = ""}>Clear</button>
+                {/if}
+              </div>
+              <label>
+                <span>Sort</span>
+                <select bind:value={videoSort}>
+                  <option value="title">Title</option>
+                  <option value="artist">Artist</option>
+                  <option value="year">Year</option>
+                  <option value="recentlyPlayed">Recently played</option>
+                  <option value="duration">Duration</option>
+                </select>
+              </label>
+              <button
+                class="direction-toggle"
+                type="button"
+                aria-label={`Video sort direction: ${sortDirectionLabel(videoSortDirection)}`}
+                onclick={() => videoSortDirection = nextSortDirection(videoSortDirection)}
+              >
+                {sortDirectionLabel(videoSortDirection)}
+              </button>
+              <button type="button" disabled={isScanningVideos} onclick={() => void handleAddVideoFolder()}>
+                Add Video Folder
+              </button>
+              <button type="button" disabled={isScanningVideos || !videoFolder} onclick={() => void handleRescanVideos()}>
+                Rescan Videos
+              </button>
+            </div>
+
+            <div class="video-stat-grid" aria-label="Live Shows summary">
+              {#each videoLibraryStats as stat}
+                <div>
+                  <span>{stat.label}</span>
+                  <strong>{stat.value}</strong>
+                </div>
+              {/each}
+            </div>
+
+            <section class="dvd-placeholder" aria-labelledby="dvd-placeholder-title">
+              <div>
+                <p class="eyebrow">Future Import</p>
+                <h3 id="dvd-placeholder-title">DVD Import</h3>
+                <p>Coming later: import readable live show/music video DVDs. Cassette will not bypass DRM.</p>
+              </div>
+              <span>Disabled</span>
+            </section>
+
+            <p class="settings-note">Video thumbnails/durations use ffmpeg/ffprobe when available.</p>
+
+            {#if visibleVideos.length === 0}
+              <div class="group-empty">
+                <h3>{videos.length === 0 ? "No videos imported" : "No videos matched"}</h3>
+                <p>{videos.length === 0 ? "Add a folder containing MP4, MKV, WebM, MOV, M4V, or AVI files." : "Try a title, artist, venue, city, year, or file name."}</p>
+              </div>
+            {:else}
+              <div class="video-grid">
+                {#each visibleVideos as video (video.id)}
+                  <button class="video-card" type="button" title={video.filePath} onclick={() => handleVideoSelect(video)}>
+                    <span class="video-thumb" aria-hidden="true">
+                      {#if video.thumbnailPath}
+                        <img
+                          src={localImageSource(video.thumbnailPath) ?? ""}
+                          alt=""
+                          loading="lazy"
+                          onload={showLoadedImage}
+                          onerror={hideBrokenImage}
+                        />
+                      {:else}
+                        <span>V</span>
+                      {/if}
+                      {#if video.lastPositionSeconds > 0}
+                        <span class="video-progress" style={`--progress: ${videoProgressPercent(video)}%`}></span>
+                      {/if}
+                    </span>
+                    <span class="video-card-copy">
+                      <strong>{video.title}</strong>
+                      <small>{videoCardDetail(video)}</small>
+                      <small>{formatVideoDuration(video.durationSeconds)}{video.lastPositionSeconds > 0 ? ` · ${formatVideoDuration(video.lastPositionSeconds)} watched` : ""}</small>
+                    </span>
+                  </button>
+                {/each}
+              </div>
+            {/if}
+          {/if}
+        </section>
       {:else if activeView === "CD Rip"}
         <section class="cd-ripper-page" aria-labelledby="cd-ripper-title">
           <div class="settings-intro">
@@ -7323,6 +8098,385 @@
     font-weight: 700;
   }
 
+  .videos-page {
+    display: grid;
+    gap: 18px;
+  }
+
+  .videos-toolbar {
+    display: grid;
+    grid-template-columns: minmax(220px, 1fr) auto auto auto auto;
+    gap: 10px;
+    align-items: center;
+  }
+
+  .video-search {
+    display: flex;
+    min-width: 0;
+    min-height: 42px;
+    overflow: hidden;
+    border: 1px solid #303844;
+    border-radius: 8px;
+    background: #0f1318;
+  }
+
+  .video-search input {
+    width: 100%;
+    min-width: 0;
+    border: 0;
+    background: transparent;
+    color: #f4f7fb;
+    font: inherit;
+    font-size: 0.92rem;
+    font-weight: 650;
+    outline: none;
+    padding: 0 12px;
+  }
+
+  .video-search button,
+  .videos-toolbar button,
+  .video-actions button,
+  .video-edit-actions button {
+    min-height: 40px;
+    border: 1px solid #303844;
+    border-radius: 8px;
+    background: #161a20;
+    color: #d5dce5;
+    cursor: default;
+    font: inherit;
+    font-size: 0.86rem;
+    font-weight: 850;
+    padding: 0 12px;
+    white-space: nowrap;
+  }
+
+  .video-search button {
+    border-width: 0 0 0 1px;
+    border-radius: 0;
+  }
+
+  .videos-toolbar button:hover:not(:disabled),
+  .videos-toolbar button:focus-visible:not(:disabled),
+  .video-actions button:hover:not(:disabled),
+  .video-actions button:focus-visible:not(:disabled),
+  .video-edit-actions button:hover:not(:disabled),
+  .video-edit-actions button:focus-visible:not(:disabled) {
+    border-color: #35544f;
+    background: #1b2027;
+    outline: none;
+  }
+
+  .video-edit-actions button.primary {
+    border-color: #35544f;
+    background: #17332f;
+    color: #d8fffa;
+  }
+
+  .videos-toolbar button:disabled,
+  .video-actions button:disabled,
+  .video-edit-actions button:disabled {
+    border-color: #303844;
+    background: #151a21;
+    color: #626c79;
+  }
+
+  .videos-toolbar label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 40px;
+    color: #8f9aa8;
+    font-size: 0.82rem;
+    font-weight: 800;
+  }
+
+  .videos-toolbar select {
+    min-height: 40px;
+    border: 1px solid #303844;
+    border-radius: 8px;
+    background-color: #0f1318;
+    color: #f4f7fb;
+    font: inherit;
+    font-size: 0.86rem;
+    font-weight: 750;
+    outline: none;
+    padding: 0 32px 0 10px;
+  }
+
+  .video-stat-grid,
+  .video-meta-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 10px;
+  }
+
+  .video-stat-grid > div,
+  .video-meta-grid > div {
+    min-width: 0;
+    border: 1px solid #242b35;
+    border-radius: 8px;
+    background: #151a21;
+    padding: 12px;
+  }
+
+  .video-stat-grid span,
+  .video-meta-grid span {
+    display: block;
+    margin-bottom: 6px;
+    color: #8f9aa8;
+    font-size: 0.74rem;
+    font-weight: 850;
+    text-transform: uppercase;
+  }
+
+  .video-stat-grid strong,
+  .video-meta-grid strong {
+    display: block;
+    overflow: hidden;
+    color: #f4f7fb;
+    font-size: 0.98rem;
+    font-weight: 900;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .dvd-placeholder {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    border: 1px dashed #303844;
+    border-radius: 8px;
+    background: #11161d;
+    padding: 16px;
+  }
+
+  .dvd-placeholder h3,
+  .dvd-placeholder p {
+    margin: 0;
+  }
+
+  .dvd-placeholder h3 {
+    color: #f4f7fb;
+    font-size: 1rem;
+  }
+
+  .dvd-placeholder p:not(.eyebrow) {
+    margin-top: 4px;
+    color: #9aa4b1;
+    font-size: 0.9rem;
+    font-weight: 700;
+  }
+
+  .dvd-placeholder > span {
+    border: 1px solid #303844;
+    border-radius: 999px;
+    color: #8f9aa8;
+    font-size: 0.76rem;
+    font-weight: 900;
+    padding: 6px 10px;
+    text-transform: uppercase;
+  }
+
+  .video-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 14px;
+  }
+
+  .video-card {
+    display: grid;
+    gap: 10px;
+    min-width: 0;
+    border: 1px solid #242b35;
+    border-radius: 8px;
+    background: #151a21;
+    color: inherit;
+    cursor: default;
+    font: inherit;
+    padding: 10px;
+    text-align: left;
+  }
+
+  .video-card:hover,
+  .video-card:focus-visible {
+    border-color: #35544f;
+    background: #1b2027;
+    outline: none;
+  }
+
+  .video-thumb {
+    position: relative;
+    display: grid;
+    overflow: hidden;
+    width: 100%;
+    aspect-ratio: 16 / 9;
+    place-items: center;
+    border-radius: 8px;
+    background: #0f1318;
+    color: #8fb9f2;
+    font-size: 1.4rem;
+    font-weight: 900;
+  }
+
+  .video-thumb img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+
+  .video-progress {
+    position: absolute;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    height: 4px;
+    background: linear-gradient(90deg, #2f8f83 var(--progress), rgba(244, 247, 251, 0.18) var(--progress));
+  }
+
+  .video-card-copy {
+    display: grid;
+    min-width: 0;
+    gap: 4px;
+  }
+
+  .video-card-copy strong,
+  .video-card-copy small {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .video-card-copy strong {
+    color: #f4f7fb;
+    font-size: 0.98rem;
+    line-height: 1.25;
+  }
+
+  .video-card-copy small {
+    color: #8f9aa8;
+    font-size: 0.82rem;
+    font-weight: 700;
+  }
+
+  .video-detail-hero {
+    display: grid;
+    grid-template-columns: minmax(360px, 1.2fr) minmax(300px, 0.8fr);
+    gap: 18px;
+    align-items: start;
+  }
+
+  .video-player-panel {
+    display: grid;
+    overflow: hidden;
+    min-width: 0;
+    aspect-ratio: 16 / 9;
+    place-items: center;
+    border: 1px solid #242b35;
+    border-radius: 8px;
+    background: #0b0e12;
+  }
+
+  .video-player-panel video,
+  .video-player-panel img {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+  }
+
+  .video-placeholder {
+    display: grid;
+    width: 100%;
+    height: 100%;
+    place-items: center;
+    color: #8fb9f2;
+    font-size: 2.4rem;
+    font-weight: 900;
+  }
+
+  .video-detail-copy {
+    display: grid;
+    min-width: 0;
+    gap: 14px;
+  }
+
+  .video-detail-copy h3 {
+    overflow: hidden;
+    margin: 0;
+    color: #f4f7fb;
+    font-size: clamp(1.65rem, 4vw, 3rem);
+    line-height: 1.04;
+    text-overflow: ellipsis;
+  }
+
+  .video-detail-copy > p:not(.eyebrow) {
+    margin: 0;
+    color: #9aa4b1;
+    font-weight: 750;
+  }
+
+  .video-meta-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .video-location {
+    color: #d5dce5 !important;
+  }
+
+  .video-actions,
+  .video-edit-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+
+  .video-edit-panel {
+    display: grid;
+    gap: 14px;
+    border: 1px solid #242b35;
+    border-radius: 8px;
+    background: #12161c;
+    padding: 16px;
+  }
+
+  .video-edit-form {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+  }
+
+  .video-edit-form label {
+    display: grid;
+    gap: 7px;
+    color: #8f9aa8;
+    font-size: 0.78rem;
+    font-weight: 850;
+    text-transform: uppercase;
+  }
+
+  .video-edit-form input {
+    min-width: 0;
+    min-height: 42px;
+    border: 1px solid #303844;
+    border-radius: 8px;
+    background: #0f1318;
+    color: #f4f7fb;
+    font: inherit;
+    font-size: 0.92rem;
+    font-weight: 650;
+    outline: none;
+    padding: 0 12px;
+  }
+
+  .video-edit-form input:focus {
+    border-color: #2f8f83;
+    box-shadow: 0 0 0 2px rgba(47, 143, 131, 0.18);
+  }
+
+  .video-edit-actions {
+    grid-column: 1 / -1;
+  }
+
   .detail-view :global(.library-section + .library-section) {
     margin-top: 8px;
   }
@@ -8627,7 +9781,17 @@
     .album-grid,
     .artist-grid,
     .genre-grid,
-    .playlist-grid {
+    .playlist-grid,
+    .video-grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .videos-toolbar,
+    .video-detail-hero {
+      grid-template-columns: 1fr;
+    }
+
+    .video-stat-grid {
       grid-template-columns: repeat(2, minmax(0, 1fr));
     }
 
@@ -8781,10 +9945,14 @@
     .artist-grid,
     .genre-grid,
     .playlist-grid,
+    .video-grid,
     .mix-option-grid,
     .health-summary-grid,
     .diagnostic-album-list,
     .settings-stat-grid,
+    .video-stat-grid,
+    .video-meta-grid,
+    .video-edit-form,
     .cd-status-grid,
     .cd-metadata-form,
     .settings-status-list,

@@ -8,6 +8,7 @@ export const navItems: NavItem[] = [
   { label: "Genres", icon: "G" },
   { label: "Songs", icon: "S" },
   { label: "Playlists", icon: "P" },
+  { label: "Live Shows", icon: "V" },
   { label: "CD Rip", icon: "C" },
   { label: "Stats", icon: "D" },
   { label: "Settings", icon: "T" },

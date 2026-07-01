@@ -11,6 +11,9 @@ import type {
   Playlist,
   Track,
   TrackLyrics,
+  VideoEntry,
+  VideoInfoUpdate,
+  VideoLibrary,
 } from "$lib/types/library";
 
 export async function chooseLibraryFolder(): Promise<string | null> {
@@ -30,6 +33,17 @@ export async function chooseOutputFolder(): Promise<string | null> {
     multiple: false,
     recursive: true,
     title: "Choose CD Rip Output Folder",
+  });
+
+  return typeof selected === "string" ? selected : null;
+}
+
+export async function chooseVideoFolder(): Promise<string | null> {
+  const selected = await open({
+    directory: true,
+    multiple: false,
+    recursive: true,
+    title: "Choose Video Folder",
   });
 
   return typeof selected === "string" ? selected : null;
@@ -57,6 +71,26 @@ export async function scanLibrary(root: string): Promise<Track[]> {
 
 export async function getLibraryCache(): Promise<LibraryCache> {
   return invoke<LibraryCache>("get_library_cache");
+}
+
+export async function getVideoLibrary(): Promise<VideoLibrary> {
+  return invoke<VideoLibrary>("get_video_library");
+}
+
+export async function scanVideoFolder(folderPath: string): Promise<VideoLibrary> {
+  return invoke<VideoLibrary>("scan_video_folder", { folderPath });
+}
+
+export async function updateVideoInfo(videoId: string, info: VideoInfoUpdate): Promise<VideoEntry> {
+  return invoke<VideoEntry>("update_video_info", { videoId, info });
+}
+
+export async function updateVideoProgress(
+  videoId: string,
+  lastPositionSeconds: number,
+  incrementPlayCount = false,
+): Promise<VideoEntry> {
+  return invoke<VideoEntry>("update_video_progress", { videoId, lastPositionSeconds, incrementPlayCount });
 }
 
 export async function toggleTrackFavorite(id: string): Promise<boolean> {

@@ -56,6 +56,44 @@ export type Playlist = {
   trackIds: string[];
 };
 
+export type VideoEntry = {
+  id: string;
+  filePath: string;
+  fileName: string;
+  title: string;
+  artist: string | null;
+  showTitle: string | null;
+  albumOrRelease: string | null;
+  year: number | null;
+  venue: string | null;
+  city: string | null;
+  country: string | null;
+  durationSeconds: number | null;
+  thumbnailPath: string | null;
+  lastPositionSeconds: number;
+  playCount: number;
+  lastPlayedAt: number | null;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type VideoLibrary = {
+  videos: VideoEntry[];
+  lastVideoFolder: string | null;
+  lastVideoScannedAt: number | null;
+};
+
+export type VideoInfoUpdate = {
+  title: string;
+  artist: string | null;
+  showTitle: string | null;
+  albumOrRelease: string | null;
+  year: number | null;
+  venue: string | null;
+  city: string | null;
+  country: string | null;
+};
+
 export type NavItem = {
   label: string;
   icon: string;

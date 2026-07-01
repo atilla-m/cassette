@@ -24,6 +24,7 @@ mod mpris;
 use mpris::{MprisState, MprisTrack};
 
 const SUPPORTED_EXTENSIONS: &[&str] = &["flac", "mp3", "ogg", "opus", "wav", "m4a"];
+const SUPPORTED_VIDEO_EXTENSIONS: &[&str] = &["mp4", "mkv", "webm", "mov", "m4v", "avi"];
 const COVER_IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "webp"];
 const PREFERRED_COVER_NAMES: &[&str] = &["cover", "folder", "front", "album"];
 const MAX_FOLDER_COVER_BYTES: u64 = 25 * 1024 * 1024;
@@ -77,6 +78,50 @@ struct TrackMetadata {
 struct EmbeddedCoverArt {
     extension: &'static str,
     data: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VideoEntry {
+    id: String,
+    file_path: String,
+    file_name: String,
+    title: String,
+    artist: Option<String>,
+    show_title: Option<String>,
+    album_or_release: Option<String>,
+    year: Option<u16>,
+    venue: Option<String>,
+    city: Option<String>,
+    country: Option<String>,
+    duration_seconds: Option<u32>,
+    thumbnail_path: Option<String>,
+    last_position_seconds: u32,
+    play_count: i64,
+    last_played_at: Option<i64>,
+    created_at: i64,
+    updated_at: i64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VideoLibrary {
+    videos: Vec<VideoEntry>,
+    last_video_folder: Option<String>,
+    last_video_scanned_at: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct VideoInfoUpdate {
+    title: String,
+    artist: Option<String>,
+    show_title: Option<String>,
+    album_or_release: Option<String>,
+    year: Option<u16>,
+    venue: Option<String>,
+    city: Option<String>,
+    country: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -321,6 +366,74 @@ fn get_library_cache(library: State<'_, Mutex<LibraryDatabase>>) -> Result<Libra
         .map_err(|_| "Library cache is unavailable.".to_owned())?;
 
     library.load_cache()
+}
+
+#[tauri::command]
+fn get_video_library(library: State<'_, Mutex<LibraryDatabase>>) -> Result<VideoLibrary, String> {
+    let library = library
+        .lock()
+        .map_err(|_| "Library cache is unavailable.".to_owned())?;
+
+    library.video_library()
+}
+
+#[tauri::command]
+async fn scan_video_folder(
+    folder_path: String,
+    app: AppHandle,
+    library: State<'_, Mutex<LibraryDatabase>>,
+) -> Result<VideoLibrary, String> {
+    let root_path = PathBuf::from(folder_path);
+
+    if !root_path.exists() {
+        return Err("Selected video folder does not exist.".into());
+    }
+
+    if !root_path.is_dir() {
+        return Err("Selected video path is not a folder.".into());
+    }
+
+    let scan_root = root_path.clone();
+    let thumbnail_dir = app.path().app_data_dir().ok().map(|path| path.join("video-thumbnails"));
+    let scanned_at = unix_timestamp();
+    let mut videos = tauri::async_runtime::spawn_blocking(move || {
+        scan_video_directory_root(&scan_root, scanned_at, thumbnail_dir.as_deref())
+    })
+    .await
+    .map_err(|error| format!("Could not scan video folder: {error}"))??;
+
+    let mut library = library
+        .lock()
+        .map_err(|_| "Library cache is unavailable.".to_owned())?;
+    library.replace_videos(&root_path, &mut videos, scanned_at)?;
+    library.video_library()
+}
+
+#[tauri::command]
+fn update_video_info(
+    video_id: String,
+    info: VideoInfoUpdate,
+    library: State<'_, Mutex<LibraryDatabase>>,
+) -> Result<VideoEntry, String> {
+    let library = library
+        .lock()
+        .map_err(|_| "Library cache is unavailable.".to_owned())?;
+
+    library.update_video_info(&video_id, info)
+}
+
+#[tauri::command]
+fn update_video_progress(
+    video_id: String,
+    last_position_seconds: u32,
+    increment_play_count: bool,
+    library: State<'_, Mutex<LibraryDatabase>>,
+) -> Result<VideoEntry, String> {
+    let library = library
+        .lock()
+        .map_err(|_| "Library cache is unavailable.".to_owned())?;
+
+    library.update_video_progress(&video_id, last_position_seconds, increment_play_count)
 }
 
 #[tauri::command]
@@ -1752,6 +1865,27 @@ impl LibraryDatabase {
                 PRIMARY KEY (playlist_id, track_id),
                 FOREIGN KEY (playlist_id) REFERENCES playlists(id) ON DELETE CASCADE
             );
+
+            CREATE TABLE IF NOT EXISTS videos (
+                id TEXT PRIMARY KEY NOT NULL,
+                file_path TEXT NOT NULL UNIQUE,
+                file_name TEXT NOT NULL,
+                title TEXT NOT NULL,
+                artist TEXT,
+                show_title TEXT,
+                album_or_release TEXT,
+                year INTEGER,
+                venue TEXT,
+                city TEXT,
+                country TEXT,
+                duration_seconds INTEGER,
+                thumbnail_path TEXT,
+                last_position_seconds INTEGER NOT NULL DEFAULT 0,
+                play_count INTEGER NOT NULL DEFAULT 0,
+                last_played_at INTEGER,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
             ",
         )?;
 
@@ -1864,6 +1998,305 @@ impl LibraryDatabase {
                 .meta_value("last_scanned_at")?
                 .and_then(|value| value.parse::<i64>().ok()),
         })
+    }
+
+    fn video_library(&self) -> Result<VideoLibrary, String> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "
+                SELECT
+                    id,
+                    file_path,
+                    file_name,
+                    title,
+                    artist,
+                    show_title,
+                    album_or_release,
+                    year,
+                    venue,
+                    city,
+                    country,
+                    duration_seconds,
+                    thumbnail_path,
+                    last_position_seconds,
+                    play_count,
+                    last_played_at,
+                    created_at,
+                    updated_at
+                FROM videos
+                ORDER BY title COLLATE NOCASE ASC, file_name COLLATE NOCASE ASC
+                ",
+            )
+            .map_err(|error| format!("Could not read video library: {error}"))?;
+        let videos = statement
+            .query_map([], row_to_video)
+            .map_err(|error| format!("Could not read video library: {error}"))?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|error| format!("Could not read video rows: {error}"))?;
+
+        Ok(VideoLibrary {
+            videos,
+            last_video_folder: self.meta_value("last_video_folder")?,
+            last_video_scanned_at: self
+                .meta_value("last_video_scanned_at")?
+                .and_then(|value| value.parse::<i64>().ok()),
+        })
+    }
+
+    fn replace_videos(
+        &mut self,
+        root_path: &Path,
+        videos: &mut [VideoEntry],
+        scanned_at: i64,
+    ) -> Result<(), String> {
+        let transaction = self
+            .connection
+            .transaction()
+            .map_err(|error| format!("Could not update video library: {error}"))?;
+        let existing_videos = existing_videos_by_id(&transaction)
+            .map_err(|error| format!("Could not read existing videos: {error}"))?;
+        let scanned_ids = videos
+            .iter()
+            .map(|video| video.id.clone())
+            .collect::<HashSet<_>>();
+
+        for video in videos.iter_mut() {
+            if let Some(existing) = existing_videos.get(&video.id) {
+                video.title = existing.title.clone();
+                video.artist = existing.artist.clone();
+                video.show_title = existing.show_title.clone();
+                video.album_or_release = existing.album_or_release.clone();
+                video.year = existing.year;
+                video.venue = existing.venue.clone();
+                video.city = existing.city.clone();
+                video.country = existing.country.clone();
+                video.last_position_seconds = existing.last_position_seconds;
+                video.play_count = existing.play_count;
+                video.last_played_at = existing.last_played_at;
+                video.created_at = existing.created_at;
+            }
+        }
+
+        {
+            let mut statement = transaction
+                .prepare(
+                    "
+                    INSERT INTO videos (
+                        id,
+                        file_path,
+                        file_name,
+                        title,
+                        artist,
+                        show_title,
+                        album_or_release,
+                        year,
+                        venue,
+                        city,
+                        country,
+                        duration_seconds,
+                        thumbnail_path,
+                        last_position_seconds,
+                        play_count,
+                        last_played_at,
+                        created_at,
+                        updated_at
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
+                    ON CONFLICT(id) DO UPDATE SET
+                        file_path = excluded.file_path,
+                        file_name = excluded.file_name,
+                        title = excluded.title,
+                        artist = excluded.artist,
+                        show_title = excluded.show_title,
+                        album_or_release = excluded.album_or_release,
+                        year = excluded.year,
+                        venue = excluded.venue,
+                        city = excluded.city,
+                        country = excluded.country,
+                        duration_seconds = excluded.duration_seconds,
+                        thumbnail_path = excluded.thumbnail_path,
+                        last_position_seconds = excluded.last_position_seconds,
+                        play_count = excluded.play_count,
+                        last_played_at = excluded.last_played_at,
+                        created_at = excluded.created_at,
+                        updated_at = excluded.updated_at
+                    ",
+                )
+                .map_err(|error| format!("Could not prepare video cache update: {error}"))?;
+
+            for video in videos.iter() {
+                statement
+                    .execute(params![
+                        &video.id,
+                        &video.file_path,
+                        &video.file_name,
+                        &video.title,
+                        &video.artist,
+                        &video.show_title,
+                        &video.album_or_release,
+                        video.year,
+                        &video.venue,
+                        &video.city,
+                        &video.country,
+                        video.duration_seconds,
+                        &video.thumbnail_path,
+                        video.last_position_seconds,
+                        video.play_count,
+                        video.last_played_at,
+                        video.created_at,
+                        video.updated_at,
+                    ])
+                    .map_err(|error| format!("Could not cache scanned video: {error}"))?;
+            }
+        }
+
+        let root_prefix = root_path.to_string_lossy().into_owned();
+        let existing_under_root = existing_videos
+            .values()
+            .filter(|video| video.file_path.starts_with(&root_prefix))
+            .map(|video| video.id.clone())
+            .collect::<Vec<_>>();
+
+        for id in existing_under_root {
+            if !scanned_ids.contains(&id) {
+                transaction
+                    .execute("DELETE FROM videos WHERE id = ?1", [&id])
+                    .map_err(|error| format!("Could not remove missing video: {error}"))?;
+            }
+        }
+
+        upsert_meta(
+            &transaction,
+            "last_video_folder",
+            &root_path.to_string_lossy(),
+        )
+        .map_err(|error| format!("Could not cache video folder: {error}"))?;
+        upsert_meta(&transaction, "last_video_scanned_at", &scanned_at.to_string())
+            .map_err(|error| format!("Could not cache video scan time: {error}"))?;
+
+        transaction
+            .commit()
+            .map_err(|error| format!("Could not save video library: {error}"))?;
+
+        Ok(())
+    }
+
+    fn video_by_id(&self, id: &str) -> Result<Option<VideoEntry>, String> {
+        self.connection
+            .query_row(
+                "
+                SELECT
+                    id,
+                    file_path,
+                    file_name,
+                    title,
+                    artist,
+                    show_title,
+                    album_or_release,
+                    year,
+                    venue,
+                    city,
+                    country,
+                    duration_seconds,
+                    thumbnail_path,
+                    last_position_seconds,
+                    play_count,
+                    last_played_at,
+                    created_at,
+                    updated_at
+                FROM videos
+                WHERE id = ?1
+                ",
+                [id],
+                row_to_video,
+            )
+            .optional()
+            .map_err(|error| format!("Could not read video: {error}"))
+    }
+
+    fn update_video_info(&self, id: &str, info: VideoInfoUpdate) -> Result<VideoEntry, String> {
+        let title = clean_text(Some(info.title)).unwrap_or_else(|| "Untitled Video".to_owned());
+        let updated = self
+            .connection
+            .execute(
+                "
+                UPDATE videos
+                SET title = ?2,
+                    artist = ?3,
+                    show_title = ?4,
+                    album_or_release = ?5,
+                    year = ?6,
+                    venue = ?7,
+                    city = ?8,
+                    country = ?9,
+                    updated_at = ?10
+                WHERE id = ?1
+                ",
+                params![
+                    id,
+                    title,
+                    clean_text(info.artist),
+                    clean_text(info.show_title),
+                    clean_text(info.album_or_release),
+                    info.year,
+                    clean_text(info.venue),
+                    clean_text(info.city),
+                    clean_text(info.country),
+                    unix_timestamp(),
+                ],
+            )
+            .map_err(|error| format!("Could not save video info: {error}"))?;
+
+        if updated == 0 {
+            return Err("Video is not in the library.".to_owned());
+        }
+
+        self.video_by_id(id)?
+            .ok_or_else(|| "Video is not in the library.".to_owned())
+    }
+
+    fn update_video_progress(
+        &self,
+        id: &str,
+        last_position_seconds: u32,
+        increment_play_count: bool,
+    ) -> Result<VideoEntry, String> {
+        let played_at = if increment_play_count {
+            Some(unix_timestamp())
+        } else {
+            None
+        };
+        let updated = if increment_play_count {
+            self.connection.execute(
+                "
+                UPDATE videos
+                SET last_position_seconds = ?2,
+                    play_count = play_count + 1,
+                    last_played_at = ?3,
+                    updated_at = ?3
+                WHERE id = ?1
+                ",
+                params![id, last_position_seconds, played_at],
+            )
+        } else {
+            self.connection.execute(
+                "
+                UPDATE videos
+                SET last_position_seconds = ?2,
+                    updated_at = ?3
+                WHERE id = ?1
+                ",
+                params![id, last_position_seconds, unix_timestamp()],
+            )
+        }
+        .map_err(|error| format!("Could not save video progress: {error}"))?;
+
+        if updated == 0 {
+            return Err("Video is not in the library.".to_owned());
+        }
+
+        self.video_by_id(id)?
+            .ok_or_else(|| "Video is not in the library.".to_owned())
     }
 
     fn replace_library(
@@ -2859,6 +3292,29 @@ fn row_to_track(row: &rusqlite::Row<'_>) -> rusqlite::Result<Track> {
     })
 }
 
+fn row_to_video(row: &rusqlite::Row<'_>) -> rusqlite::Result<VideoEntry> {
+    Ok(VideoEntry {
+        id: row.get(0)?,
+        file_path: row.get(1)?,
+        file_name: row.get(2)?,
+        title: row.get(3)?,
+        artist: row.get(4)?,
+        show_title: row.get(5)?,
+        album_or_release: row.get(6)?,
+        year: row.get(7)?,
+        venue: row.get(8)?,
+        city: row.get(9)?,
+        country: row.get(10)?,
+        duration_seconds: row.get(11)?,
+        thumbnail_path: row.get(12)?,
+        last_position_seconds: row.get(13)?,
+        play_count: row.get(14)?,
+        last_played_at: row.get(15)?,
+        created_at: row.get(16)?,
+        updated_at: row.get(17)?,
+    })
+}
+
 impl From<&Track> for MprisTrack {
     fn from(track: &Track) -> Self {
         Self {
@@ -2932,6 +3388,42 @@ fn playback_history_by_id(
     })?;
 
     rows.collect()
+}
+
+fn existing_videos_by_id(connection: &Connection) -> rusqlite::Result<HashMap<String, VideoEntry>> {
+    let mut statement = connection.prepare(
+        "
+        SELECT
+            id,
+            file_path,
+            file_name,
+            title,
+            artist,
+            show_title,
+            album_or_release,
+            year,
+            venue,
+            city,
+            country,
+            duration_seconds,
+            thumbnail_path,
+            last_position_seconds,
+            play_count,
+            last_played_at,
+            created_at,
+            updated_at
+        FROM videos
+        ",
+    )?;
+    let rows = statement.query_map([], row_to_video)?;
+    let mut videos = HashMap::new();
+
+    for row in rows {
+        let video = row?;
+        videos.insert(video.id.clone(), video);
+    }
+
+    Ok(videos)
 }
 
 fn upsert_meta(connection: &Connection, key: &str, value: &str) -> rusqlite::Result<()> {
@@ -3021,6 +3513,50 @@ fn scan_directory(
     Ok(())
 }
 
+fn scan_video_directory_root(
+    root_path: &Path,
+    scanned_at: i64,
+    thumbnail_dir: Option<&Path>,
+) -> Result<Vec<VideoEntry>, String> {
+    let mut videos = Vec::new();
+    scan_video_directory(root_path, scanned_at, thumbnail_dir, &mut videos)?;
+    videos.sort_by(|left, right| left.file_path.cmp(&right.file_path));
+
+    Ok(videos)
+}
+
+fn scan_video_directory(
+    directory: &Path,
+    scanned_at: i64,
+    thumbnail_dir: Option<&Path>,
+    videos: &mut Vec<VideoEntry>,
+) -> Result<(), String> {
+    let entries = match fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(_) => return Ok(()),
+    };
+    let mut entries = entries.filter_map(Result::ok).collect::<Vec<_>>();
+    entries.sort_by_key(|entry| entry.path());
+
+    for entry in entries {
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(_) => continue,
+        };
+        let path = entry.path();
+
+        if file_type.is_dir() {
+            scan_video_directory(&path, scanned_at, thumbnail_dir, videos)?;
+        } else if file_type.is_file() && is_supported_video_file(&path) {
+            if let Some(video) = video_from_path(path, scanned_at, thumbnail_dir) {
+                videos.push(video);
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn is_supported_audio_file(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
@@ -3030,6 +3566,120 @@ fn is_supported_audio_file(path: &Path) -> bool {
                 .any(|supported| extension.eq_ignore_ascii_case(supported))
         })
         .unwrap_or(false)
+}
+
+fn is_supported_video_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| {
+            SUPPORTED_VIDEO_EXTENSIONS
+                .iter()
+                .any(|supported| extension.eq_ignore_ascii_case(supported))
+        })
+        .unwrap_or(false)
+}
+
+fn video_from_path(
+    path: PathBuf,
+    scanned_at: i64,
+    thumbnail_dir: Option<&Path>,
+) -> Option<VideoEntry> {
+    let path_string = path.to_string_lossy().into_owned();
+    let file_name = path.file_name()?.to_string_lossy().into_owned();
+    let duration_seconds = ffprobe_video_duration_seconds(&path);
+    let thumbnail_path = thumbnail_dir
+        .and_then(|thumbnail_dir| generate_video_thumbnail(&path, duration_seconds, thumbnail_dir));
+
+    Some(VideoEntry {
+        id: path_string.clone(),
+        file_path: path_string,
+        file_name,
+        title: video_title_from_path(&path),
+        artist: None,
+        show_title: None,
+        album_or_release: None,
+        year: None,
+        venue: None,
+        city: None,
+        country: None,
+        duration_seconds,
+        thumbnail_path,
+        last_position_seconds: 0,
+        play_count: 0,
+        last_played_at: None,
+        created_at: scanned_at,
+        updated_at: scanned_at,
+    })
+}
+
+fn ffprobe_video_duration_seconds(path: &Path) -> Option<u32> {
+    let output = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=nokey=1:noprint_wrappers=1",
+        ])
+        .arg(path)
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let value = String::from_utf8_lossy(&output.stdout);
+    let seconds = value.trim().parse::<f64>().ok()?;
+
+    if seconds.is_finite() && seconds > 0.0 {
+        Some(seconds.round() as u32)
+    } else {
+        None
+    }
+}
+
+fn generate_video_thumbnail(
+    path: &Path,
+    duration_seconds: Option<u32>,
+    thumbnail_dir: &Path,
+) -> Option<String> {
+    fs::create_dir_all(thumbnail_dir).ok()?;
+    let file_info = file_info(path);
+    let source_key = format!(
+        "{}\0{}\0{}",
+        path.to_string_lossy(),
+        file_info.file_size.unwrap_or(0),
+        file_info.modified_time.unwrap_or(0),
+    );
+    let thumbnail_path = thumbnail_dir.join(format!("{:016x}.jpg", stable_hash(&source_key)));
+
+    if thumbnail_path.exists() {
+        return Some(thumbnail_path.to_string_lossy().into_owned());
+    }
+
+    let seek_seconds = match duration_seconds {
+        Some(duration) if duration >= 300 => 30,
+        Some(duration) if duration > 10 => (duration / 10).max(1),
+        _ => 1,
+    };
+    let output = Command::new("ffmpeg")
+        .args(["-y", "-hide_banner", "-loglevel", "error", "-ss"])
+        .arg(seek_seconds.to_string())
+        .arg("-i")
+        .arg(path)
+        .args(["-frames:v", "1", "-vf", "scale=640:-1"])
+        .arg(&thumbnail_path)
+        .output()
+        .ok()?;
+
+    if output.status.success() && thumbnail_path.exists() {
+        Some(thumbnail_path.to_string_lossy().into_owned())
+    } else {
+        let _ = fs::remove_file(&thumbnail_path);
+        None
+    }
 }
 
 fn track_from_path(path: PathBuf, scanned_at: i64) -> Option<(Track, Option<EmbeddedCoverArt>)> {
@@ -3884,6 +4534,14 @@ fn title_from_path(path: &Path) -> String {
         .unwrap_or_else(|| "Unknown Track".into())
 }
 
+fn video_title_from_path(path: &Path) -> String {
+    path.file_stem()
+        .and_then(|stem| stem.to_str())
+        .map(|stem| stem.replace(['_', '-'], " "))
+        .filter(|title| !title.trim().is_empty())
+        .unwrap_or_else(|| "Untitled Video".into())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -3908,6 +4566,10 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             get_library_cache,
+            get_video_library,
+            scan_video_folder,
+            update_video_info,
+            update_video_progress,
             scan_library,
             toggle_track_favorite,
             record_track_play,
