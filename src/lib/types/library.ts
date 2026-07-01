@@ -100,6 +100,59 @@ export type CdRipTrack = {
   status?: CdRipTrackStatus;
   outputFilename?: string;
   error?: string | null;
+  warning?: string | null;
+};
+
+export type CdRipMetadataTrack = {
+  number: number;
+  title: string;
+  artist: string;
+  discNumber: number | null;
+};
+
+export type CdRipCover = {
+  source: "cover-art-archive" | "manual";
+  path: string;
+  mimeType: string;
+  extension: string;
+};
+
+export type CdRipMetadata = {
+  albumArtist: string;
+  albumTitle: string;
+  year: string;
+  genre: string;
+  discNumber: number | null;
+  cover: CdRipCover | null;
+  tracks: CdRipMetadataTrack[];
+};
+
+export type CdMetadataRelease = {
+  id: string;
+  title: string;
+  artist: string;
+  date: string | null;
+  year: string | null;
+  country: string | null;
+  format: string | null;
+  label: string | null;
+  catalogNumber: string | null;
+  trackCount: number;
+  discNumber: number | null;
+  tracks: CdRipMetadataTrack[];
+};
+
+export type CdMetadataLookupResult = {
+  discId: string;
+  toc: string;
+  releases: CdMetadataRelease[];
+  error: string | null;
+};
+
+export type CdCoverLookupResult = {
+  found: boolean;
+  cover: CdRipCover | null;
+  message: string | null;
 };
 
 export type CdDetectResult = {

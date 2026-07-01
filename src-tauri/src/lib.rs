@@ -1,14 +1,18 @@
 use gst::prelude::*;
 use gstreamer as gst;
+use libloading::Library;
+use lofty::config::WriteOptions;
 use lofty::file::{AudioFile, TaggedFileExt};
-use lofty::picture::Picture;
+use lofty::picture::{MimeType, Picture, PictureType};
 use lofty::probe::Probe;
-use lofty::tag::{Accessor, ItemKey, Tag};
+use lofty::tag::{Accessor, ItemKey, Tag, TagType};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::ffi::CStr;
 use std::fs;
 use std::io::{self, Read};
+use std::os::raw::{c_char, c_int, c_uint, c_void};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::Mutex;
@@ -26,6 +30,7 @@ const MAX_FOLDER_COVER_BYTES: u64 = 25 * 1024 * 1024;
 const MAX_LYRICS_BYTES: u64 = 1024 * 1024;
 const GENRE_SCOPE_ALBUM: &str = "album";
 const GENRE_SCOPE_ARTIST: &str = "artist";
+const MUSICBRAINZ_USER_AGENT: &str = "Cassette/0.1.0 (local music player; contact: none)";
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -129,6 +134,7 @@ struct CdRipTrack {
     status: Option<String>,
     output_filename: Option<String>,
     error: Option<String>,
+    warning: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -148,6 +154,70 @@ struct CdRipResult {
     tracks: Vec<CdRipTrack>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CdRipMetadataTrack {
+    number: u32,
+    title: String,
+    artist: String,
+    disc_number: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CdRipCover {
+    source: String,
+    path: String,
+    mime_type: String,
+    extension: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CdRipMetadata {
+    album_artist: String,
+    album_title: String,
+    year: String,
+    genre: String,
+    disc_number: Option<u32>,
+    cover: Option<CdRipCover>,
+    tracks: Vec<CdRipMetadataTrack>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CdMetadataRelease {
+    id: String,
+    title: String,
+    artist: String,
+    date: Option<String>,
+    year: Option<String>,
+    country: Option<String>,
+    format: Option<String>,
+    label: Option<String>,
+    catalog_number: Option<String>,
+    track_count: u32,
+    disc_number: Option<u32>,
+    tracks: Vec<CdRipMetadataTrack>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CdMetadataLookupResult {
+    disc_id: String,
+    toc: String,
+    releases: Vec<CdMetadataRelease>,
+    error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CdCoverLookupResult {
+    found: bool,
+    cover: Option<CdRipCover>,
+    message: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CdRipEvent {
@@ -156,6 +226,12 @@ struct CdRipEvent {
     output_filename: Option<String>,
     output_path: Option<String>,
     message: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct PreparedCdCover {
+    data: Vec<u8>,
+    mime_type: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -511,10 +587,524 @@ async fn detect_audio_cd() -> Result<CdDetectResult, String> {
 }
 
 #[tauri::command]
-async fn rip_cd_to_flac(output_folder: String, app: AppHandle) -> Result<CdRipResult, String> {
-    tauri::async_runtime::spawn_blocking(move || rip_cd_to_flac_blocking(output_folder, app))
+async fn lookup_cd_metadata() -> Result<CdMetadataLookupResult, String> {
+    let disc_info = tauri::async_runtime::spawn_blocking(read_musicbrainz_disc)
+        .await
+        .map_err(|error| format!("Could not read CD Disc ID: {error}"))??;
+
+    lookup_musicbrainz_disc(&disc_info).await
+}
+
+#[tauri::command]
+async fn lookup_cd_cover(release_id: String) -> Result<CdCoverLookupResult, String> {
+    lookup_cover_art_archive(&release_id).await
+}
+
+#[tauri::command]
+async fn inspect_cover_image(path: String) -> Result<CdCoverLookupResult, String> {
+    tauri::async_runtime::spawn_blocking(move || inspect_cover_image_blocking(path))
+        .await
+        .map_err(|error| format!("Could not inspect cover image: {error}"))?
+}
+
+#[tauri::command]
+async fn rip_cd_to_flac(
+    output_folder: String,
+    metadata: Option<CdRipMetadata>,
+    app: AppHandle,
+) -> Result<CdRipResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        rip_cd_to_flac_blocking(output_folder, metadata, app)
+    })
         .await
         .map_err(|error| format!("Could not rip audio CD: {error}"))?
+}
+
+#[derive(Debug)]
+struct MusicBrainzDisc {
+    id: String,
+    toc: String,
+}
+
+fn read_musicbrainz_disc() -> Result<MusicBrainzDisc, String> {
+    unsafe {
+        let library = load_libdiscid()?;
+        let discid_new = library
+            .get::<unsafe extern "C" fn() -> *mut c_void>(b"discid_new\0")
+            .map_err(|error| format!("Installed libdiscid is missing discid_new: {error}"))?;
+        let discid_free = library
+            .get::<unsafe extern "C" fn(*mut c_void)>(b"discid_free\0")
+            .map_err(|error| format!("Installed libdiscid is missing discid_free: {error}"))?;
+        let discid_read_sparse = library
+            .get::<unsafe extern "C" fn(*mut c_void, *const c_char, c_uint) -> c_int>(
+                b"discid_read_sparse\0",
+            )
+            .map_err(|error| {
+                format!("Installed libdiscid is missing discid_read_sparse: {error}")
+            })?;
+        let discid_get_id = library
+            .get::<unsafe extern "C" fn(*mut c_void) -> *const c_char>(b"discid_get_id\0")
+            .map_err(|error| format!("Installed libdiscid is missing discid_get_id: {error}"))?;
+        let discid_get_toc_string = library
+            .get::<unsafe extern "C" fn(*mut c_void) -> *const c_char>(
+                b"discid_get_toc_string\0",
+            )
+            .map_err(|error| {
+                format!("Installed libdiscid is missing discid_get_toc_string: {error}")
+            })?;
+        let discid_get_error_msg = library
+            .get::<unsafe extern "C" fn(*mut c_void) -> *const c_char>(
+                b"discid_get_error_msg\0",
+            )
+            .map_err(|error| {
+                format!("Installed libdiscid is missing discid_get_error_msg: {error}")
+            })?;
+        let disc = discid_new();
+
+        if disc.is_null() {
+            return Err("libdiscid could not allocate a Disc ID reader.".to_owned());
+        }
+
+        let read_feature = 1;
+        let read_result = discid_read_sparse(disc, std::ptr::null(), read_feature);
+        if read_result != 1 {
+            let error = c_string_from_ptr(discid_get_error_msg(disc))
+                .unwrap_or_else(|| "Could not read the audio CD TOC.".to_owned());
+            discid_free(disc);
+            return Err(format!("Could not read Disc ID with libdiscid: {error}"));
+        }
+
+        let id = c_string_from_ptr(discid_get_id(disc))
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| "libdiscid returned an empty Disc ID.".to_owned())?;
+        let toc = c_string_from_ptr(discid_get_toc_string(disc)).unwrap_or_default();
+        discid_free(disc);
+
+        Ok(MusicBrainzDisc { id, toc })
+    }
+}
+
+fn load_libdiscid() -> Result<Library, String> {
+    for name in ["libdiscid.so.0", "libdiscid.so"] {
+        if let Ok(library) = unsafe { Library::new(name) } {
+            return Ok(library);
+        }
+    }
+
+    Err("libdiscid is not installed. Install libdiscid and try metadata lookup again.".to_owned())
+}
+
+unsafe fn c_string_from_ptr(value: *const c_char) -> Option<String> {
+    if value.is_null() {
+        return None;
+    }
+
+    CStr::from_ptr(value)
+        .to_str()
+        .ok()
+        .map(str::to_owned)
+}
+
+async fn lookup_musicbrainz_disc(disc: &MusicBrainzDisc) -> Result<CdMetadataLookupResult, String> {
+    let client = reqwest::Client::builder()
+        .user_agent(MUSICBRAINZ_USER_AGENT)
+        .build()
+        .map_err(|error| format!("Could not prepare MusicBrainz lookup: {error}"))?;
+    let url = format!(
+        "https://musicbrainz.org/ws/2/discid/{}?fmt=json&inc=artists+recordings+release-groups+labels",
+        disc.id
+    );
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|error| format!("MusicBrainz is unavailable or offline: {error}"))?;
+
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(CdMetadataLookupResult {
+            disc_id: disc.id.clone(),
+            toc: disc.toc.clone(),
+            releases: Vec::new(),
+            error: Some("No matching MusicBrainz release was found for this Disc ID.".to_owned()),
+        });
+    }
+
+    if !response.status().is_success() {
+        return Err(format!(
+            "MusicBrainz lookup failed with HTTP status {}.",
+            response.status()
+        ));
+    }
+
+    let payload = response
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|error| format!("Could not read MusicBrainz metadata: {error}"))?;
+    let mut releases = payload
+        .get("releases")
+        .and_then(serde_json::Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|release| musicbrainz_release_from_json(release, &disc.id))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    releases.sort_by(|left, right| {
+        right
+            .track_count
+            .cmp(&left.track_count)
+            .then_with(|| left.title.cmp(&right.title))
+            .then_with(|| left.artist.cmp(&right.artist))
+    });
+    let error = if releases.is_empty() {
+        Some("No matching MusicBrainz release was found for this Disc ID.".to_owned())
+    } else {
+        None
+    };
+
+    Ok(CdMetadataLookupResult {
+        disc_id: disc.id.clone(),
+        toc: disc.toc.clone(),
+        releases,
+        error,
+    })
+}
+
+fn musicbrainz_release_from_json(
+    release: &serde_json::Value,
+    disc_id: &str,
+) -> Option<CdMetadataRelease> {
+    let id = json_string(release.get("id"))?;
+    let title = json_string(release.get("title")).unwrap_or_else(|| "Unknown Album".to_owned());
+    let artist = musicbrainz_artist_credit(release)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "Unknown Artist".to_owned());
+    let date = json_string(release.get("date"));
+    let year = date
+        .as_deref()
+        .and_then(|value| value.get(0..4))
+        .filter(|value| value.chars().all(|character| character.is_ascii_digit()))
+        .map(str::to_owned);
+    let country = json_string(release.get("country"));
+    let (format, disc_number, tracks) = musicbrainz_medium_for_disc(release, disc_id);
+    let track_count = tracks.len() as u32;
+    let (label, catalog_number) = musicbrainz_label_info(release);
+
+    Some(CdMetadataRelease {
+        id,
+        title,
+        artist,
+        date,
+        year,
+        country,
+        format,
+        label,
+        catalog_number,
+        track_count,
+        disc_number,
+        tracks,
+    })
+}
+
+fn musicbrainz_medium_for_disc(
+    release: &serde_json::Value,
+    disc_id: &str,
+) -> (Option<String>, Option<u32>, Vec<CdRipMetadataTrack>) {
+    let media = release
+        .get("media")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let selected_medium = media
+        .iter()
+        .find(|medium| medium_has_disc_id(medium, disc_id))
+        .or_else(|| media.first());
+
+    let Some(medium) = selected_medium else {
+        return (None, None, Vec::new());
+    };
+
+    let format = json_string(medium.get("format"));
+    let disc_number = medium
+        .get("position")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok());
+    let tracks = medium
+        .get("tracks")
+        .and_then(serde_json::Value::as_array)
+        .map(|tracks| {
+            tracks
+                .iter()
+                .enumerate()
+                .map(|(index, track)| {
+                    let number = track
+                        .get("number")
+                        .and_then(serde_json::Value::as_str)
+                        .and_then(|value| value.parse::<u32>().ok())
+                        .or_else(|| {
+                            track
+                                .get("position")
+                                .and_then(serde_json::Value::as_u64)
+                                .and_then(|value| u32::try_from(value).ok())
+                        })
+                        .unwrap_or((index + 1) as u32);
+                    let title = json_string(track.get("title"))
+                        .or_else(|| {
+                            track
+                                .get("recording")
+                                .and_then(|recording| json_string(recording.get("title")))
+                        })
+                        .unwrap_or_else(|| format!("Track {number:02}"));
+                    let artist = musicbrainz_artist_credit(track)
+                        .or_else(|| {
+                            track
+                                .get("recording")
+                                .and_then(musicbrainz_artist_credit)
+                        })
+                        .unwrap_or_default();
+
+                    CdRipMetadataTrack {
+                        number,
+                        title,
+                        artist,
+                        disc_number,
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    (format, disc_number, tracks)
+}
+
+fn medium_has_disc_id(medium: &serde_json::Value, disc_id: &str) -> bool {
+    medium
+        .get("discs")
+        .and_then(serde_json::Value::as_array)
+        .map(|discs| {
+            discs
+                .iter()
+                .any(|disc| disc.get("id").and_then(serde_json::Value::as_str) == Some(disc_id))
+        })
+        .unwrap_or(false)
+}
+
+fn musicbrainz_artist_credit(value: &serde_json::Value) -> Option<String> {
+    let artists = value.get("artist-credit")?.as_array()?;
+    let mut name = String::new();
+
+    for artist_credit in artists {
+        if let Some(part) = json_string(artist_credit.get("name")).or_else(|| {
+            artist_credit
+                .get("artist")
+                .and_then(|artist| json_string(artist.get("name")))
+        }) {
+            name.push_str(&part);
+        }
+
+        if let Some(joinphrase) = artist_credit
+            .get("joinphrase")
+            .and_then(serde_json::Value::as_str)
+        {
+            name.push_str(joinphrase);
+        }
+    }
+
+    let trimmed = name.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_owned())
+}
+
+fn musicbrainz_label_info(release: &serde_json::Value) -> (Option<String>, Option<String>) {
+    let Some(label_info) = release
+        .get("label-info")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|labels| labels.first())
+    else {
+        return (None, None);
+    };
+    let label = label_info
+        .get("label")
+        .and_then(|label| json_string(label.get("name")));
+    let catalog_number = json_string(label_info.get("catalog-number"));
+
+    (label, catalog_number)
+}
+
+fn json_string(value: Option<&serde_json::Value>) -> Option<String> {
+    value
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+async fn lookup_cover_art_archive(release_id: &str) -> Result<CdCoverLookupResult, String> {
+    let client = reqwest::Client::builder()
+        .user_agent(MUSICBRAINZ_USER_AGENT)
+        .build()
+        .map_err(|error| format!("Could not prepare cover lookup: {error}"))?;
+    let url = format!("https://coverartarchive.org/release/{release_id}/");
+    let response = client
+        .get(url)
+        .header(reqwest::header::ACCEPT, "application/json")
+        .send()
+        .await
+        .map_err(|error| format!("Cover lookup failed: {error}"))?;
+
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(CdCoverLookupResult {
+            found: false,
+            cover: None,
+            message: Some("No cover art found".to_owned()),
+        });
+    }
+
+    if !response.status().is_success() {
+        return Err(format!(
+            "Cover lookup failed with HTTP status {}.",
+            response.status()
+        ));
+    }
+
+    let payload = response
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|error| format!("Could not read cover metadata: {error}"))?;
+    let Some(image_url) = cover_art_archive_front_image_url(&payload) else {
+        return Ok(CdCoverLookupResult {
+            found: false,
+            cover: None,
+            message: Some("No cover art found".to_owned()),
+        });
+    };
+
+    let image_response = client
+        .get(&image_url)
+        .send()
+        .await
+        .map_err(|error| format!("Could not download cover art: {error}"))?;
+
+    if !image_response.status().is_success() {
+        return Err(format!(
+            "Cover image download failed with HTTP status {}.",
+            image_response.status()
+        ));
+    }
+
+    let content_type = image_response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    let bytes = image_response
+        .bytes()
+        .await
+        .map_err(|error| format!("Could not read cover image: {error}"))?
+        .to_vec();
+    let (mime_type, extension) = cover_mime_and_extension(&bytes, content_type.as_deref())
+        .ok_or_else(|| "Cover Art Archive returned an unsupported image type.".to_owned())?;
+    let cover_path = save_temp_cd_cover(release_id, &extension, &bytes)?;
+
+    Ok(CdCoverLookupResult {
+        found: true,
+        cover: Some(CdRipCover {
+            source: "cover-art-archive".to_owned(),
+            path: cover_path.to_string_lossy().to_string(),
+            mime_type,
+            extension,
+        }),
+        message: Some("Cover found".to_owned()),
+    })
+}
+
+fn cover_art_archive_front_image_url(payload: &serde_json::Value) -> Option<String> {
+    let images = payload.get("images")?.as_array()?;
+    let selected = images
+        .iter()
+        .find(|image| image.get("front").and_then(serde_json::Value::as_bool) == Some(true))
+        .or_else(|| {
+            images.iter().find(|image| {
+                image
+                    .get("types")
+                    .and_then(serde_json::Value::as_array)
+                    .map(|types| {
+                        types.iter().any(|value| {
+                            value
+                                .as_str()
+                                .map(|value| value.eq_ignore_ascii_case("front"))
+                                .unwrap_or(false)
+                        })
+                    })
+                    .unwrap_or(false)
+            })
+        })?;
+
+    json_string(selected.get("image"))
+}
+
+fn save_temp_cd_cover(release_id: &str, extension: &str, data: &[u8]) -> Result<PathBuf, String> {
+    let directory = std::env::temp_dir().join("cassette-cd-covers");
+    fs::create_dir_all(&directory)
+        .map_err(|error| format!("Could not create temporary cover folder: {error}"))?;
+    let path = directory.join(format!(
+        "{:016x}-{}.{}",
+        stable_hash(release_id),
+        unique_timestamp_nanos(),
+        extension
+    ));
+    fs::write(&path, data).map_err(|error| format!("Could not cache cover image: {error}"))?;
+
+    Ok(path)
+}
+
+fn inspect_cover_image_blocking(path: String) -> Result<CdCoverLookupResult, String> {
+    let path = PathBuf::from(path);
+    if !path.exists() {
+        return Err("Selected cover image does not exist.".to_owned());
+    }
+    if !path.is_file() {
+        return Err("Selected cover image is not a file.".to_owned());
+    }
+
+    let data = fs::read(&path).map_err(|error| format!("Could not read cover image: {error}"))?;
+    let (mime_type, extension) = cover_mime_and_extension(&data, None)
+        .ok_or_else(|| "Selected cover image must be JPG, PNG, or WEBP.".to_owned())?;
+
+    Ok(CdCoverLookupResult {
+        found: true,
+        cover: Some(CdRipCover {
+            source: "manual".to_owned(),
+            path: path.to_string_lossy().to_string(),
+            mime_type,
+            extension,
+        }),
+        message: Some("Manual cover selected".to_owned()),
+    })
+}
+
+fn cover_mime_and_extension(data: &[u8], content_type: Option<&str>) -> Option<(String, String)> {
+    if data.starts_with(&[0xff, 0xd8, 0xff]) {
+        return Some(("image/jpeg".to_owned(), "jpg".to_owned()));
+    }
+
+    if data.starts_with(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]) {
+        return Some(("image/png".to_owned(), "png".to_owned()));
+    }
+
+    if data.len() >= 12 && data.starts_with(b"RIFF") && &data[8..12] == b"WEBP" {
+        return Some(("image/webp".to_owned(), "webp".to_owned()));
+    }
+
+    match content_type?.to_ascii_lowercase().as_str() {
+        "image/jpeg" | "image/jpg" => Some(("image/jpeg".to_owned(), "jpg".to_owned())),
+        "image/png" => Some(("image/png".to_owned(), "png".to_owned())),
+        "image/webp" => Some(("image/webp".to_owned(), "webp".to_owned())),
+        _ => None,
+    }
 }
 
 fn run_cdparanoia_query() -> Result<CdDetectResult, String> {
@@ -597,6 +1187,7 @@ fn parse_cdparanoia_track_line(line: &str) -> Option<CdRipTrack> {
         status: Some("pending".to_owned()),
         output_filename: Some(cd_track_filename(number)),
         error: None,
+        warning: None,
     })
 }
 
@@ -629,7 +1220,11 @@ fn cdparanoia_query_error(lower_output: &str) -> Option<String> {
     Some("No audio CD tracks were found. Insert an audio CD and try again.".to_owned())
 }
 
-fn rip_cd_to_flac_blocking(output_folder: String, app: AppHandle) -> Result<CdRipResult, String> {
+fn rip_cd_to_flac_blocking(
+    output_folder: String,
+    metadata: Option<CdRipMetadata>,
+    app: AppHandle,
+) -> Result<CdRipResult, String> {
     ensure_command_available(
         "cdparanoia",
         "cdparanoia is not installed. Install cdparanoia and try again.",
@@ -656,10 +1251,12 @@ fn rip_cd_to_flac_blocking(output_folder: String, app: AppHandle) -> Result<CdRi
             .unwrap_or_else(|| "No audio CD was detected in the drive.".to_owned()));
     }
 
-    let rip_folder = output_root.join(format!("Cassette Rip {}", rip_folder_timestamp()));
+    let (rip_folder_name, folder_warning) = cd_rip_folder_name(metadata.as_ref());
+    let rip_folder = unique_child_folder(&output_root, &rip_folder_name);
     fs::create_dir_all(&rip_folder)
         .map_err(|error| format!("Could not create rip folder: {error}"))?;
     let rip_folder_string = rip_folder.to_string_lossy().to_string();
+    let (prepared_cover, cover_warning) = prepare_cd_cover(metadata.as_ref(), &rip_folder);
 
     emit_cd_rip_event(
         &app,
@@ -673,10 +1270,15 @@ fn rip_cd_to_flac_blocking(output_folder: String, app: AppHandle) -> Result<CdRi
         },
     );
 
+    let track_total = detection.tracks.len() as u32;
     let mut ripped_tracks = Vec::with_capacity(detection.tracks.len());
 
     for detected_track in detection.tracks {
-        let output_filename = cd_track_filename(detected_track.number);
+        let metadata_track = metadata
+            .as_ref()
+            .and_then(|metadata| metadata.tracks.iter().find(|track| track.number == detected_track.number));
+        let (output_filename, filename_warning) =
+            cd_track_filename_from_metadata(detected_track.number, metadata_track);
         let output_path = rip_folder.join(&output_filename);
         let wav_path = rip_folder.join(format!(
             "{:02} - Track {:02}.wav",
@@ -699,11 +1301,26 @@ fn rip_cd_to_flac_blocking(output_folder: String, app: AppHandle) -> Result<CdRi
         let mut track_result = detected_track.clone();
         track_result.status = Some("ripping".to_owned());
         track_result.output_filename = Some(output_filename.clone());
+        track_result.warning = merge_warnings(
+            merge_warnings(folder_warning.clone(), filename_warning),
+            cover_warning.clone(),
+        );
 
-        match rip_single_track_to_flac(detected_track.number, &wav_path, &output_path) {
-            Ok(()) => {
+        match rip_single_track_to_flac(
+            detected_track.number,
+            &wav_path,
+            &output_path,
+            metadata.as_ref(),
+            metadata_track,
+            track_total,
+            prepared_cover.as_ref(),
+        ) {
+            Ok(tag_warning) => {
                 track_result.status = Some("done".to_owned());
                 track_result.error = None;
+                if let Some(tag_warning) = tag_warning {
+                    track_result.warning = merge_warnings(track_result.warning, Some(tag_warning));
+                }
                 emit_cd_rip_event(
                     &app,
                     "cd-rip-track-finished",
@@ -758,7 +1375,11 @@ fn rip_single_track_to_flac(
     track_number: u32,
     wav_path: &Path,
     flac_path: &Path,
-) -> Result<(), String> {
+    metadata: Option<&CdRipMetadata>,
+    metadata_track: Option<&CdRipMetadataTrack>,
+    track_total: u32,
+    cover: Option<&PreparedCdCover>,
+) -> Result<Option<String>, String> {
     let rip_output = Command::new("cdparanoia")
         .arg(track_number.to_string())
         .arg(wav_path)
@@ -791,7 +1412,15 @@ fn rip_single_track_to_flac(
     fs::remove_file(wav_path)
         .map_err(|error| format!("Track {track_number:02} was encoded, but the temporary WAV could not be removed: {error}"))?;
 
-    Ok(())
+    let tag_warning = if let (Some(metadata), Some(metadata_track)) = (metadata, metadata_track) {
+        write_flac_tags(flac_path, metadata, metadata_track, track_total, cover).err()
+    } else {
+        None
+    };
+
+    Ok(tag_warning.map(|error| {
+        format!("Rip succeeded, but metadata tags could not be written: {error}")
+    }))
 }
 
 fn ensure_command_available(command: &str, missing_message: &str) -> Result<(), String> {
@@ -821,6 +1450,199 @@ fn short_command_error(output: &Output) -> String {
 
 fn cd_track_filename(track_number: u32) -> String {
     format!("{track_number:02} - Track {track_number:02}.flac")
+}
+
+fn cd_track_filename_from_metadata(
+    track_number: u32,
+    metadata_track: Option<&CdRipMetadataTrack>,
+) -> (String, Option<String>) {
+    let fallback = format!("Track {track_number:02}");
+    let title = metadata_track
+        .map(|track| track.title.as_str())
+        .filter(|title| !title.trim().is_empty())
+        .unwrap_or(&fallback);
+    let (safe_title, warning) = sanitize_path_component(title, &fallback);
+
+    (format!("{track_number:02} - {safe_title}.flac"), warning)
+}
+
+fn cd_rip_folder_name(metadata: Option<&CdRipMetadata>) -> (String, Option<String>) {
+    let Some(metadata) = metadata else {
+        return (format!("Cassette Rip {}", rip_folder_timestamp()), None);
+    };
+    let artist = metadata.album_artist.trim();
+    let album = metadata.album_title.trim();
+
+    if artist.is_empty() || album.is_empty() {
+        return (format!("Cassette Rip {}", rip_folder_timestamp()), None);
+    }
+
+    let year = metadata.year.trim();
+    let raw_name = if year.is_empty() {
+        format!("{artist} - {album}")
+    } else {
+        format!("{artist} - {album} ({year})")
+    };
+
+    sanitize_path_component(&raw_name, &format!("Cassette Rip {}", rip_folder_timestamp()))
+}
+
+fn unique_child_folder(parent: &Path, folder_name: &str) -> PathBuf {
+    let first = parent.join(folder_name);
+    if !first.exists() {
+        return first;
+    }
+
+    for index in 2..1000 {
+        let candidate = parent.join(format!("{folder_name} ({index})"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+
+    parent.join(format!("{folder_name} {}", rip_folder_timestamp()))
+}
+
+fn prepare_cd_cover(
+    metadata: Option<&CdRipMetadata>,
+    rip_folder: &Path,
+) -> (Option<PreparedCdCover>, Option<String>) {
+    let Some(cover) = metadata.and_then(|metadata| metadata.cover.as_ref()) else {
+        return (None, None);
+    };
+
+    let data = match fs::read(&cover.path) {
+        Ok(data) => data,
+        Err(error) => {
+            return (
+                None,
+                Some(format!("Cover image could not be read and was not embedded: {error}")),
+            );
+        }
+    };
+    let Some((mime_type, extension)) = cover_mime_and_extension(&data, Some(&cover.mime_type))
+    else {
+        return (
+            None,
+            Some("Cover image type is unsupported and was not embedded.".to_owned()),
+        );
+    };
+    let save_warning = fs::write(rip_folder.join(format!("cover.{extension}")), &data)
+        .err()
+        .map(|error| format!("Cover image could not be saved in the rip folder: {error}"));
+
+    (
+        Some(PreparedCdCover {
+            data,
+            mime_type,
+        }),
+        save_warning,
+    )
+}
+
+fn merge_warnings(left: Option<String>, right: Option<String>) -> Option<String> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(format!("{left} {right}")),
+        (Some(left), None) => Some(left),
+        (None, Some(right)) => Some(right),
+        (None, None) => None,
+    }
+}
+
+fn sanitize_path_component(raw: &str, fallback: &str) -> (String, Option<String>) {
+    let mut safe = String::with_capacity(raw.len());
+
+    for character in raw.chars() {
+        if character == '/' || character == '\\' {
+            safe.push('-');
+        } else if !character.is_control() {
+            safe.push(character);
+        }
+    }
+
+    while safe.contains("  ") {
+        safe = safe.replace("  ", " ");
+    }
+
+    let safe = safe
+        .trim()
+        .trim_matches(['.', ' '])
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    if safe.is_empty() {
+        return (
+            fallback.to_owned(),
+            Some(format!("Filename sanitization fallback used for {raw:?}.")),
+        );
+    }
+
+    let warning = (safe != raw.trim()).then(|| {
+        format!("Filename characters were sanitized for {raw:?}.")
+    });
+
+    (safe, warning)
+}
+
+fn write_flac_tags(
+    path: &Path,
+    metadata: &CdRipMetadata,
+    metadata_track: &CdRipMetadataTrack,
+    track_total: u32,
+    cover: Option<&PreparedCdCover>,
+) -> Result<(), String> {
+    let mut tagged_file = lofty::read_from_path(path)
+        .map_err(|error| format!("Could not read encoded FLAC for tagging: {error}"))?;
+    let mut tag = Tag::new(TagType::VorbisComments);
+
+    if !metadata_track.title.trim().is_empty() {
+        tag.set_title(metadata_track.title.trim().to_owned());
+    }
+
+    if !metadata_track.artist.trim().is_empty() {
+        tag.set_artist(metadata_track.artist.trim().to_owned());
+    } else if !metadata.album_artist.trim().is_empty() {
+        tag.set_artist(metadata.album_artist.trim().to_owned());
+    }
+
+    if !metadata.album_title.trim().is_empty() {
+        tag.set_album(metadata.album_title.trim().to_owned());
+    }
+
+    if !metadata.album_artist.trim().is_empty() {
+        tag.insert_text(ItemKey::AlbumArtist, metadata.album_artist.trim().to_owned());
+    }
+
+    if !metadata.year.trim().is_empty() {
+        tag.insert_text(ItemKey::RecordingDate, metadata.year.trim().to_owned());
+        tag.insert_text(ItemKey::Year, metadata.year.trim().to_owned());
+    }
+
+    tag.set_track(metadata_track.number);
+    tag.set_track_total(track_total);
+
+    if let Some(disc_number) = metadata_track.disc_number.or(metadata.disc_number) {
+        tag.set_disk(disc_number);
+    }
+
+    if !metadata.genre.trim().is_empty() {
+        tag.set_genre(metadata.genre.trim().to_owned());
+    }
+
+    if let Some(cover) = cover {
+        let picture = Picture::unchecked(cover.data.clone())
+            .pic_type(PictureType::CoverFront)
+            .mime_type(MimeType::from_str(&cover.mime_type))
+            .description("Cover")
+            .build();
+        tag.push_picture(picture);
+    }
+
+    tagged_file.insert_tag(tag);
+    tagged_file
+        .save_to_path(path, WriteOptions::default())
+        .map_err(|error| format!("Could not save FLAC tags: {error}"))
 }
 
 fn rip_folder_timestamp() -> String {
@@ -3100,6 +3922,9 @@ pub fn run() {
             read_track_lyrics,
             auto_find_track_lyrics,
             detect_audio_cd,
+            lookup_cd_metadata,
+            lookup_cd_cover,
+            inspect_cover_image,
             rip_cd_to_flac,
             play_track,
             pause_playback,

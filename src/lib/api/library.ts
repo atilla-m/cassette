@@ -1,6 +1,17 @@
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import type { AutoLyricsResult, CdDetectResult, CdRipResult, LibraryCache, Playlist, Track, TrackLyrics } from "$lib/types/library";
+import type {
+  AutoLyricsResult,
+  CdCoverLookupResult,
+  CdDetectResult,
+  CdMetadataLookupResult,
+  CdRipMetadata,
+  CdRipResult,
+  LibraryCache,
+  Playlist,
+  Track,
+  TrackLyrics,
+} from "$lib/types/library";
 
 export async function chooseLibraryFolder(): Promise<string | null> {
   const selected = await open({
@@ -19,6 +30,22 @@ export async function chooseOutputFolder(): Promise<string | null> {
     multiple: false,
     recursive: true,
     title: "Choose CD Rip Output Folder",
+  });
+
+  return typeof selected === "string" ? selected : null;
+}
+
+export async function chooseCoverImage(): Promise<string | null> {
+  const selected = await open({
+    directory: false,
+    multiple: false,
+    title: "Choose Cover Image",
+    filters: [
+      {
+        name: "Cover images",
+        extensions: ["jpg", "jpeg", "png", "webp"],
+      },
+    ],
   });
 
   return typeof selected === "string" ? selected : null;
@@ -88,6 +115,18 @@ export async function detectAudioCd(): Promise<CdDetectResult> {
   return invoke<CdDetectResult>("detect_audio_cd");
 }
 
-export async function ripCdToFlac(outputFolder: string): Promise<CdRipResult> {
-  return invoke<CdRipResult>("rip_cd_to_flac", { outputFolder });
+export async function lookupCdMetadata(): Promise<CdMetadataLookupResult> {
+  return invoke<CdMetadataLookupResult>("lookup_cd_metadata");
+}
+
+export async function lookupCdCover(releaseId: string): Promise<CdCoverLookupResult> {
+  return invoke<CdCoverLookupResult>("lookup_cd_cover", { releaseId });
+}
+
+export async function inspectCoverImage(path: string): Promise<CdCoverLookupResult> {
+  return invoke<CdCoverLookupResult>("inspect_cover_image", { path });
+}
+
+export async function ripCdToFlac(outputFolder: string, metadata: CdRipMetadata | null): Promise<CdRipResult> {
+  return invoke<CdRipResult>("rip_cd_to_flac", { outputFolder, metadata });
 }

@@ -2,18 +2,22 @@
   import {
     addTrackToPlaylist,
     autoFindTrackLyrics,
+    chooseCoverImage,
     chooseOutputFolder,
     chooseLibraryFolder,
     createPlaylist,
     deletePlaylist,
     detectAudioCd,
     getLibraryCache,
+    lookupCdMetadata,
+    lookupCdCover,
     movePlaylistTrack,
     recordTrackPlay,
     readTrackLyrics,
     removeTrackFromPlaylist,
     renamePlaylist,
     ripCdToFlac,
+    inspectCoverImage,
     scanLibrary,
     setAlbumGenres,
     setArtistGenres,
@@ -34,7 +38,24 @@
   import TrackList from "$lib/components/TrackList.svelte";
   import { buildAlbums, buildArtists, buildGenres } from "$lib/data/libraryViews";
   import { albums as mockAlbums, artists as mockArtists, genres as mockGenres, navItems } from "$lib/data/mockLibrary";
-  import type { Album, Artist, CdDetectResult, CdRipEvent, CdRipTrack, Genre, PlaybackStatus, Playlist, Track, TrackLyrics } from "$lib/types/library";
+  import type {
+    Album,
+    Artist,
+    CdCoverLookupResult,
+    CdDetectResult,
+    CdMetadataLookupResult,
+    CdMetadataRelease,
+    CdRipEvent,
+    CdRipCover,
+    CdRipMetadata,
+    CdRipMetadataTrack,
+    CdRipTrack,
+    Genre,
+    PlaybackStatus,
+    Playlist,
+    Track,
+    TrackLyrics,
+  } from "$lib/types/library";
   import { localImageSource } from "$lib/utils/localImage";
   import { listen } from "@tauri-apps/api/event";
   import { onMount } from "svelte";
@@ -160,6 +181,17 @@
   let cdRawOutput = $state("");
   let cdOutputFolder = $state<string | null>(null);
   let lastRippedFolder = $state<string | null>(null);
+  let isLookingUpCdMetadata = $state(false);
+  let cdMetadataError = $state<string | null>(null);
+  let cdMetadataMessage = $state<string | null>(null);
+  let cdMetadataResults = $state<CdMetadataRelease[]>([]);
+  let selectedCdReleaseId = $state<string | null>(null);
+  let cdRipMetadata = $state<CdRipMetadata | null>(null);
+  let cdRipMetadataSnapshot = $state<CdRipMetadata | null>(null);
+  let cdDiscId = $state<string | null>(null);
+  let isLookingUpCdCover = $state(false);
+  let cdCoverError = $state<string | null>(null);
+  let cdCoverMessage = $state<string | null>(null);
   let playbackError = $state<string | null>(null);
   let genreEditError = $state<string | null>(null);
   let genreEditMessage = $state<string | null>(null);
@@ -274,6 +306,9 @@
   let selectedArtist = $derived(displayArtists.find((artist) => artist.name === selectedArtistName) ?? null);
   let selectedGenre = $derived(displayGenres.find((genre) => genre.name === selectedGenreName) ?? null);
   let selectedPlaylist = $derived(playlists.find((playlist) => playlist.id === selectedPlaylistId) ?? null);
+  let selectedCdRelease = $derived(cdMetadataResults.find((release) => release.id === selectedCdReleaseId) ?? null);
+  let selectedCdCover = $derived(activeCdRipMetadata()?.cover ?? null);
+  let selectedCdCoverSrc = $derived(localImageSource(selectedCdCover?.path));
   let selectedPlaylistTracks = $derived(selectedPlaylist ? tracksForPlaylist(selectedPlaylist) : []);
   let filteredLikedTracks = $derived(searchFilterTracks(favoriteTracks, normalizedSearchQuery));
   let selectedPlaylistSearchTracks = $derived(
@@ -680,6 +715,8 @@
     isDetectingCd = true;
     cdRipError = null;
     cdRipMessage = null;
+    resetCdMetadataLookup();
+    cdRipMetadataSnapshot = null;
     lastRippedFolder = null;
 
     try {
@@ -707,6 +744,143 @@
     }));
     cdRawOutput = result.rawOutput;
     cdRipError = result.error;
+    cdRipMetadata = defaultCdRipMetadata(cdTracks, cdRipMetadata);
+  }
+
+  function resetCdMetadataLookup() {
+    cdMetadataError = null;
+    cdMetadataMessage = null;
+    cdMetadataResults = [];
+    selectedCdReleaseId = null;
+    cdDiscId = null;
+    cdCoverError = null;
+    cdCoverMessage = null;
+    isLookingUpCdCover = false;
+  }
+
+  async function handleLookupCdMetadata() {
+    if (isLookingUpCdMetadata || isRippingCd) {
+      return;
+    }
+
+    if (cdTracks.length === 0 || !audioCdFound) {
+      await handleDetectCd();
+      if (cdTracks.length === 0 || !audioCdFound) {
+        cdMetadataError = cdRipError ?? "Detect an audio CD before looking up metadata.";
+        return;
+      }
+    }
+
+    isLookingUpCdMetadata = true;
+    cdMetadataError = null;
+    cdMetadataMessage = "Looking up metadata...";
+    cdMetadataResults = [];
+    selectedCdReleaseId = null;
+
+    try {
+      applyCdMetadataLookup(await lookupCdMetadata());
+    } catch (error) {
+      cdMetadataMessage = null;
+      cdMetadataError = error instanceof Error ? error.message : String(error);
+    } finally {
+      isLookingUpCdMetadata = false;
+    }
+  }
+
+  function applyCdMetadataLookup(result: CdMetadataLookupResult) {
+    cdDiscId = result.discId;
+    cdMetadataResults = result.releases;
+    cdMetadataError = result.error;
+
+    if (result.releases.length === 0) {
+      cdMetadataError = null;
+      cdMetadataMessage = "No metadata found for this Disc ID.";
+      cdRipMetadata = cdRipMetadata ?? defaultCdRipMetadata(cdTracks, null);
+      return;
+    }
+
+    cdMetadataMessage = result.releases.length === 1
+      ? "One MusicBrainz release found."
+      : `${result.releases.length} MusicBrainz releases found. Choose the matching release.`;
+    selectCdMetadataRelease(result.releases[0]);
+  }
+
+  function selectCdMetadataRelease(release: CdMetadataRelease) {
+    if (isRippingCd) {
+      return;
+    }
+
+    const existingManualCover = cdRipMetadata?.cover?.source === "manual" ? cdRipMetadata.cover : null;
+    selectedCdReleaseId = release.id;
+    cdRipMetadata = {
+      ...metadataFromRelease(release, cdTracks),
+      cover: existingManualCover,
+    };
+    cdMetadataError = null;
+    cdCoverError = null;
+    cdCoverMessage = existingManualCover ? "Manual cover selected" : null;
+
+    if (!existingManualCover) {
+      void handleLookupCdCover(release.id);
+    }
+  }
+
+  async function handleLookupCdCover(releaseId: string) {
+    if (isLookingUpCdCover || isRippingCd) {
+      return;
+    }
+
+    isLookingUpCdCover = true;
+    cdCoverError = null;
+    cdCoverMessage = "Loading cover...";
+
+    try {
+      applyCdCoverLookup(await lookupCdCover(releaseId), "cover-art-archive");
+    } catch (error) {
+      cdCoverMessage = null;
+      cdCoverError = error instanceof Error ? error.message : String(error);
+    } finally {
+      isLookingUpCdCover = false;
+    }
+  }
+
+  async function handleChooseCoverImage() {
+    if (isRippingCd) {
+      return;
+    }
+
+    const path = await chooseCoverImage();
+    if (!path) {
+      return;
+    }
+
+    cdCoverError = null;
+    cdCoverMessage = "Loading cover...";
+
+    try {
+      applyCdCoverLookup(await inspectCoverImage(path), "manual");
+    } catch (error) {
+      cdCoverMessage = null;
+      cdCoverError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  function applyCdCoverLookup(result: CdCoverLookupResult, source: CdRipCover["source"]) {
+    const metadata = cdRipMetadata ?? defaultCdRipMetadata(cdTracks, null);
+
+    if (!result.found || !result.cover) {
+      cdRipMetadata = { ...metadata, cover: source === "manual" ? metadata.cover : null };
+      cdCoverError = null;
+      cdCoverMessage = result.message ?? "No cover art found";
+      return;
+    }
+
+    cdRipMetadata = {
+      ...metadata,
+      cover: result.cover,
+    };
+    cdCoverError = null;
+    cdCoverMessage = source === "manual" ? "Manual cover selected" : "Cover found";
   }
 
   async function handleChooseCdOutputFolder() {
@@ -740,13 +914,15 @@
     }
 
     isRippingCd = true;
+    const ripMetadataSnapshot = cloneCdRipMetadata(metadataForRip());
+    cdRipMetadataSnapshot = ripMetadataSnapshot;
     cdRipError = null;
     cdRipMessage = "Starting CD rip...";
     lastRippedFolder = null;
     cdTracks = cdTracks.map((track) => ({ ...track, status: "pending", error: null }));
 
     try {
-      const result = await ripCdToFlac(cdOutputFolder);
+      const result = await ripCdToFlac(cdOutputFolder, ripMetadataSnapshot);
       cdTracks = result.tracks;
       lastRippedFolder = result.outputFolder;
       cdRipMessage = result.tracks.some((track) => track.status === "error")
@@ -811,6 +987,194 @@
 
   function cdTrackOutputFilename(trackNumber: number) {
     return `${String(trackNumber).padStart(2, "0")} - Track ${String(trackNumber).padStart(2, "0")}.flac`;
+  }
+
+  function inputValue(event: Event) {
+    return event.currentTarget instanceof HTMLInputElement ? event.currentTarget.value : "";
+  }
+
+  function defaultCdRipMetadata(cdTracks: CdRipTrack[], existing: CdRipMetadata | null): CdRipMetadata {
+    return {
+      albumArtist: existing?.albumArtist ?? "",
+      albumTitle: existing?.albumTitle ?? "",
+      year: existing?.year ?? "",
+      genre: existing?.genre ?? "",
+      discNumber: existing?.discNumber ?? null,
+      cover: existing?.cover ?? null,
+      tracks: cdTracks.map((track) => {
+        const existingTrack = existing?.tracks.find((candidate) => candidate.number === track.number);
+
+        return {
+          number: track.number,
+          title: existingTrack?.title ?? `Track ${String(track.number).padStart(2, "0")}`,
+          artist: existingTrack?.artist ?? "",
+          discNumber: existingTrack?.discNumber ?? existing?.discNumber ?? null,
+        };
+      }),
+    };
+  }
+
+  function metadataFromRelease(release: CdMetadataRelease, cdTracks: CdRipTrack[]): CdRipMetadata {
+    return {
+      albumArtist: release.artist,
+      albumTitle: release.title,
+      year: release.year ?? release.date ?? "",
+      genre: cdRipMetadata?.genre ?? "",
+      discNumber: release.discNumber,
+      cover: cdRipMetadata?.cover?.source === "manual" ? cdRipMetadata.cover : null,
+      tracks: cdTracks.map((track) => {
+        const releaseTrack = release.tracks.find((candidate) => candidate.number === track.number);
+
+        return {
+          number: track.number,
+          title: releaseTrack?.title ?? `Track ${String(track.number).padStart(2, "0")}`,
+          artist: releaseTrack?.artist || release.artist,
+          discNumber: releaseTrack?.discNumber ?? release.discNumber,
+        };
+      }),
+    };
+  }
+
+  function metadataForRip(): CdRipMetadata | null {
+    if (!cdRipMetadata || !metadataHasUserValue(cdRipMetadata)) {
+      return null;
+    }
+
+    return cdRipMetadata;
+  }
+
+  function cloneCdRipMetadata(metadata: CdRipMetadata | null): CdRipMetadata | null {
+    if (!metadata) {
+      return null;
+    }
+
+    return {
+      albumArtist: metadata.albumArtist,
+      albumTitle: metadata.albumTitle,
+      year: metadata.year,
+      genre: metadata.genre,
+      discNumber: metadata.discNumber,
+      cover: metadata.cover ? { ...metadata.cover } : null,
+      tracks: metadata.tracks.map((track) => ({ ...track })),
+    };
+  }
+
+  function metadataHasUserValue(metadata: CdRipMetadata) {
+    return Boolean(
+      metadata.albumArtist.trim()
+      || metadata.albumTitle.trim()
+      || metadata.year.trim()
+      || metadata.genre.trim()
+      || metadata.discNumber
+      || metadata.tracks.some((track) => (
+        track.artist.trim()
+        || track.discNumber
+        || track.title.trim() !== `Track ${String(track.number).padStart(2, "0")}`
+      )),
+    );
+  }
+
+  function updateCdAlbumMetadata(key: "albumArtist" | "albumTitle" | "year" | "genre", value: string) {
+    if (isRippingCd) {
+      return;
+    }
+
+    cdRipMetadata = {
+      ...(cdRipMetadata ?? defaultCdRipMetadata(cdTracks, null)),
+      [key]: value,
+    };
+  }
+
+  function updateCdDiscNumber(value: string) {
+    if (isRippingCd) {
+      return;
+    }
+
+    const parsed = Number.parseInt(value, 10);
+    const discNumber = Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+    const metadata = cdRipMetadata ?? defaultCdRipMetadata(cdTracks, null);
+
+    cdRipMetadata = {
+      ...metadata,
+      discNumber,
+      tracks: metadata.tracks.map((track) => ({ ...track, discNumber: track.discNumber ?? discNumber })),
+    };
+  }
+
+  function updateCdTrackMetadata(trackNumber: number, key: "title" | "artist", value: string) {
+    if (isRippingCd) {
+      return;
+    }
+
+    const metadata = cdRipMetadata ?? defaultCdRipMetadata(cdTracks, null);
+
+    cdRipMetadata = {
+      ...metadata,
+      tracks: metadata.tracks.map((track) => (
+        track.number === trackNumber ? { ...track, [key]: value } : track
+      )),
+    };
+  }
+
+  function cdMetadataTrack(trackNumber: number): CdRipMetadataTrack {
+    const metadata = activeCdRipMetadata();
+
+    return metadata?.tracks.find((track) => track.number === trackNumber) ?? {
+      number: trackNumber,
+      title: `Track ${String(trackNumber).padStart(2, "0")}`,
+      artist: "",
+      discNumber: metadata?.discNumber ?? null,
+    };
+  }
+
+  function activeCdRipMetadata() {
+    return isRippingCd ? (cdRipMetadataSnapshot ?? cdRipMetadata) : cdRipMetadata;
+  }
+
+  function cdTrackOutputFilenamePreview(trackNumber: number) {
+    const metadataTrack = cdMetadataTrack(trackNumber);
+    const title = metadataTrack.title.trim() || `Track ${String(trackNumber).padStart(2, "0")}`;
+
+    return `${String(trackNumber).padStart(2, "0")} - ${sanitizeFilenamePreview(title, `Track ${String(trackNumber).padStart(2, "0")}`)}.flac`;
+  }
+
+  function cdTrackOutputFilenameDisplay(track: CdRipTrack) {
+    if (track.status && track.status !== "pending" && track.outputFilename) {
+      return track.outputFilename;
+    }
+
+    return cdTrackOutputFilenamePreview(track.number);
+  }
+
+  function sanitizeFilenamePreview(value: string, fallback: string) {
+    let safe = value
+      .replace(/[\\/]/g, "-")
+      .replace(/[\u0000-\u001f\u007f]/g, "")
+      .trim();
+
+    while (safe.includes("  ")) {
+      safe = safe.replaceAll("  ", " ");
+    }
+
+    safe = safe
+      .replace(/^[. ]+|[. ]+$/g, "")
+      .split(/\s+/)
+      .filter(Boolean)
+      .join(" ");
+
+    return safe || fallback;
+  }
+
+  function releaseDetail(release: CdMetadataRelease) {
+    return [
+      release.artist,
+      release.year ?? release.date,
+      release.country,
+      release.format,
+      `${release.trackCount} ${release.trackCount === 1 ? "track" : "tracks"}`,
+      release.label,
+      release.catalogNumber,
+    ].filter(Boolean).join(" · ");
   }
 
   async function handleTrackSelect(track: Track, queue: Track[] = tracks) {
@@ -4626,6 +4990,140 @@
             {/if}
           </section>
 
+          <section class="cd-metadata-section" aria-labelledby="cd-metadata-title">
+            <div class="settings-section-header">
+              <div>
+                <p class="eyebrow">MusicBrainz</p>
+                <h4 id="cd-metadata-title">Metadata</h4>
+              </div>
+              <span class="settings-pill">{cdDiscId ? `Disc ID ${cdDiscId}` : "Manual mode"}</span>
+            </div>
+
+            <div class="cd-rip-actions">
+              <button type="button" disabled={isLookingUpCdMetadata || isDetectingCd || isRippingCd} onclick={() => void handleLookupCdMetadata()}>
+                {isLookingUpCdMetadata ? "Looking up metadata..." : "Lookup Metadata"}
+              </button>
+            </div>
+
+            {#if cdMetadataError}
+              <div class="scan-error" role="alert">{cdMetadataError}</div>
+            {:else if cdMetadataMessage}
+              <div class="scan-error status-message" role="status">{cdMetadataMessage}</div>
+            {/if}
+
+            {#if cdMetadataResults.length > 1}
+              <div class="cd-release-list" aria-label="MusicBrainz release results">
+                {#each cdMetadataResults as release}
+                  <button
+                    class:active={release.id === selectedCdReleaseId}
+                    type="button"
+                    disabled={isRippingCd}
+                    onclick={() => selectCdMetadataRelease(release)}
+                  >
+                    <strong>{release.title}</strong>
+                    <small>{releaseDetail(release)}</small>
+                  </button>
+                {/each}
+              </div>
+            {:else if cdMetadataResults.length === 1 && selectedCdRelease}
+              <div class="cd-selected-release">
+                <span>Selected release</span>
+                <strong>{selectedCdRelease.title}</strong>
+                <small>{releaseDetail(selectedCdRelease)}</small>
+              </div>
+            {:else if cdTracks.length > 0 && !isLookingUpCdMetadata && cdMetadataMessage?.toLowerCase().includes("no metadata")}
+              <div class="group-empty compact">
+                <h3>No metadata found</h3>
+                <p>You can still type album and track metadata manually before ripping.</p>
+              </div>
+            {/if}
+
+            {#if cdTracks.length > 0 && cdRipMetadata}
+              <div class="cd-metadata-form">
+                <label>
+                  <span>Album artist</span>
+                  <input
+                    type="text"
+                    disabled={isRippingCd}
+                    value={cdRipMetadata.albumArtist}
+                    oninput={(event) => updateCdAlbumMetadata("albumArtist", inputValue(event))}
+                  />
+                </label>
+                <label>
+                  <span>Album title</span>
+                  <input
+                    type="text"
+                    disabled={isRippingCd}
+                    value={cdRipMetadata.albumTitle}
+                    oninput={(event) => updateCdAlbumMetadata("albumTitle", inputValue(event))}
+                  />
+                </label>
+                <label>
+                  <span>Year</span>
+                  <input
+                    type="text"
+                    inputmode="numeric"
+                    disabled={isRippingCd}
+                    value={cdRipMetadata.year}
+                    oninput={(event) => updateCdAlbumMetadata("year", inputValue(event))}
+                  />
+                </label>
+                <label>
+                  <span>Disc number</span>
+                  <input
+                    type="number"
+                    min="1"
+                    disabled={isRippingCd}
+                    value={cdRipMetadata.discNumber ?? ""}
+                    oninput={(event) => updateCdDiscNumber(inputValue(event))}
+                  />
+                </label>
+                <label>
+                  <span>Genre</span>
+                  <input
+                    type="text"
+                    disabled={isRippingCd}
+                    value={cdRipMetadata.genre}
+                    oninput={(event) => updateCdAlbumMetadata("genre", inputValue(event))}
+                  />
+                </label>
+              </div>
+
+              <div class="cd-cover-panel">
+                <div class="cd-cover-preview">
+                  {#if selectedCdCoverSrc}
+                    <img src={selectedCdCoverSrc} alt="Selected album cover" onerror={hideBrokenImage} onload={showLoadedImage} />
+                  {:else}
+                    <span>No cover</span>
+                  {/if}
+                </div>
+                <div class="cd-cover-copy">
+                  <span>Album cover</span>
+                  <strong>
+                    {#if isLookingUpCdCover}
+                      Loading cover...
+                    {:else if selectedCdCover?.source === "cover-art-archive"}
+                      Cover found
+                    {:else if selectedCdCover?.source === "manual"}
+                      Manual cover selected
+                    {:else if cdCoverMessage}
+                      {cdCoverMessage}
+                    {:else}
+                      No cover art found
+                    {/if}
+                  </strong>
+                  <small>{selectedCdCover?.source === "cover-art-archive" ? "Cover Art Archive" : selectedCdCover?.source === "manual" ? "Local image" : "Optional for this rip"}</small>
+                  {#if cdCoverError}
+                    <small class="error">{cdCoverError}</small>
+                  {/if}
+                  <button type="button" disabled={isRippingCd} onclick={() => void handleChooseCoverImage()}>
+                    Choose Cover Image
+                  </button>
+                </div>
+              </div>
+            {/if}
+          </section>
+
           <section class="cd-track-section" aria-labelledby="cd-track-list-title">
             <div class="settings-section-header">
               <div>
@@ -4644,6 +5142,8 @@
               <div class="cd-track-table" role="table" aria-label="CD tracks">
                 <div class="cd-track-row cd-track-head" role="row">
                   <span role="columnheader">Track</span>
+                  <span role="columnheader">Title</span>
+                  <span role="columnheader">Artist</span>
                   <span role="columnheader">Duration</span>
                   <span role="columnheader">Status</span>
                   <span role="columnheader">Output filename</span>
@@ -4651,14 +5151,34 @@
                 {#each cdTracks as track}
                   <div class:active={track.status === "ripping"} class:error={track.status === "error"} class="cd-track-row" role="row">
                     <span role="cell">{String(track.number).padStart(2, "0")}</span>
+                    <span role="cell">
+                      <input
+                        type="text"
+                        aria-label={`Track ${track.number} title`}
+                        disabled={isRippingCd}
+                        value={cdMetadataTrack(track.number).title}
+                        oninput={(event) => updateCdTrackMetadata(track.number, "title", inputValue(event))}
+                      />
+                    </span>
+                    <span role="cell">
+                      <input
+                        type="text"
+                        aria-label={`Track ${track.number} artist`}
+                        disabled={isRippingCd}
+                        value={cdMetadataTrack(track.number).artist}
+                        oninput={(event) => updateCdTrackMetadata(track.number, "artist", inputValue(event))}
+                      />
+                    </span>
                     <span role="cell">{track.duration ?? "Unknown"}</span>
                     <span role="cell">
                       <strong>{track.status ?? "pending"}</strong>
                       {#if track.error}
                         <small>{track.error}</small>
+                      {:else if track.warning}
+                        <small>{track.warning}</small>
                       {/if}
                     </span>
-                    <span role="cell">{track.outputFilename ?? cdTrackOutputFilename(track.number)}</span>
+                    <span role="cell">{cdTrackOutputFilenameDisplay(track)}</span>
                   </div>
                 {/each}
               </div>
@@ -7043,6 +7563,7 @@
   }
 
   .cd-status-card,
+  .cd-metadata-section,
   .cd-track-section,
   .cd-debug-output {
     display: grid;
@@ -7329,7 +7850,7 @@
 
   .cd-track-row {
     display: grid;
-    grid-template-columns: 72px minmax(92px, 0.7fr) minmax(120px, 0.8fr) minmax(0, 1.5fr);
+    grid-template-columns: 60px minmax(150px, 1.25fr) minmax(130px, 1fr) 92px minmax(112px, 0.7fr) minmax(0, 1.4fr);
     min-height: 48px;
     align-items: center;
     gap: 12px;
@@ -7369,6 +7890,36 @@
     white-space: nowrap;
   }
 
+  .cd-track-row input,
+  .cd-metadata-form input {
+    width: 100%;
+    min-width: 0;
+    min-height: 34px;
+    border: 1px solid #303844;
+    border-radius: 8px;
+    background: #0f1318;
+    color: #f4f7fb;
+    font: inherit;
+    font-size: 0.86rem;
+    font-weight: 650;
+    outline: none;
+    padding: 0 10px;
+  }
+
+  .cd-track-row input:focus,
+  .cd-metadata-form input:focus {
+    border-color: #2f8f83;
+    box-shadow: 0 0 0 2px rgba(47, 143, 131, 0.18);
+  }
+
+  .cd-track-row input:disabled,
+  .cd-metadata-form input:disabled,
+  .cd-release-list button:disabled {
+    border-color: #252c35;
+    background: #11161d;
+    color: #8b95a3;
+  }
+
   .cd-track-row strong {
     color: inherit;
     text-transform: capitalize;
@@ -7402,6 +7953,166 @@
     line-height: 1.45;
     padding: 12px;
     white-space: pre-wrap;
+  }
+
+  .cd-release-list {
+    display: grid;
+    gap: 8px;
+  }
+
+  .cd-release-list button,
+  .cd-selected-release {
+    display: grid;
+    min-width: 0;
+    gap: 5px;
+    border: 1px solid #2a313c;
+    border-radius: 8px;
+    background: #12161c;
+    color: inherit;
+    cursor: default;
+    font: inherit;
+    padding: 12px;
+    text-align: left;
+  }
+
+  .cd-release-list button:hover,
+  .cd-release-list button:focus-visible,
+  .cd-release-list button.active {
+    border-color: #35544f;
+    background: #17332f;
+    outline: none;
+  }
+
+  .cd-release-list strong,
+  .cd-selected-release strong {
+    overflow: hidden;
+    color: #f4f7fb;
+    font-size: 0.95rem;
+    font-weight: 850;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .cd-release-list small,
+  .cd-selected-release small {
+    overflow: hidden;
+    color: #9aa4b1;
+    font-size: 0.8rem;
+    font-weight: 700;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .cd-selected-release span,
+  .cd-metadata-form span {
+    color: #8f9aa8;
+    font-size: 0.76rem;
+    font-weight: 850;
+    text-transform: uppercase;
+  }
+
+  .cd-metadata-form {
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 10px;
+  }
+
+  .cd-metadata-form label {
+    display: grid;
+    gap: 6px;
+    min-width: 0;
+  }
+
+  .cd-cover-panel {
+    display: grid;
+    grid-template-columns: 120px minmax(0, 1fr);
+    gap: 14px;
+    align-items: center;
+    border: 1px solid #2a313c;
+    border-radius: 8px;
+    background: #12161c;
+    padding: 12px;
+  }
+
+  .cd-cover-preview {
+    display: grid;
+    aspect-ratio: 1;
+    overflow: hidden;
+    place-items: center;
+    border: 1px solid #303844;
+    border-radius: 8px;
+    background: #0f1318;
+    color: #7f8996;
+    font-size: 0.78rem;
+    font-weight: 850;
+  }
+
+  .cd-cover-preview img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+
+  .cd-cover-copy {
+    display: grid;
+    min-width: 0;
+    gap: 6px;
+  }
+
+  .cd-cover-copy span {
+    color: #8f9aa8;
+    font-size: 0.76rem;
+    font-weight: 850;
+    text-transform: uppercase;
+  }
+
+  .cd-cover-copy strong {
+    overflow: hidden;
+    color: #f4f7fb;
+    font-size: 1rem;
+    font-weight: 850;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .cd-cover-copy small {
+    overflow: hidden;
+    color: #9aa4b1;
+    font-size: 0.82rem;
+    font-weight: 700;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .cd-cover-copy small.error {
+    color: #ffcbc8;
+  }
+
+  .cd-cover-copy button {
+    justify-self: start;
+    min-height: 36px;
+    border: 1px solid #303844;
+    border-radius: 8px;
+    background: #161a20;
+    color: #d5dce5;
+    cursor: default;
+    font: inherit;
+    font-size: 0.84rem;
+    font-weight: 850;
+    padding: 0 12px;
+  }
+
+  .cd-cover-copy button:hover:not(:disabled),
+  .cd-cover-copy button:focus-visible:not(:disabled) {
+    border-color: #35544f;
+    background: #1b2027;
+    outline: none;
+  }
+
+  .cd-cover-copy button:disabled {
+    border-color: #252c35;
+    background: #11161d;
+    color: #8b95a3;
   }
 
   .mix-tool-mark {
@@ -7934,10 +8645,15 @@
 
     .settings-stat-grid,
     .cd-status-grid,
+    .cd-metadata-form,
     .settings-status-list,
     .settings-tool-grid,
     .stats-overview-grid {
       grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .cd-cover-panel {
+      grid-template-columns: 96px minmax(0, 1fr);
     }
   }
 
@@ -8032,7 +8748,7 @@
     }
 
     .cd-track-row {
-      grid-template-columns: 56px minmax(80px, 0.7fr) minmax(105px, 0.8fr) minmax(0, 1.2fr);
+      grid-template-columns: 52px minmax(130px, 1.1fr) minmax(110px, 0.9fr) 80px minmax(100px, 0.8fr) minmax(0, 1fr);
     }
 
     .stats-recent-card {
@@ -8070,6 +8786,7 @@
     .diagnostic-album-list,
     .settings-stat-grid,
     .cd-status-grid,
+    .cd-metadata-form,
     .settings-status-list,
     .settings-tool-grid,
     .stats-overview-grid {
@@ -8086,8 +8803,16 @@
       align-items: start;
     }
 
-    .cd-track-row span:nth-child(4) {
+    .cd-track-row span:nth-child(n + 2) {
       grid-column: 2;
+    }
+
+    .cd-cover-panel {
+      grid-template-columns: 1fr;
+    }
+
+    .cd-cover-preview {
+      width: min(100%, 180px);
     }
 
     .settings-stat-tile.wide {
