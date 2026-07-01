@@ -90,3 +90,35 @@ export type AutoLyricsResult = {
   status: "existing" | "synced" | "plain" | "not_found";
   lyrics: TrackLyrics | null;
 };
+
+export type CdRipTrackStatus = "pending" | "ripping" | "done" | "error";
+
+export type CdRipTrack = {
+  number: number;
+  duration: string | null;
+  durationSeconds: number | null;
+  status?: CdRipTrackStatus;
+  outputFilename?: string;
+  error?: string | null;
+};
+
+export type CdDetectResult = {
+  driveFound: boolean;
+  discFound: boolean;
+  tracks: CdRipTrack[];
+  rawOutput: string;
+  error: string | null;
+};
+
+export type CdRipResult = {
+  outputFolder: string;
+  tracks: CdRipTrack[];
+};
+
+export type CdRipEvent = {
+  outputFolder?: string;
+  trackNumber?: number;
+  outputFilename?: string;
+  outputPath?: string;
+  message?: string;
+};

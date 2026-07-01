@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import type { AutoLyricsResult, LibraryCache, Playlist, Track, TrackLyrics } from "$lib/types/library";
+import type { AutoLyricsResult, CdDetectResult, CdRipResult, LibraryCache, Playlist, Track, TrackLyrics } from "$lib/types/library";
 
 export async function chooseLibraryFolder(): Promise<string | null> {
   const selected = await open({
@@ -8,6 +8,17 @@ export async function chooseLibraryFolder(): Promise<string | null> {
     multiple: false,
     recursive: true,
     title: "Choose Music Folder",
+  });
+
+  return typeof selected === "string" ? selected : null;
+}
+
+export async function chooseOutputFolder(): Promise<string | null> {
+  const selected = await open({
+    directory: true,
+    multiple: false,
+    recursive: true,
+    title: "Choose CD Rip Output Folder",
   });
 
   return typeof selected === "string" ? selected : null;
@@ -71,4 +82,12 @@ export async function readTrackLyrics(trackPath: string): Promise<TrackLyrics | 
 
 export async function autoFindTrackLyrics(trackPath: string, replaceCached = false): Promise<AutoLyricsResult> {
   return invoke<AutoLyricsResult>("auto_find_track_lyrics", { trackPath, replaceCached });
+}
+
+export async function detectAudioCd(): Promise<CdDetectResult> {
+  return invoke<CdDetectResult>("detect_audio_cd");
+}
+
+export async function ripCdToFlac(outputFolder: string): Promise<CdRipResult> {
+  return invoke<CdRipResult>("rip_cd_to_flac", { outputFolder });
 }

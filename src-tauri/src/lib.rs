@@ -10,9 +10,10 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 mod mpris;
 
@@ -117,6 +118,44 @@ struct TrackLyrics {
 struct AutoLyricsResult {
     status: String,
     lyrics: Option<TrackLyrics>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CdRipTrack {
+    number: u32,
+    duration: Option<String>,
+    duration_seconds: Option<u32>,
+    status: Option<String>,
+    output_filename: Option<String>,
+    error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CdDetectResult {
+    drive_found: bool,
+    disc_found: bool,
+    tracks: Vec<CdRipTrack>,
+    raw_output: String,
+    error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CdRipResult {
+    output_folder: String,
+    tracks: Vec<CdRipTrack>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CdRipEvent {
+    output_folder: Option<String>,
+    track_number: Option<u32>,
+    output_filename: Option<String>,
+    output_path: Option<String>,
+    message: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -462,6 +501,357 @@ async fn auto_find_track_lyrics(
         status: status.to_owned(),
         lyrics: Some(saved_lyrics),
     })
+}
+
+#[tauri::command]
+async fn detect_audio_cd() -> Result<CdDetectResult, String> {
+    tauri::async_runtime::spawn_blocking(run_cdparanoia_query)
+        .await
+        .map_err(|error| format!("Could not detect audio CD: {error}"))?
+}
+
+#[tauri::command]
+async fn rip_cd_to_flac(output_folder: String, app: AppHandle) -> Result<CdRipResult, String> {
+    tauri::async_runtime::spawn_blocking(move || rip_cd_to_flac_blocking(output_folder, app))
+        .await
+        .map_err(|error| format!("Could not rip audio CD: {error}"))?
+}
+
+fn run_cdparanoia_query() -> Result<CdDetectResult, String> {
+    let output = match Command::new("cdparanoia").arg("-Q").output() {
+        Ok(output) => output,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(CdDetectResult {
+                drive_found: false,
+                disc_found: false,
+                tracks: Vec::new(),
+                raw_output: String::new(),
+                error: Some(
+                    "cdparanoia is not installed. Install cdparanoia and try again.".to_owned(),
+                ),
+            });
+        }
+        Err(error) => {
+            return Ok(CdDetectResult {
+                drive_found: false,
+                disc_found: false,
+                tracks: Vec::new(),
+                raw_output: String::new(),
+                error: Some(format!("Could not run cdparanoia: {error}")),
+            });
+        }
+    };
+
+    Ok(parse_cdparanoia_query_output(output))
+}
+
+fn parse_cdparanoia_query_output(output: Output) -> CdDetectResult {
+    let raw_output = command_output_text(&output);
+    let tracks = parse_cdparanoia_tracks(&raw_output);
+    let lower_output = raw_output.to_lowercase();
+    let drive_found = !lower_output.contains("unable to open cdrom")
+        && !lower_output.contains("could not open")
+        && !lower_output.contains("no cdrom")
+        && !lower_output.contains("no such file or directory");
+    let disc_found = !tracks.is_empty();
+    let error = if disc_found {
+        None
+    } else {
+        cdparanoia_query_error(&lower_output)
+    };
+
+    CdDetectResult {
+        drive_found,
+        disc_found,
+        tracks,
+        raw_output,
+        error,
+    }
+}
+
+fn parse_cdparanoia_tracks(raw_output: &str) -> Vec<CdRipTrack> {
+    raw_output
+        .lines()
+        .filter_map(parse_cdparanoia_track_line)
+        .collect()
+}
+
+fn parse_cdparanoia_track_line(line: &str) -> Option<CdRipTrack> {
+    let trimmed = line.trim_start();
+    let first_token = trimmed.split_whitespace().next()?;
+    let number = first_token.strip_suffix('.')?.parse::<u32>().ok()?;
+    let duration = trimmed
+        .find('[')
+        .and_then(|start| {
+            trimmed[start + 1..]
+                .find(']')
+                .map(|end| trimmed[start + 1..start + 1 + end].to_owned())
+        })
+        .filter(|value| !value.trim().is_empty());
+    let duration_seconds = duration.as_deref().and_then(cd_duration_to_seconds);
+
+    Some(CdRipTrack {
+        number,
+        duration,
+        duration_seconds,
+        status: Some("pending".to_owned()),
+        output_filename: Some(cd_track_filename(number)),
+        error: None,
+    })
+}
+
+fn cd_duration_to_seconds(value: &str) -> Option<u32> {
+    let mut parts = value.split([':', '.']);
+    let minutes = parts.next()?.parse::<u32>().ok()?;
+    let seconds = parts.next()?.parse::<u32>().ok()?;
+
+    Some(minutes.saturating_mul(60).saturating_add(seconds))
+}
+
+fn cdparanoia_query_error(lower_output: &str) -> Option<String> {
+    if lower_output.contains("unable to open cdrom")
+        || lower_output.contains("could not open")
+        || lower_output.contains("no cdrom")
+        || lower_output.contains("no such file or directory")
+    {
+        return Some("No CD drive was found or the drive could not be opened.".to_owned());
+    }
+
+    if lower_output.contains("no audio")
+        || lower_output.contains("no table of contents")
+        || lower_output.contains("no medium")
+        || lower_output.contains("no disc")
+        || lower_output.contains("not contain")
+    {
+        return Some("No audio CD was detected in the drive.".to_owned());
+    }
+
+    Some("No audio CD tracks were found. Insert an audio CD and try again.".to_owned())
+}
+
+fn rip_cd_to_flac_blocking(output_folder: String, app: AppHandle) -> Result<CdRipResult, String> {
+    ensure_command_available(
+        "cdparanoia",
+        "cdparanoia is not installed. Install cdparanoia and try again.",
+    )?;
+    ensure_command_available("flac", "flac is not installed. Install flac and try again.")?;
+
+    let output_root = PathBuf::from(output_folder);
+    if !output_root.exists() {
+        return Err("Selected output folder does not exist.".to_owned());
+    }
+    if !output_root.is_dir() {
+        return Err("Selected output path is not a folder.".to_owned());
+    }
+
+    let detection = run_cdparanoia_query()?;
+    if !detection.drive_found {
+        return Err(detection.error.unwrap_or_else(|| {
+            "No CD drive was found or the drive could not be opened.".to_owned()
+        }));
+    }
+    if !detection.disc_found {
+        return Err(detection
+            .error
+            .unwrap_or_else(|| "No audio CD was detected in the drive.".to_owned()));
+    }
+
+    let rip_folder = output_root.join(format!("Cassette Rip {}", rip_folder_timestamp()));
+    fs::create_dir_all(&rip_folder)
+        .map_err(|error| format!("Could not create rip folder: {error}"))?;
+    let rip_folder_string = rip_folder.to_string_lossy().to_string();
+
+    emit_cd_rip_event(
+        &app,
+        "cd-rip-started",
+        CdRipEvent {
+            output_folder: Some(rip_folder_string.clone()),
+            track_number: None,
+            output_filename: None,
+            output_path: None,
+            message: Some("CD rip started.".to_owned()),
+        },
+    );
+
+    let mut ripped_tracks = Vec::with_capacity(detection.tracks.len());
+
+    for detected_track in detection.tracks {
+        let output_filename = cd_track_filename(detected_track.number);
+        let output_path = rip_folder.join(&output_filename);
+        let wav_path = rip_folder.join(format!(
+            "{:02} - Track {:02}.wav",
+            detected_track.number, detected_track.number
+        ));
+        let output_path_string = output_path.to_string_lossy().to_string();
+
+        emit_cd_rip_event(
+            &app,
+            "cd-rip-track-started",
+            CdRipEvent {
+                output_folder: Some(rip_folder_string.clone()),
+                track_number: Some(detected_track.number),
+                output_filename: Some(output_filename.clone()),
+                output_path: Some(output_path_string.clone()),
+                message: Some(format!("Ripping track {:02}.", detected_track.number)),
+            },
+        );
+
+        let mut track_result = detected_track.clone();
+        track_result.status = Some("ripping".to_owned());
+        track_result.output_filename = Some(output_filename.clone());
+
+        match rip_single_track_to_flac(detected_track.number, &wav_path, &output_path) {
+            Ok(()) => {
+                track_result.status = Some("done".to_owned());
+                track_result.error = None;
+                emit_cd_rip_event(
+                    &app,
+                    "cd-rip-track-finished",
+                    CdRipEvent {
+                        output_folder: Some(rip_folder_string.clone()),
+                        track_number: Some(detected_track.number),
+                        output_filename: Some(output_filename),
+                        output_path: Some(output_path_string),
+                        message: Some(format!("Track {:02} finished.", detected_track.number)),
+                    },
+                );
+            }
+            Err(error) => {
+                track_result.status = Some("error".to_owned());
+                track_result.error = Some(error.clone());
+                emit_cd_rip_event(
+                    &app,
+                    "cd-rip-track-error",
+                    CdRipEvent {
+                        output_folder: Some(rip_folder_string.clone()),
+                        track_number: Some(detected_track.number),
+                        output_filename: Some(output_filename),
+                        output_path: Some(output_path_string),
+                        message: Some(error),
+                    },
+                );
+            }
+        }
+
+        ripped_tracks.push(track_result);
+    }
+
+    emit_cd_rip_event(
+        &app,
+        "cd-rip-finished",
+        CdRipEvent {
+            output_folder: Some(rip_folder_string.clone()),
+            track_number: None,
+            output_filename: None,
+            output_path: None,
+            message: Some("CD rip finished.".to_owned()),
+        },
+    );
+
+    Ok(CdRipResult {
+        output_folder: rip_folder_string,
+        tracks: ripped_tracks,
+    })
+}
+
+fn rip_single_track_to_flac(
+    track_number: u32,
+    wav_path: &Path,
+    flac_path: &Path,
+) -> Result<(), String> {
+    let rip_output = Command::new("cdparanoia")
+        .arg(track_number.to_string())
+        .arg(wav_path)
+        .output()
+        .map_err(|error| format!("Could not rip track {track_number:02}: {error}"))?;
+
+    if !rip_output.status.success() {
+        let _ = fs::remove_file(wav_path);
+        return Err(format!(
+            "Track {track_number:02} rip failed: {}",
+            short_command_error(&rip_output)
+        ));
+    }
+
+    let flac_output = Command::new("flac")
+        .arg("-f")
+        .arg("-o")
+        .arg(flac_path)
+        .arg(wav_path)
+        .output()
+        .map_err(|error| format!("Could not encode track {track_number:02} to FLAC: {error}"))?;
+
+    if !flac_output.status.success() {
+        return Err(format!(
+            "Track {track_number:02} FLAC encoding failed: {}",
+            short_command_error(&flac_output)
+        ));
+    }
+
+    fs::remove_file(wav_path)
+        .map_err(|error| format!("Track {track_number:02} was encoded, but the temporary WAV could not be removed: {error}"))?;
+
+    Ok(())
+}
+
+fn ensure_command_available(command: &str, missing_message: &str) -> Result<(), String> {
+    match Command::new(command).arg("--version").output() {
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Err(missing_message.to_owned()),
+        Err(error) => Err(format!("Could not run {command}: {error}")),
+    }
+}
+
+fn command_output_text(output: &Output) -> String {
+    let mut text = String::new();
+    text.push_str(&String::from_utf8_lossy(&output.stdout));
+    text.push_str(&String::from_utf8_lossy(&output.stderr));
+    text
+}
+
+fn short_command_error(output: &Output) -> String {
+    let text = command_output_text(output);
+    text.lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("system command failed")
+        .to_owned()
+}
+
+fn cd_track_filename(track_number: u32) -> String {
+    format!("{track_number:02} - Track {track_number:02}.flac")
+}
+
+fn rip_folder_timestamp() -> String {
+    let timestamp = unix_timestamp().max(0);
+    let days = timestamp / 86_400;
+    let seconds_of_day = timestamp % 86_400;
+    let (year, month, day) = civil_from_days(days);
+    let hour = seconds_of_day / 3_600;
+    let minute = (seconds_of_day % 3_600) / 60;
+    let second = seconds_of_day % 60;
+
+    format!("{year:04}-{month:02}-{day:02} {hour:02}-{minute:02}-{second:02}")
+}
+
+fn civil_from_days(days_since_unix_epoch: i64) -> (i64, i64, i64) {
+    let z = days_since_unix_epoch + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = mp + if mp < 10 { 3 } else { -9 };
+    let year = year + if month <= 2 { 1 } else { 0 };
+
+    (year, month, day)
+}
+
+fn emit_cd_rip_event(app: &AppHandle, event: &str, payload: CdRipEvent) {
+    let _ = app.emit(event, payload);
 }
 
 impl LibraryDatabase {
@@ -2709,6 +3099,8 @@ pub fn run() {
             move_playlist_track,
             read_track_lyrics,
             auto_find_track_lyrics,
+            detect_audio_cd,
+            rip_cd_to_flac,
             play_track,
             pause_playback,
             resume_playback,

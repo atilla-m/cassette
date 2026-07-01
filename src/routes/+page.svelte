@@ -2,15 +2,18 @@
   import {
     addTrackToPlaylist,
     autoFindTrackLyrics,
+    chooseOutputFolder,
     chooseLibraryFolder,
     createPlaylist,
     deletePlaylist,
+    detectAudioCd,
     getLibraryCache,
     movePlaylistTrack,
     recordTrackPlay,
     readTrackLyrics,
     removeTrackFromPlaylist,
     renamePlaylist,
+    ripCdToFlac,
     scanLibrary,
     setAlbumGenres,
     setArtistGenres,
@@ -31,7 +34,7 @@
   import TrackList from "$lib/components/TrackList.svelte";
   import { buildAlbums, buildArtists, buildGenres } from "$lib/data/libraryViews";
   import { albums as mockAlbums, artists as mockArtists, genres as mockGenres, navItems } from "$lib/data/mockLibrary";
-  import type { Album, Artist, Genre, PlaybackStatus, Playlist, Track, TrackLyrics } from "$lib/types/library";
+  import type { Album, Artist, CdDetectResult, CdRipEvent, CdRipTrack, Genre, PlaybackStatus, Playlist, Track, TrackLyrics } from "$lib/types/library";
   import { localImageSource } from "$lib/utils/localImage";
   import { listen } from "@tauri-apps/api/event";
   import { onMount } from "svelte";
@@ -147,6 +150,16 @@
   let tracks = $state<Track[]>([]);
   let isScanning = $state(false);
   let scanError = $state<string | null>(null);
+  let cdRipError = $state<string | null>(null);
+  let cdRipMessage = $state<string | null>(null);
+  let isDetectingCd = $state(false);
+  let isRippingCd = $state(false);
+  let cdDriveFound = $state<boolean | null>(null);
+  let audioCdFound = $state<boolean | null>(null);
+  let cdTracks = $state<CdRipTrack[]>([]);
+  let cdRawOutput = $state("");
+  let cdOutputFolder = $state<string | null>(null);
+  let lastRippedFolder = $state<string | null>(null);
   let playbackError = $state<string | null>(null);
   let genreEditError = $state<string | null>(null);
   let genreEditMessage = $state<string | null>(null);
@@ -405,6 +418,11 @@
       listen("mpris-next", () => void handleNextTrack()),
       listen("mpris-previous", () => void handlePreviousTrack()),
       listen<number>("mpris-seek", (event) => void handleSeek(event.payload)),
+      listen<CdRipEvent>("cd-rip-started", (event) => handleCdRipStarted(event.payload)),
+      listen<CdRipEvent>("cd-rip-track-started", (event) => handleCdRipTrackStarted(event.payload)),
+      listen<CdRipEvent>("cd-rip-track-finished", (event) => handleCdRipTrackFinished(event.payload)),
+      listen<CdRipEvent>("cd-rip-track-error", (event) => handleCdRipTrackError(event.payload)),
+      listen<CdRipEvent>("cd-rip-finished", (event) => handleCdRipFinished(event.payload)),
     ];
 
     const statusIntervalId = window.setInterval(async () => {
@@ -594,39 +612,205 @@
         return;
       }
 
-      isScanning = true;
-      scannedFolder = folder;
-      scanCount = null;
-      tracks = [];
-      selectedAlbumId = null;
-      selectedArtistName = null;
-      selectedGenreName = null;
-      clearGenreEditState();
-      isLikedSongsOpen = false;
-      isMixBuilderOpen = false;
-      isLibraryHealthOpen = false;
-      selectedPlaylistId = null;
-      clearMixSelection();
-      searchQuery = "";
-      currentTrackIndex = null;
-      hasCurrentTrackEnded = false;
-      resetPlaybackListenSession(null);
-      playbackQueue = [];
-      currentQueueIndex = null;
-      shuffledQueueOrder = [];
-      isQueueOpen = false;
-      hasLoadedCache = true;
-
-      const scannedTracks = await scanLibrary(folder);
-      tracks = scannedTracks;
-      scanCount = scannedTracks.length;
-      lastScannedAt = Math.floor(Date.now() / 1000);
+      await scanFolderIntoLibrary(folder);
     } catch (error) {
       scanError = error instanceof Error ? error.message : String(error);
       scanCount = null;
     } finally {
       isScanning = false;
     }
+  }
+
+  async function scanFolderIntoLibrary(folder: string) {
+    isScanning = true;
+    scannedFolder = folder;
+    scanCount = null;
+    tracks = [];
+    selectedAlbumId = null;
+    selectedArtistName = null;
+    selectedGenreName = null;
+    clearGenreEditState();
+    isLikedSongsOpen = false;
+    isMixBuilderOpen = false;
+    isLibraryHealthOpen = false;
+    selectedPlaylistId = null;
+    clearMixSelection();
+    searchQuery = "";
+    currentTrackIndex = null;
+    hasCurrentTrackEnded = false;
+    resetPlaybackListenSession(null);
+    playbackQueue = [];
+    currentQueueIndex = null;
+    shuffledQueueOrder = [];
+    isQueueOpen = false;
+    hasLoadedCache = true;
+
+    const scannedTracks = await scanLibrary(folder);
+    tracks = scannedTracks;
+    scanCount = scannedTracks.length;
+    lastScannedAt = Math.floor(Date.now() / 1000);
+  }
+
+  async function handleScanRippedFolder() {
+    if (!lastRippedFolder || isScanning) {
+      return;
+    }
+
+    scanError = null;
+    cdRipError = null;
+    cdRipMessage = "Scanning ripped folder...";
+
+    try {
+      await scanFolderIntoLibrary(lastRippedFolder);
+      cdRipMessage = "Ripped folder scanned into Cassette.";
+    } catch (error) {
+      cdRipMessage = null;
+      cdRipError = error instanceof Error ? error.message : String(error);
+      scanCount = null;
+    } finally {
+      isScanning = false;
+    }
+  }
+
+  async function handleDetectCd() {
+    if (isDetectingCd || isRippingCd) {
+      return;
+    }
+
+    isDetectingCd = true;
+    cdRipError = null;
+    cdRipMessage = null;
+    lastRippedFolder = null;
+
+    try {
+      applyCdDetection(await detectAudioCd());
+      if (audioCdFound && cdTracks.length > 0) {
+        cdRipMessage = `Detected ${cdTracks.length} ${cdTracks.length === 1 ? "track" : "tracks"}.`;
+      } else {
+        cdRipMessage = null;
+      }
+    } catch (error) {
+      cdRipError = error instanceof Error ? error.message : String(error);
+    } finally {
+      isDetectingCd = false;
+    }
+  }
+
+  function applyCdDetection(result: CdDetectResult) {
+    cdDriveFound = result.driveFound;
+    audioCdFound = result.discFound;
+    cdTracks = result.tracks.map((track) => ({
+      ...track,
+      status: "pending",
+      outputFilename: track.outputFilename ?? cdTrackOutputFilename(track.number),
+      error: null,
+    }));
+    cdRawOutput = result.rawOutput;
+    cdRipError = result.error;
+  }
+
+  async function handleChooseCdOutputFolder() {
+    if (isRippingCd) {
+      return;
+    }
+
+    const folder = await chooseOutputFolder();
+    if (folder) {
+      cdOutputFolder = folder;
+      cdRipError = null;
+    }
+  }
+
+  async function handleRipCd() {
+    if (isRippingCd || isDetectingCd) {
+      return;
+    }
+
+    if (!cdOutputFolder) {
+      cdRipError = "Choose an output folder before ripping the CD.";
+      return;
+    }
+
+    if (cdTracks.length === 0 || !audioCdFound) {
+      await handleDetectCd();
+      if (cdTracks.length === 0 || !audioCdFound) {
+        cdRipError = cdRipError ?? "No audio CD tracks are available to rip.";
+        return;
+      }
+    }
+
+    isRippingCd = true;
+    cdRipError = null;
+    cdRipMessage = "Starting CD rip...";
+    lastRippedFolder = null;
+    cdTracks = cdTracks.map((track) => ({ ...track, status: "pending", error: null }));
+
+    try {
+      const result = await ripCdToFlac(cdOutputFolder);
+      cdTracks = result.tracks;
+      lastRippedFolder = result.outputFolder;
+      cdRipMessage = result.tracks.some((track) => track.status === "error")
+        ? "Rip finished with one or more track errors."
+        : "Rip complete.";
+    } catch (error) {
+      cdRipMessage = null;
+      cdRipError = error instanceof Error ? error.message : String(error);
+    } finally {
+      isRippingCd = false;
+    }
+  }
+
+  function handleCdRipStarted(payload: CdRipEvent) {
+    if (payload.outputFolder) {
+      lastRippedFolder = payload.outputFolder;
+    }
+    cdRipMessage = payload.message ?? "CD rip started.";
+    cdRipError = null;
+  }
+
+  function handleCdRipTrackStarted(payload: CdRipEvent) {
+    updateCdTrackFromEvent(payload, "ripping");
+    cdRipMessage = payload.message ?? "Ripping track...";
+  }
+
+  function handleCdRipTrackFinished(payload: CdRipEvent) {
+    updateCdTrackFromEvent(payload, "done");
+    cdRipMessage = payload.message ?? "Track finished.";
+  }
+
+  function handleCdRipTrackError(payload: CdRipEvent) {
+    updateCdTrackFromEvent(payload, "error");
+    cdRipError = payload.message ?? "A track failed to rip.";
+  }
+
+  function handleCdRipFinished(payload: CdRipEvent) {
+    if (payload.outputFolder) {
+      lastRippedFolder = payload.outputFolder;
+    }
+    cdRipMessage = payload.message ?? "Rip complete.";
+  }
+
+  function updateCdTrackFromEvent(payload: CdRipEvent, status: NonNullable<CdRipTrack["status"]>) {
+    if (!payload.trackNumber) {
+      return;
+    }
+
+    cdTracks = cdTracks.map((track) => {
+      if (track.number !== payload.trackNumber) {
+        return track;
+      }
+
+      return {
+        ...track,
+        status,
+        outputFilename: payload.outputFilename ?? track.outputFilename,
+        error: status === "error" ? (payload.message ?? "Track failed.") : null,
+      };
+    });
+  }
+
+  function cdTrackOutputFilename(trackNumber: number) {
+    return `${String(trackNumber).padStart(2, "0")} - Track ${String(trackNumber).padStart(2, "0")}.flac`;
   }
 
   async function handleTrackSelect(track: Track, queue: Track[] = tracks) {
@@ -2947,6 +3131,18 @@
       return `${playsLabel(statsTotalPlays)} across ${tracks.length} ${tracks.length === 1 ? "track" : "tracks"}.`;
     }
 
+    if (activeView === "CD Rip") {
+      if (isRippingCd) {
+        return "Ripping audio CD to FLAC files...";
+      }
+
+      if (audioCdFound && cdTracks.length > 0) {
+        return `${cdTracks.length} ${cdTracks.length === 1 ? "track" : "tracks"} ready to rip.`;
+      }
+
+      return "Detect an audio CD, choose an output folder, then rip to FLAC.";
+    }
+
     if (scanCount !== null && scannedFolder) {
       return `Found ${scanCount} ${scanCount === 1 ? "track" : "tracks"} in ${scannedFolder}`;
     }
@@ -4362,6 +4558,120 @@
             {/each}
           </section>
         {/if}
+      {:else if activeView === "CD Rip"}
+        <section class="cd-ripper-page" aria-labelledby="cd-ripper-title">
+          <div class="settings-intro">
+            <p class="eyebrow">System Tools</p>
+            <h3 id="cd-ripper-title">CD Ripper</h3>
+            <p>Cassette uses system tools like cdparanoia and flac for CD ripping on Linux.</p>
+          </div>
+
+          <section class="cd-status-card" aria-labelledby="cd-status-title">
+            <div class="settings-section-header">
+              <div>
+                <p class="eyebrow">Drive Status</p>
+                <h4 id="cd-status-title">Audio CD</h4>
+              </div>
+              <span class="settings-pill">{isRippingCd ? "Ripping" : isDetectingCd ? "Detecting" : "Idle"}</span>
+            </div>
+
+            <div class="cd-status-grid">
+              <div>
+                <span>CD drive</span>
+                <strong>{cdDriveFound === null ? "Not checked" : cdDriveFound ? "Detected" : "Not detected"}</strong>
+              </div>
+              <div>
+                <span>Audio CD</span>
+                <strong>{audioCdFound === null ? "Not checked" : audioCdFound ? "Detected" : "Not detected"}</strong>
+              </div>
+              <div>
+                <span>Tracks</span>
+                <strong>{cdTracks.length > 0 ? cdTracks.length : "Not available"}</strong>
+              </div>
+            </div>
+
+            <div class="cd-rip-actions">
+              <button type="button" disabled={isDetectingCd || isRippingCd} onclick={() => void handleDetectCd()}>
+                {isDetectingCd ? "Detecting..." : "Detect CD"}
+              </button>
+              <button type="button" disabled={isRippingCd} onclick={() => void handleChooseCdOutputFolder()}>
+                Choose Output Folder
+              </button>
+              <button class="primary" type="button" disabled={isDetectingCd || isRippingCd} onclick={() => void handleRipCd()}>
+                {isRippingCd ? "Ripping..." : "Rip CD"}
+              </button>
+              {#if lastRippedFolder}
+                <button type="button" disabled={isScanning || isRippingCd} onclick={() => void handleScanRippedFolder()}>
+                  {isScanning ? "Scanning..." : "Scan ripped folder"}
+                </button>
+              {/if}
+            </div>
+
+            <div class="cd-output-folder">
+              <span>Output folder</span>
+              <strong>{cdOutputFolder ?? "No output folder selected"}</strong>
+            </div>
+
+            {#if lastRippedFolder}
+              <div class="cd-output-folder">
+                <span>Last rip</span>
+                <strong>{lastRippedFolder}</strong>
+              </div>
+            {/if}
+
+            {#if cdRipError}
+              <div class="scan-error" role="alert">{cdRipError}</div>
+            {:else if cdRipMessage}
+              <div class="scan-error status-message" role="status">{cdRipMessage}</div>
+            {/if}
+          </section>
+
+          <section class="cd-track-section" aria-labelledby="cd-track-list-title">
+            <div class="settings-section-header">
+              <div>
+                <p class="eyebrow">Rip Queue</p>
+                <h4 id="cd-track-list-title">Tracks</h4>
+              </div>
+              <span class="settings-pill">{cdTracks.length} {cdTracks.length === 1 ? "track" : "tracks"}</span>
+            </div>
+
+            {#if cdTracks.length === 0}
+              <div class="group-empty compact">
+                <h3>No CD tracks detected</h3>
+                <p>Insert an audio CD and click Detect CD.</p>
+              </div>
+            {:else}
+              <div class="cd-track-table" role="table" aria-label="CD tracks">
+                <div class="cd-track-row cd-track-head" role="row">
+                  <span role="columnheader">Track</span>
+                  <span role="columnheader">Duration</span>
+                  <span role="columnheader">Status</span>
+                  <span role="columnheader">Output filename</span>
+                </div>
+                {#each cdTracks as track}
+                  <div class:active={track.status === "ripping"} class:error={track.status === "error"} class="cd-track-row" role="row">
+                    <span role="cell">{String(track.number).padStart(2, "0")}</span>
+                    <span role="cell">{track.duration ?? "Unknown"}</span>
+                    <span role="cell">
+                      <strong>{track.status ?? "pending"}</strong>
+                      {#if track.error}
+                        <small>{track.error}</small>
+                      {/if}
+                    </span>
+                    <span role="cell">{track.outputFilename ?? cdTrackOutputFilename(track.number)}</span>
+                  </div>
+                {/each}
+              </div>
+            {/if}
+          </section>
+
+          {#if cdRawOutput}
+            <details class="cd-debug-output">
+              <summary>cdparanoia output</summary>
+              <pre>{cdRawOutput}</pre>
+            </details>
+          {/if}
+        </section>
       {:else if activeView === "Settings"}
         {#if isLibraryHealthOpen}
           <section class="detail-view health-detail" aria-labelledby="library-health-title">
@@ -6699,6 +7009,12 @@
     gap: 16px;
   }
 
+  .cd-ripper-page {
+    display: grid;
+    max-width: 1040px;
+    gap: 16px;
+  }
+
   .settings-intro {
     max-width: 760px;
   }
@@ -6718,6 +7034,17 @@
   }
 
   .settings-section {
+    display: grid;
+    gap: 14px;
+    border: 1px solid #242b35;
+    border-radius: 8px;
+    background: #151a21;
+    padding: 18px;
+  }
+
+  .cd-status-card,
+  .cd-track-section,
+  .cd-debug-output {
     display: grid;
     gap: 14px;
     border: 1px solid #242b35;
@@ -6762,7 +7089,17 @@
     padding: 14px;
   }
 
+  .cd-output-folder {
+    min-width: 0;
+    border: 1px solid #2a313c;
+    border-radius: 8px;
+    background: #12161c;
+    padding: 14px;
+  }
+
   .library-folder-card span,
+  .cd-status-grid span,
+  .cd-output-folder span,
   .settings-stat-tile span,
   .settings-status-list span,
   .settings-control-list span,
@@ -6785,7 +7122,16 @@
     white-space: nowrap;
   }
 
+  .cd-output-folder strong {
+    display: block;
+    overflow-wrap: anywhere;
+    color: #f4f7fb;
+    font-size: 0.95rem;
+    font-weight: 760;
+  }
+
   .settings-stat-grid,
+  .cd-status-grid,
   .settings-status-list,
   .settings-control-list,
   .about-grid {
@@ -6800,6 +7146,7 @@
   }
 
   .settings-stat-tile,
+  .cd-status-grid > div,
   .settings-status-list > div,
   .settings-control-list > div,
   .about-grid > div {
@@ -6815,6 +7162,7 @@
   }
 
   .settings-stat-tile strong,
+  .cd-status-grid strong,
   .settings-status-list strong,
   .settings-control-list strong,
   .about-grid strong {
@@ -6857,7 +7205,14 @@
     gap: 10px;
   }
 
+  .cd-rip-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+
   .settings-actions button,
+  .cd-rip-actions button,
   .settings-tool-grid button {
     min-height: 40px;
     border: 1px solid #303844;
@@ -6874,8 +7229,14 @@
     padding: 0 13px;
   }
 
+  .cd-rip-actions button {
+    padding: 0 13px;
+  }
+
   .settings-actions button:hover:not(:disabled),
   .settings-actions button:focus-visible:not(:disabled),
+  .cd-rip-actions button:hover:not(:disabled),
+  .cd-rip-actions button:focus-visible:not(:disabled),
   .settings-tool-grid button:hover,
   .settings-tool-grid button:focus-visible {
     border-color: #35544f;
@@ -6889,12 +7250,19 @@
     color: #d8fffa;
   }
 
+  .cd-rip-actions button.primary {
+    border-color: #35544f;
+    background: #17332f;
+    color: #d8fffa;
+  }
+
   .settings-actions button.danger {
     border-color: #4a3030;
     color: #ffc8c8;
   }
 
-  .settings-actions button:disabled {
+  .settings-actions button:disabled,
+  .cd-rip-actions button:disabled {
     border-color: #2a313c;
     background: #11161d;
     color: #6d7784;
@@ -6949,6 +7317,91 @@
     color: #8f9aa8;
     font-size: 0.8rem;
     font-weight: 750;
+  }
+
+  .cd-track-table {
+    display: grid;
+    overflow: hidden;
+    border: 1px solid #2a313c;
+    border-radius: 8px;
+    background: #12161c;
+  }
+
+  .cd-track-row {
+    display: grid;
+    grid-template-columns: 72px minmax(92px, 0.7fr) minmax(120px, 0.8fr) minmax(0, 1.5fr);
+    min-height: 48px;
+    align-items: center;
+    gap: 12px;
+    border-top: 1px solid #242b35;
+    color: #d5dce5;
+    font-size: 0.9rem;
+    font-weight: 700;
+    padding: 10px 14px;
+  }
+
+  .cd-track-row:first-child {
+    border-top: 0;
+  }
+
+  .cd-track-head {
+    min-height: 40px;
+    background: #10141a;
+    color: #8f9aa8;
+    font-size: 0.76rem;
+    font-weight: 850;
+    text-transform: uppercase;
+  }
+
+  .cd-track-row.active {
+    background: #172521;
+  }
+
+  .cd-track-row.error {
+    background: #241719;
+    color: #ffcbc8;
+  }
+
+  .cd-track-row span {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .cd-track-row strong {
+    color: inherit;
+    text-transform: capitalize;
+  }
+
+  .cd-track-row small {
+    display: block;
+    overflow: hidden;
+    margin-top: 3px;
+    color: #d99b98;
+    font-size: 0.76rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .cd-debug-output summary {
+    color: #d5dce5;
+    cursor: default;
+    font-weight: 800;
+  }
+
+  .cd-debug-output pre {
+    overflow: auto;
+    max-height: 260px;
+    margin: 0;
+    border: 1px solid #2a313c;
+    border-radius: 8px;
+    background: #0f1318;
+    color: #b9c3cf;
+    font-size: 0.78rem;
+    line-height: 1.45;
+    padding: 12px;
+    white-space: pre-wrap;
   }
 
   .mix-tool-mark {
@@ -7480,6 +7933,7 @@
     }
 
     .settings-stat-grid,
+    .cd-status-grid,
     .settings-status-list,
     .settings-tool-grid,
     .stats-overview-grid {
@@ -7577,6 +8031,10 @@
       grid-template-columns: 1fr;
     }
 
+    .cd-track-row {
+      grid-template-columns: 56px minmax(80px, 0.7fr) minmax(105px, 0.8fr) minmax(0, 1.2fr);
+    }
+
     .stats-recent-card {
       grid-template-columns: 48px minmax(0, 1fr);
     }
@@ -7611,10 +8069,25 @@
     .health-summary-grid,
     .diagnostic-album-list,
     .settings-stat-grid,
+    .cd-status-grid,
     .settings-status-list,
     .settings-tool-grid,
     .stats-overview-grid {
       grid-template-columns: 1fr;
+    }
+
+    .cd-track-head {
+      display: none;
+    }
+
+    .cd-track-row {
+      grid-template-columns: 48px minmax(0, 1fr);
+      gap: 8px 12px;
+      align-items: start;
+    }
+
+    .cd-track-row span:nth-child(4) {
+      grid-column: 2;
     }
 
     .settings-stat-tile.wide {
