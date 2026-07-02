@@ -3,14 +3,18 @@
     addTrackToPlaylist,
     autoFindTrackLyrics,
     chooseCoverImage,
+    chooseDvdImportOutputFolder,
     chooseOutputFolder,
     chooseLibraryFolder,
+    chooseVideoTsFolder,
     chooseVideoFolder,
     createPlaylist,
     deletePlaylist,
     detectAudioCd,
+    detectDvd,
     getLibraryCache,
     getVideoLibrary,
+    importDvdTitle,
     lookupCdMetadata,
     lookupCdCover,
     movePlaylistTrack,
@@ -21,6 +25,7 @@
     ripCdToFlac,
     inspectCoverImage,
     scanLibrary,
+    scanDvdTitles,
     scanVideoFolder,
     setAlbumGenres,
     setArtistGenres,
@@ -29,12 +34,23 @@
     updateVideoProgress,
   } from "$lib/api/library";
   import {
+    bringVideoWindowToFront,
+    closeVideoWindow,
+    fullscreenVideoWindow,
     getPlaybackStatus,
+    getVideoCodecInfo,
+    getVideoState,
     pausePlayback,
+    pauseVideo,
     playTrack,
+    playVideo,
     resumePlayback,
+    resumeVideo,
     seekPlayback,
+    seekVideo,
     setPlaybackVolume,
+    setVideoVolume,
+    stopVideo,
   } from "$lib/api/playback";
   import ContextMenu from "$lib/components/ContextMenu.svelte";
   import LibrarySection from "$lib/components/LibrarySection.svelte";
@@ -55,14 +71,22 @@
     CdRipMetadata,
     CdRipMetadataTrack,
     CdRipTrack,
+    DvdDetectResult,
+    DvdImportEvent,
+    DvdImportMetadata,
+    DvdTitle,
+    DvdTitleScanResult,
     Genre,
     PlaybackStatus,
     Playlist,
     Track,
     TrackLyrics,
     VideoEntry,
+    VideoCodecInfo,
     VideoInfoUpdate,
     VideoLibrary,
+    VideoPlaybackStatus,
+    VideoType,
   } from "$lib/types/library";
   import { localImageSource } from "$lib/utils/localImage";
   import { listen } from "@tauri-apps/api/event";
@@ -75,6 +99,7 @@
   type ArtistSortKey = "name" | "songCount" | "albumCount";
   type GenreSortKey = "name" | "songCount" | "artistCount" | "albumCount";
   type VideoSortKey = "title" | "artist" | "year" | "recentlyPlayed" | "duration";
+  type VideoTypeFilter = "all" | "music_video" | "live" | "interview_documentary" | "behind_the_scenes" | "other";
   type SortDirection = "asc" | "desc";
   type RepeatMode = "off" | "all" | "one";
   type QueuePanelEntry = {
@@ -147,15 +172,44 @@
   type VideoEditDraft = {
     title: string;
     artist: string;
-    showTitle: string;
-    albumOrRelease: string;
+    videoType: VideoType;
+    releaseOrCollection: string;
     year: string;
     venue: string;
     city: string;
     country: string;
+    descriptionOrNotes: string;
+  };
+  type DvdImportDraft = {
+    title: string;
+    artist: string;
+    videoType: VideoType;
+    releaseOrCollection: string;
+    year: string;
+    venue: string;
+    city: string;
+    country: string;
+    descriptionOrNotes: string;
+    outputFilename: string;
   };
 
   const mixFormatOptions = ["All", "FLAC", "MP3", "OGG", "OPUS", "WAV", "M4A"];
+  const videoTypeOptions: Array<{ value: VideoType; label: string }> = [
+    { value: "music_video", label: "Music Video / PV" },
+    { value: "live_show", label: "Live Show" },
+    { value: "concert", label: "Concert" },
+    { value: "interview_documentary", label: "Interview / Documentary" },
+    { value: "behind_the_scenes", label: "Behind the Scenes" },
+    { value: "other", label: "Other" },
+  ];
+  const videoTypeFilters: Array<{ value: VideoTypeFilter; label: string }> = [
+    { value: "all", label: "All" },
+    { value: "music_video", label: "Music Videos / PVs" },
+    { value: "live", label: "Live Shows / Concerts" },
+    { value: "interview_documentary", label: "Interviews / Documentaries" },
+    { value: "behind_the_scenes", label: "Behind the Scenes" },
+    { value: "other", label: "Other" },
+  ];
   const appVersion = packageInfo.version?.trim() || "Development build";
   const shortcutGroups: ShortcutGroup[] = [
     {
@@ -201,10 +255,13 @@
   let videoSearchQuery = $state("");
   let videoSort = $state<VideoSortKey>("title");
   let videoSortDirection = $state<SortDirection>("asc");
+  let videoTypeFilter = $state<VideoTypeFilter>("all");
   let isEditingVideo = $state(false);
   let isSavingVideoInfo = $state(false);
   let videoEditDraft = $state<VideoEditDraft>(emptyVideoEditDraft());
-  let videoElement: HTMLVideoElement | undefined = $state();
+  let videoBackendStatus = $state<VideoPlaybackStatus | null>(null);
+  let videoCodecInfo = $state<VideoCodecInfo | null>(null);
+  let isLoadingVideoCodecInfo = $state(false);
   let videoPlaybackError = $state<string | null>(null);
   let videoPlaybackMessage = $state<string | null>(null);
   let videoSessionVideoId = $state<string | null>(null);
@@ -212,6 +269,20 @@
   let videoObservedPositionSeconds = 0;
   let videoLastProgressSaveMs = 0;
   let videoPlayCountRecorded = false;
+  let dvdDetectResult = $state<DvdDetectResult | null>(null);
+  let dvdSourcePath = $state<string | null>(null);
+  let dvdSourceType = $state<"physical_device" | "video_ts_folder" | null>(null);
+  let dvdTitleScan = $state<DvdTitleScanResult | null>(null);
+  let dvdTitles = $state<DvdTitle[]>([]);
+  let selectedDvdTitleNumber = $state<number | null>(null);
+  let dvdOutputFolder = $state<string | null>(null);
+  let dvdImportDraft = $state<DvdImportDraft>(defaultDvdImportDraft(null));
+  let isDetectingDvd = $state(false);
+  let isScanningDvdTitles = $state(false);
+  let isImportingDvd = $state(false);
+  let dvdImportStatus = $state("No DVD detected");
+  let dvdImportError = $state<string | null>(null);
+  let dvdImportMessage = $state<string | null>(null);
   let cdRipError = $state<string | null>(null);
   let cdRipMessage = $state<string | null>(null);
   let isDetectingCd = $state(false);
@@ -348,8 +419,16 @@
   let selectedGenre = $derived(displayGenres.find((genre) => genre.name === selectedGenreName) ?? null);
   let selectedPlaylist = $derived(playlists.find((playlist) => playlist.id === selectedPlaylistId) ?? null);
   let selectedVideo = $derived(videos.find((video) => video.id === selectedVideoId) ?? null);
-  let selectedVideoSrc = $derived(localImageSource(selectedVideo?.filePath));
   let selectedVideoThumbnailSrc = $derived(localImageSource(selectedVideo?.thumbnailPath));
+  let activeVideoStatus = $derived(videoBackendStatus?.videoId === selectedVideoId ? videoBackendStatus : null);
+  let isNativeVideoPlaying = $derived(Boolean(activeVideoStatus?.isPlaying));
+  let isVideoPlaybackActive = $derived(Boolean(videoBackendStatus?.videoId && !videoBackendStatus.hasEnded));
+  let selectedVideoIsActive = $derived(Boolean(activeVideoStatus && !activeVideoStatus.hasEnded));
+  let nativeVideoPositionSeconds = $derived(activeVideoStatus?.positionSeconds ?? selectedVideo?.lastPositionSeconds ?? 0);
+  let nativeVideoDurationSeconds = $derived(activeVideoStatus?.durationSeconds ?? selectedVideo?.durationSeconds ?? videoCodecInfo?.durationSeconds ?? null);
+  let nativeVideoVolume = $derived(activeVideoStatus?.volume ?? 1);
+  let nativeVideoProgressPercent = $derived(progressPercent(nativeVideoPositionSeconds, nativeVideoDurationSeconds ?? selectedVideo?.durationSeconds ?? null));
+  let selectedVideoPlaybackStatusLabel = $derived(videoPlaybackStatusLabel(activeVideoStatus));
   let selectedCdRelease = $derived(cdMetadataResults.find((release) => release.id === selectedCdReleaseId) ?? null);
   let selectedCdCover = $derived(activeCdRipMetadata()?.cover ?? null);
   let selectedCdCoverSrc = $derived(localImageSource(selectedCdCover?.path));
@@ -389,7 +468,10 @@
   let visibleArtists = $derived(searchFilterArtists(sortedArtists, normalizedSearchQuery));
   let visibleGenres = $derived(searchFilterGenres(sortedGenres, normalizedSearchQuery));
   let normalizedVideoSearchQuery = $derived(normalizeSearch(videoSearchQuery));
-  let visibleVideos = $derived(searchFilterVideos(sortVideos(videos, videoSort, videoSortDirection), normalizedVideoSearchQuery));
+  let visibleVideos = $derived(searchFilterVideos(
+    filterVideosByType(sortVideos(videos, videoSort, videoSortDirection), videoTypeFilter),
+    normalizedVideoSearchQuery,
+  ));
   let videoLibraryStats = $derived([
     { label: "Videos", value: String(videos.length) },
     { label: "Partially watched", value: String(videos.filter((video) => video.lastPositionSeconds > 0).length) },
@@ -511,6 +593,11 @@
       listen<CdRipEvent>("cd-rip-track-finished", (event) => handleCdRipTrackFinished(event.payload)),
       listen<CdRipEvent>("cd-rip-track-error", (event) => handleCdRipTrackError(event.payload)),
       listen<CdRipEvent>("cd-rip-finished", (event) => handleCdRipFinished(event.payload)),
+      listen<DvdImportEvent>("dvd-import-started", (event) => handleDvdImportEvent(event.payload, "Importing...")),
+      listen<DvdImportEvent>("dvd-import-title-started", (event) => handleDvdImportEvent(event.payload, "Importing...")),
+      listen<DvdImportEvent>("dvd-import-progress", (event) => handleDvdImportEvent(event.payload, "Importing...")),
+      listen<DvdImportEvent>("dvd-import-finished", (event) => handleDvdImportEvent(event.payload, "Import complete")),
+      listen<DvdImportEvent>("dvd-import-error", (event) => handleDvdImportEvent(event.payload, "Error")),
     ];
 
     const statusIntervalId = window.setInterval(async () => {
@@ -545,8 +632,8 @@
     }, 250);
 
     const videoProgressIntervalId = window.setInterval(() => {
-      void saveActiveVideoProgress(false);
-    }, 5000);
+      void refreshNativeVideoStatus(false);
+    }, 1000);
 
     function handleKeydown(event: KeyboardEvent) {
       if (playlistPendingDelete) {
@@ -846,6 +933,9 @@
     videoEditDraft = draftFromVideo(video);
     videoPlaybackError = null;
     videoPlaybackMessage = null;
+    videoCodecInfo = null;
+    void loadVideoCodecInfo(video.id);
+    void refreshNativeVideoStatus(false);
     mainElement?.scrollTo({ top: 0 });
   }
 
@@ -913,16 +1003,15 @@
     videoPlaybackError = null;
     videoPlaybackMessage = null;
 
-    if (videoElement) {
-      videoElement.currentTime = 0;
-    }
-
     try {
+      if (activeVideoStatus?.videoId === video.id) {
+        videoBackendStatus = await stopVideo();
+      }
       applyUpdatedVideo(await updateVideoProgress(video.id, 0, false));
       resetVideoSession(video.id);
       videoPlaybackMessage = "Progress reset.";
     } catch (error) {
-      videoPlaybackError = error instanceof Error ? error.message : String(error);
+      videoPlaybackError = friendlyVideoPlaybackError(error);
     }
   }
 
@@ -943,7 +1032,7 @@
   async function playSelectedVideo(positionSeconds: number) {
     const video = selectedVideo;
 
-    if (!video || !videoElement) {
+    if (!video) {
       return;
     }
 
@@ -955,10 +1044,93 @@
         applyPlaybackStatus(await pausePlayback());
       }
 
-      videoElement.currentTime = Math.max(0, Math.min(positionSeconds, video.durationSeconds ?? positionSeconds));
-      await videoElement.play();
+      resetVideoSession(video.id);
+      videoBackendStatus = await playVideo(video.id, Math.max(0, positionSeconds));
+      videoObservedPositionSeconds = videoBackendStatus.positionSeconds;
+      videoPlaybackMessage = "Playing in Cassette video window.";
     } catch (error) {
-      videoPlaybackError = error instanceof Error ? error.message : String(error);
+      videoPlaybackError = friendlyVideoPlaybackError(error);
+    }
+  }
+
+  async function handleNativeVideoPause() {
+    await saveActiveVideoProgress(true);
+
+    try {
+      videoBackendStatus = await pauseVideo();
+    } catch (error) {
+      videoPlaybackError = friendlyVideoPlaybackError(error);
+    }
+  }
+
+  async function handleNativeVideoResume() {
+    try {
+      videoBackendStatus = await resumeVideo();
+    } catch (error) {
+      videoPlaybackError = friendlyVideoPlaybackError(error);
+    }
+  }
+
+  async function handleNativeVideoStop() {
+    await saveActiveVideoProgress(true);
+
+    try {
+      videoBackendStatus = await stopVideo();
+      await loadVideoLibrary();
+      videoPlaybackMessage = "Video stopped.";
+    } catch (error) {
+      videoPlaybackError = friendlyVideoPlaybackError(error);
+    }
+  }
+
+  async function handleBringVideoWindowToFront() {
+    try {
+      videoBackendStatus = await bringVideoWindowToFront();
+      videoPlaybackMessage = "Video is playing in Cassette video window.";
+    } catch (error) {
+      videoPlaybackError = friendlyVideoPlaybackError(error);
+    }
+  }
+
+  async function handleFullscreenVideoWindow() {
+    try {
+      videoBackendStatus = await fullscreenVideoWindow();
+    } catch (error) {
+      videoPlaybackError = friendlyVideoPlaybackError(error);
+    }
+  }
+
+  async function handleCloseVideoWindow() {
+    await saveActiveVideoProgress(true);
+
+    try {
+      videoBackendStatus = await closeVideoWindow();
+      await loadVideoLibrary();
+      videoPlaybackMessage = "Video window closed.";
+    } catch (error) {
+      videoPlaybackError = friendlyVideoPlaybackError(error);
+    }
+  }
+
+  async function handleNativeVideoSeek(event: Event) {
+    const value = event.currentTarget instanceof HTMLInputElement ? Number(event.currentTarget.value) : 0;
+
+    try {
+      videoBackendStatus = await seekVideo(value);
+      videoObservedPositionSeconds = videoBackendStatus.positionSeconds;
+      await saveActiveVideoProgress(true);
+    } catch (error) {
+      videoPlaybackError = friendlyVideoPlaybackError(error);
+    }
+  }
+
+  async function handleNativeVideoVolume(event: Event) {
+    const value = event.currentTarget instanceof HTMLInputElement ? Number(event.currentTarget.value) : 1;
+
+    try {
+      videoBackendStatus = await setVideoVolume(value);
+    } catch (error) {
+      videoPlaybackError = friendlyVideoPlaybackError(error);
     }
   }
 
@@ -977,6 +1149,11 @@
         applyPlaybackStatus(await pausePlayback());
       }
 
+      await saveActiveVideoProgress(true);
+      if (videoBackendStatus?.videoId === video.id) {
+        videoBackendStatus = await stopVideo();
+      }
+
       await openPath(video.filePath);
       videoPlaybackMessage = "Opened in external player.";
     } catch (error) {
@@ -984,77 +1161,21 @@
     }
   }
 
-  function handleVideoPlay() {
-    const video = selectedVideo;
+  function friendlyVideoPlaybackError(error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
 
-    if (!video || !videoElement) {
-      return;
+    if (message.trim() === "The operation is not supported.") {
+      return "Cassette could not play this video internally.\nTry Open External as a backup.";
     }
 
-    if (videoSessionVideoId !== video.id) {
-      resetVideoSession(video.id);
-    }
-
-    videoObservedPositionSeconds = videoElement.currentTime;
+    return message;
   }
 
-  function handleVideoPause() {
-    void saveActiveVideoProgress(true);
-  }
-
-  function handleVideoEnded() {
+  async function saveActiveVideoProgress(force: boolean, explicitStatus: VideoPlaybackStatus | null = activeVideoStatus) {
     const video = selectedVideo;
+    const status = explicitStatus;
 
-    if (!video || !videoElement) {
-      return;
-    }
-
-    videoElement.currentTime = 0;
-    const shouldIncrementPlayCount = !videoPlayCountRecorded;
-    resetVideoSession(video.id);
-    void saveVideoProgress(video, 0, shouldIncrementPlayCount);
-  }
-
-  function handleVideoTimeUpdate() {
-    const video = selectedVideo;
-
-    if (!video || !videoElement) {
-      return;
-    }
-
-    if (videoSessionVideoId !== video.id) {
-      resetVideoSession(video.id);
-    }
-
-    const currentPosition = videoElement.currentTime;
-    const delta = currentPosition - videoObservedPositionSeconds;
-
-    if (delta > 0 && delta < 10) {
-      videoSessionWatchedSeconds += delta;
-    }
-
-    videoObservedPositionSeconds = currentPosition;
-    void saveActiveVideoProgress(false);
-  }
-
-  function handleVideoLoadedMetadata() {
-    const video = selectedVideo;
-
-    if (!video || !videoElement || video.lastPositionSeconds <= 0) {
-      return;
-    }
-
-    const duration = videoElement.duration;
-    const safePosition = Number.isFinite(duration)
-      ? Math.min(video.lastPositionSeconds, Math.max(0, duration - 1))
-      : video.lastPositionSeconds;
-    videoElement.currentTime = safePosition;
-  }
-
-  async function saveActiveVideoProgress(force: boolean) {
-    const video = selectedVideo;
-
-    if (!video || !videoElement || videoElement.ended || (!force && videoElement.paused)) {
+    if (!video || !status || status.videoId !== video.id || status.hasEnded || (!force && !status.isPlaying)) {
       return;
     }
 
@@ -1065,13 +1186,78 @@
     }
 
     videoLastProgressSaveMs = now;
-    const threshold = video.durationSeconds ? Math.min(30, video.durationSeconds * 0.5) : 30;
+    const duration = status.durationSeconds ?? video.durationSeconds;
+    const threshold = duration ? Math.min(30, duration * 0.5) : 30;
     const shouldIncrementPlayCount = !videoPlayCountRecorded && videoSessionWatchedSeconds >= threshold;
 
-    await saveVideoProgress(video, Math.floor(videoElement.currentTime), shouldIncrementPlayCount);
+    await saveVideoProgress(video, Math.floor(status.positionSeconds), shouldIncrementPlayCount);
 
     if (shouldIncrementPlayCount) {
       videoPlayCountRecorded = true;
+    }
+  }
+
+  async function refreshNativeVideoStatus(forceSave: boolean) {
+    if (!selectedVideoId && !videoBackendStatus?.videoId) {
+      return;
+    }
+
+    try {
+      const previousVideoId = videoBackendStatus?.videoId ?? null;
+      const status = await getVideoState();
+      videoBackendStatus = status;
+      videoPlaybackError = status.error;
+
+      if (previousVideoId && !status.videoId) {
+        resetVideoSession(null);
+        await loadVideoLibrary();
+        videoPlaybackMessage = "Video window closed.";
+        return;
+      }
+
+      if (selectedVideo && status.videoId === selectedVideo.id) {
+        if (videoSessionVideoId !== selectedVideo.id) {
+          resetVideoSession(selectedVideo.id);
+        }
+
+        const delta = status.positionSeconds - videoObservedPositionSeconds;
+
+        if (status.isPlaying && delta > 0 && delta < 10) {
+          videoSessionWatchedSeconds += delta;
+        }
+
+        videoObservedPositionSeconds = status.positionSeconds;
+
+        if (status.hasEnded) {
+          const shouldIncrementPlayCount = !videoPlayCountRecorded;
+          resetVideoSession(selectedVideo.id);
+          await saveVideoProgress(selectedVideo, 0, shouldIncrementPlayCount);
+          return;
+        }
+
+        await saveActiveVideoProgress(forceSave, status);
+      }
+    } catch (error) {
+      videoPlaybackError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  async function loadVideoCodecInfo(videoId: string) {
+    isLoadingVideoCodecInfo = true;
+
+    try {
+      videoCodecInfo = await getVideoCodecInfo(videoId);
+    } catch (error) {
+      videoCodecInfo = {
+        container: null,
+        videoCodec: null,
+        audioCodec: null,
+        resolution: null,
+        durationSeconds: null,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    } finally {
+      isLoadingVideoCodecInfo = false;
     }
   }
 
@@ -1102,19 +1288,230 @@
   }
 
   function updateVideoDraftField(key: keyof VideoEditDraft, value: string) {
-    videoEditDraft = { ...videoEditDraft, [key]: value };
+    videoEditDraft = {
+      ...videoEditDraft,
+      [key]: key === "videoType" ? value as VideoType : value,
+    };
+  }
+
+  async function handleDetectDvd() {
+    if (isDetectingDvd || isImportingDvd) {
+      return;
+    }
+
+    isDetectingDvd = true;
+    dvdImportError = null;
+    dvdImportMessage = null;
+    dvdImportStatus = "Scanning titles...";
+
+    try {
+      const result = await detectDvd();
+      dvdDetectResult = result;
+
+      if (!result.found || !result.devicePath) {
+        dvdSourcePath = null;
+        dvdSourceType = null;
+        dvdTitleScan = null;
+        dvdTitles = [];
+        selectedDvdTitleNumber = null;
+        dvdImportStatus = "No DVD detected";
+        dvdImportError = result.error ?? "No DVD drive found.";
+        return;
+      }
+
+      dvdSourcePath = result.devicePath;
+      dvdSourceType = "physical_device";
+      dvdTitleScan = null;
+      dvdTitles = [];
+      selectedDvdTitleNumber = null;
+      dvdImportStatus = result.readable ? "DVD detected" : "DVD detected";
+      dvdImportMessage = result.readable ? `DVD device detected at ${result.devicePath}.` : `DVD device detected at ${result.devicePath}, but it may not be readable.`;
+    } catch (error) {
+      dvdImportStatus = "Error";
+      dvdImportError = error instanceof Error ? error.message : String(error);
+    } finally {
+      isDetectingDvd = false;
+    }
+  }
+
+  async function handleChooseVideoTsFolder() {
+    if (isImportingDvd) {
+      return;
+    }
+
+    const folder = await chooseVideoTsFolder();
+    if (!folder) {
+      return;
+    }
+
+    dvdSourcePath = folder;
+    dvdSourceType = "video_ts_folder";
+    dvdDetectResult = null;
+    dvdTitleScan = null;
+    dvdTitles = [];
+    selectedDvdTitleNumber = null;
+    dvdImportStatus = "VIDEO_TS folder selected";
+    dvdImportError = null;
+    dvdImportMessage = folder;
+  }
+
+  async function handleChooseDvdOutputFolder() {
+    if (isImportingDvd) {
+      return;
+    }
+
+    const folder = await chooseDvdImportOutputFolder();
+    if (folder) {
+      dvdOutputFolder = folder;
+      dvdImportError = null;
+    }
+  }
+
+  async function handleScanDvdTitles() {
+    if (!dvdSourcePath) {
+      dvdImportError = "Detect a DVD or choose a VIDEO_TS folder before scanning titles.";
+      dvdImportStatus = "Error";
+      return;
+    }
+
+    if (isScanningDvdTitles || isImportingDvd) {
+      return;
+    }
+
+    isScanningDvdTitles = true;
+    dvdImportStatus = "Scanning titles...";
+    dvdImportError = null;
+    dvdImportMessage = null;
+
+    try {
+      applyDvdTitleScan(await scanDvdTitles(dvdSourcePath));
+    } catch (error) {
+      dvdImportStatus = "Error";
+      dvdImportError = error instanceof Error ? error.message : String(error);
+    } finally {
+      isScanningDvdTitles = false;
+    }
+  }
+
+  function applyDvdTitleScan(result: DvdTitleScanResult) {
+    dvdTitleScan = result;
+    dvdSourcePath = result.sourcePath;
+    dvdSourceType = result.sourceType;
+    dvdTitles = result.titles;
+    selectedDvdTitleNumber = result.titles.find((title) => title.likelyMainTitle)?.number ?? result.titles[0]?.number ?? null;
+    dvdImportDraft = defaultDvdImportDraft(selectedDvdTitleNumber);
+
+    if (result.error) {
+      dvdImportStatus = "Error";
+      dvdImportError = result.error;
+      dvdImportMessage = null;
+      return;
+    }
+
+    dvdImportStatus = result.titles.length > 0 ? "Ready to import" : "Error";
+    dvdImportError = result.titles.length > 0 ? null : "No titles found.";
+    dvdImportMessage = result.titles.length > 0
+      ? `${result.titles.length} ${result.titles.length === 1 ? "title" : "titles"} found.`
+      : null;
+  }
+
+  function handleSelectDvdTitle(titleNumber: number) {
+    if (isImportingDvd) {
+      return;
+    }
+
+    selectedDvdTitleNumber = titleNumber;
+    dvdImportDraft = defaultDvdImportDraft(titleNumber, dvdImportDraft);
+  }
+
+  function updateDvdImportDraftField(key: keyof DvdImportDraft, value: string) {
+    if (isImportingDvd) {
+      return;
+    }
+
+    dvdImportDraft = {
+      ...dvdImportDraft,
+      [key]: key === "videoType" ? value as VideoType : value,
+    };
+
+    if (key === "artist" || key === "title" || key === "year") {
+      dvdImportDraft = { ...dvdImportDraft, outputFilename: defaultDvdOutputFilename(dvdImportDraft) };
+    }
+  }
+
+  async function handleImportDvdTitle() {
+    if (isImportingDvd) {
+      return;
+    }
+
+    if (!dvdSourcePath) {
+      dvdImportError = "Detect a DVD or choose a VIDEO_TS folder before importing.";
+      dvdImportStatus = "Error";
+      return;
+    }
+
+    if (!selectedDvdTitleNumber) {
+      dvdImportError = "Select a DVD title before importing.";
+      dvdImportStatus = "Error";
+      return;
+    }
+
+    if (!dvdOutputFolder) {
+      dvdImportError = "Choose an output folder before importing.";
+      dvdImportStatus = "Error";
+      return;
+    }
+
+    const metadata = dvdImportMetadataFromDraft(dvdImportDraft);
+
+    if (!metadata.title.trim()) {
+      dvdImportError = "Title is required.";
+      dvdImportStatus = "Error";
+      return;
+    }
+
+    isImportingDvd = true;
+    dvdImportStatus = "Importing...";
+    dvdImportError = null;
+    dvdImportMessage = "Starting DVD import...";
+
+    try {
+      const result = await importDvdTitle(dvdSourcePath, selectedDvdTitleNumber, dvdOutputFolder, metadata);
+      applyUpdatedVideo(result.video);
+      selectedVideoId = result.video.id;
+      videoEditDraft = draftFromVideo(result.video);
+      void loadVideoCodecInfo(result.video.id);
+      dvdImportStatus = "Import complete";
+      dvdImportMessage = `Imported to ${result.outputPath}`;
+    } catch (error) {
+      dvdImportStatus = "Error";
+      dvdImportMessage = null;
+      dvdImportError = error instanceof Error ? error.message : String(error);
+    } finally {
+      isImportingDvd = false;
+    }
+  }
+
+  function handleDvdImportEvent(payload: DvdImportEvent, status: string) {
+    dvdImportStatus = status;
+    dvdImportMessage = payload.message ?? dvdImportMessage;
+
+    if (status === "Error") {
+      dvdImportError = payload.message ?? "DVD import failed.";
+    }
   }
 
   function emptyVideoEditDraft(): VideoEditDraft {
     return {
       title: "",
       artist: "",
-      showTitle: "",
-      albumOrRelease: "",
+      videoType: "other",
+      releaseOrCollection: "",
       year: "",
       venue: "",
       city: "",
       country: "",
+      descriptionOrNotes: "",
     };
   }
 
@@ -1122,12 +1519,13 @@
     return {
       title: video.title,
       artist: video.artist ?? "",
-      showTitle: video.showTitle ?? "",
-      albumOrRelease: video.albumOrRelease ?? "",
+      videoType: video.videoType,
+      releaseOrCollection: video.releaseOrCollection ?? "",
       year: video.year?.toString() ?? "",
       venue: video.venue ?? "",
       city: video.city ?? "",
       country: video.country ?? "",
+      descriptionOrNotes: video.descriptionOrNotes ?? "",
     };
   }
 
@@ -1137,13 +1535,65 @@
     return {
       title: draft.title.trim(),
       artist: nullableDraftValue(draft.artist),
-      showTitle: nullableDraftValue(draft.showTitle),
-      albumOrRelease: nullableDraftValue(draft.albumOrRelease),
+      videoType: draft.videoType,
+      releaseOrCollection: nullableDraftValue(draft.releaseOrCollection),
       year: Number.isFinite(parsedYear) && parsedYear > 0 ? parsedYear : null,
       venue: nullableDraftValue(draft.venue),
       city: nullableDraftValue(draft.city),
       country: nullableDraftValue(draft.country),
+      descriptionOrNotes: nullableDraftValue(draft.descriptionOrNotes),
     };
+  }
+
+  function defaultDvdImportDraft(titleNumber: number | null, existing?: DvdImportDraft): DvdImportDraft {
+    const title = existing?.title.trim() || (titleNumber ? `DVD Title ${String(titleNumber).padStart(2, "0")}` : "DVD Title 01");
+    const artist = existing?.artist.trim() || "Unknown Artist";
+    const draft = {
+      title,
+      artist,
+      videoType: existing?.videoType ?? ("other" as VideoType),
+      releaseOrCollection: existing?.releaseOrCollection ?? "",
+      year: existing?.year ?? "",
+      venue: existing?.venue ?? "",
+      city: existing?.city ?? "",
+      country: existing?.country ?? "",
+      descriptionOrNotes: existing?.descriptionOrNotes ?? "",
+      outputFilename: existing?.outputFilename ?? "",
+    };
+
+    return {
+      ...draft,
+      outputFilename: draft.outputFilename || defaultDvdOutputFilename(draft),
+    };
+  }
+
+  function dvdImportMetadataFromDraft(draft: DvdImportDraft): DvdImportMetadata {
+    const parsedYear = Number.parseInt(draft.year, 10);
+
+    return {
+      title: draft.title.trim() || "DVD Title 01",
+      artist: draft.artist.trim() || "Unknown Artist",
+      videoType: draft.videoType,
+      releaseOrCollection: nullableDraftValue(draft.releaseOrCollection),
+      year: Number.isFinite(parsedYear) && parsedYear > 0 ? parsedYear : null,
+      venue: nullableDraftValue(draft.venue),
+      city: nullableDraftValue(draft.city),
+      country: nullableDraftValue(draft.country),
+      descriptionOrNotes: nullableDraftValue(draft.descriptionOrNotes),
+      outputFilename: nullableDraftValue(draft.outputFilename),
+    };
+  }
+
+  function defaultDvdOutputFilename(draft: Pick<DvdImportDraft, "artist" | "title" | "year">) {
+    const artist = draft.artist.trim();
+    const title = draft.title.trim();
+
+    if (!artist || !title) {
+      return `DVD Import ${ripFolderTimestampPreview()}.mkv`;
+    }
+
+    const year = draft.year.trim();
+    return `${sanitizeFilenamePreview(year ? `${artist} - ${title} (${year})` : `${artist} - ${title}`, "DVD Import")}.mkv`;
   }
 
   function nullableDraftValue(value: string) {
@@ -1154,7 +1604,8 @@
   function videoDetailLine(video: VideoEntry) {
     return [
       video.artist ?? "Unknown Artist",
-      video.showTitle ?? video.albumOrRelease,
+      videoTypeLabel(video.videoType),
+      video.releaseOrCollection,
       video.year?.toString(),
       videoLocationLine(video),
     ].filter(Boolean).join(" · ");
@@ -1168,8 +1619,36 @@
     return [
       video.artist ?? "Unknown Artist",
       video.year?.toString(),
-      video.showTitle ?? video.albumOrRelease,
+      video.releaseOrCollection ?? videoTypeLabel(video.videoType),
     ].filter(Boolean).join(" · ");
+  }
+
+  function videoTypeLabel(value: VideoType) {
+    return videoTypeOptions.find((option) => option.value === value)?.label ?? "Other";
+  }
+
+  function sourceLabel(source: VideoEntry["source"]) {
+    return source === "dvd_import" ? "DVD import" : "Local file";
+  }
+
+  function filterVideosByType(videoEntries: VideoEntry[], filter: VideoTypeFilter) {
+    if (filter === "all") {
+      return videoEntries;
+    }
+
+    if (filter === "live") {
+      return videoEntries.filter((video) => video.videoType === "live_show" || video.videoType === "concert");
+    }
+
+    return videoEntries.filter((video) => video.videoType === filter);
+  }
+
+  function ripFolderTimestampPreview() {
+    const now = new Date();
+    const date = now.toISOString().slice(0, 10);
+    const time = now.toTimeString().slice(0, 8).replaceAll(":", "-");
+
+    return `${date} ${time}`;
   }
 
   function videoProgressPercent(video: VideoEntry) {
@@ -1177,7 +1656,27 @@
       return 0;
     }
 
-    return Math.max(0, Math.min(100, (video.lastPositionSeconds / video.durationSeconds) * 100));
+    return progressPercent(video.lastPositionSeconds, video.durationSeconds);
+  }
+
+  function progressPercent(position: number, duration: number | null) {
+    if (!duration || duration <= 0) {
+      return 0;
+    }
+
+    return Math.max(0, Math.min(100, (position / duration) * 100));
+  }
+
+  function videoPlaybackStatusLabel(status: VideoPlaybackStatus | null) {
+    if (!status?.videoId) {
+      return "Stopped";
+    }
+
+    if (status.hasEnded) {
+      return "Finished";
+    }
+
+    return status.isPlaying ? "Playing" : "Paused";
   }
 
   async function handleDetectCd() {
@@ -1464,6 +1963,14 @@
 
   function inputValue(event: Event) {
     return event.currentTarget instanceof HTMLInputElement ? event.currentTarget.value : "";
+  }
+
+  function selectValue(event: Event) {
+    return event.currentTarget instanceof HTMLSelectElement ? event.currentTarget.value : "";
+  }
+
+  function textAreaValue(event: Event) {
+    return event.currentTarget instanceof HTMLTextAreaElement ? event.currentTarget.value : "";
   }
 
   function defaultCdRipMetadata(cdTracks: CdRipTrack[], existing: CdRipMetadata | null): CdRipMetadata {
@@ -1765,7 +2272,7 @@
     isMixBuilderOpen = false;
     isLibraryHealthOpen = false;
     selectedPlaylistId = null;
-    selectedVideoId = label === "Live Shows" ? selectedVideoId : null;
+    selectedVideoId = label === "Videos" ? selectedVideoId : null;
     isEditingVideo = false;
     searchQuery = "";
     mainElement?.scrollTo({ top: 0 });
@@ -2311,6 +2818,15 @@
       return;
     }
 
+    await saveActiveVideoProgress(true);
+    if (videoBackendStatus?.videoId) {
+      try {
+        videoBackendStatus = await stopVideo();
+      } catch {
+        videoBackendStatus = null;
+      }
+    }
+
     const track = playbackQueue[queueIndex];
     await finalizePlaybackListenSession();
 
@@ -2739,6 +3255,11 @@
     }
 
     try {
+      if (!isPlaying && videoBackendStatus?.videoId) {
+        await saveActiveVideoProgress(true);
+        videoBackendStatus = await stopVideo();
+      }
+
       const status = isPlaying ? await pausePlayback() : await resumePlayback();
       applyPlaybackStatus(status);
       await maybeRecordTrackPlay();
@@ -3910,8 +4431,9 @@
     return matchesSearch(query, [
       video.title,
       video.artist,
-      video.showTitle,
-      video.albumOrRelease,
+      videoTypeLabel(video.videoType),
+      video.releaseOrCollection,
+      video.descriptionOrNotes,
       video.venue,
       video.city,
       video.country,
@@ -3987,7 +4509,7 @@
       }
     }
 
-    if (activeView === "Live Shows") {
+    if (activeView === "Videos") {
       return "";
     }
 
@@ -4054,7 +4576,7 @@
       return "Detect an audio CD, choose an output folder, then rip to FLAC.";
     }
 
-    if (activeView === "Live Shows") {
+    if (activeView === "Videos") {
       if (isScanningVideos) {
         return "Scanning local video files...";
       }
@@ -4063,7 +4585,7 @@
         return `${videos.length} ${videos.length === 1 ? "video" : "videos"} from ${videoFolder}`;
       }
 
-      return "Add a folder of local live shows or music videos.";
+      return "Add local music videos, concerts, interviews, documentaries, and related videos.";
     }
 
     if (scanCount !== null && scannedFolder) {
@@ -4101,7 +4623,7 @@
           <h2>{viewTitle()}</h2>
           <p class="scan-status">{viewStatus()}</p>
         </div>
-        {#if activeView === "Live Shows"}
+        {#if activeView === "Videos"}
           <button type="button" disabled={isScanningVideos} onclick={() => void (videoFolder ? handleRescanVideos() : handleAddVideoFolder())}>
             {isScanningVideos ? "Scanning..." : videoFolder ? "Rescan Videos" : "Add Video Folder"}
           </button>
@@ -4133,9 +4655,9 @@
       {#if playbackError}
         <div class="scan-error" role="alert">{playbackError}</div>
       {/if}
-      {#if activeView === "Live Shows" && videoError}
+      {#if activeView === "Videos" && videoError}
         <div class="scan-error" role="alert">{videoError}</div>
-      {:else if activeView === "Live Shows" && videoMessage}
+      {:else if activeView === "Videos" && videoMessage}
         <div class="scan-error status-message" role="status">{videoMessage}</div>
       {/if}
       {#if activeView !== "Playlists" && playlistError}
@@ -5492,62 +6014,131 @@
             {/each}
           </section>
         {/if}
-      {:else if activeView === "Live Shows"}
+      {:else if activeView === "Videos"}
         <section class="videos-page" aria-labelledby="videos-title">
           {#if selectedVideo}
-            <button class="back-button" type="button" onclick={handleBackToVideos}>Back to Live Shows</button>
+            <button class="back-button" type="button" onclick={handleBackToVideos}>Back to Videos</button>
 
             <section class="video-detail-hero" aria-labelledby="video-detail-title">
-              <div class="video-player-panel">
-                {#if selectedVideoSrc}
-                  <!-- svelte-ignore a11y_media_has_caption -->
-                  <video
-                    bind:this={videoElement}
-                    src={selectedVideoSrc}
-                    poster={selectedVideoThumbnailSrc ?? undefined}
-                    controls
-                    preload="metadata"
-                    onplay={handleVideoPlay}
-                    onpause={handleVideoPause}
-                    onended={handleVideoEnded}
-                    ontimeupdate={handleVideoTimeUpdate}
-                    onloadedmetadata={handleVideoLoadedMetadata}
-                    onerror={() => videoPlaybackError = "Cassette could not play this file in the app. Try opening it in an external player."}
-                  ></video>
-                {:else if selectedVideoThumbnailSrc}
-                  <img src={selectedVideoThumbnailSrc} alt="" onload={showLoadedImage} onerror={hideBrokenImage} />
-                {:else}
-                  <div class="video-placeholder" aria-hidden="true">V</div>
-                {/if}
+              <div class="video-session-card">
+                <div class="video-session-thumb" aria-hidden="true">
+                  {#if selectedVideoThumbnailSrc}
+                    <img src={selectedVideoThumbnailSrc} alt="" onload={showLoadedImage} onerror={hideBrokenImage} />
+                  {:else}
+                    <span>V</span>
+                  {/if}
+                </div>
+
+                <div class="video-session-copy">
+                  <p class="eyebrow">{selectedVideoIsActive ? "Native video window active" : "Cassette video window"}</p>
+                  <h3 id="video-detail-title">{selectedVideo.title}</h3>
+                  <p>{selectedVideo.artist ?? "Unknown Artist"}</p>
+                  <div class="video-session-progress">
+                    <div>
+                      <span>{formatVideoDuration(nativeVideoPositionSeconds)}</span>
+                      <span>{formatVideoDuration(nativeVideoDurationSeconds)}</span>
+                    </div>
+                    <div class="video-panel-progress" style={`--progress: ${nativeVideoProgressPercent}%`} aria-hidden="true"></div>
+                  </div>
+                </div>
+
+                <div class="video-session-status" aria-label="Video session status">
+                  <div><span>Status</span><strong>{selectedVideoPlaybackStatusLabel}</strong></div>
+                  <div><span>Backend</span><strong>Cassette video engine</strong></div>
+                </div>
+
+                <p class="video-window-note">
+                  Cassette uses its native video engine for MKV/DVD playback. The video opens in a controlled Cassette video window.
+                </p>
+
+                <div class="video-actions video-window-actions">
+                  <button type="button" disabled={!activeVideoStatus?.hasVideoWindow} onclick={() => void handleBringVideoWindowToFront()}>Bring Video Window to Front</button>
+                  <button type="button" disabled={!activeVideoStatus?.hasVideoWindow} onclick={() => void handleFullscreenVideoWindow()}>
+                    {activeVideoStatus?.isFullscreen ? "Exit Fullscreen" : "Fullscreen Video"}
+                  </button>
+                  <button type="button" disabled={!activeVideoStatus?.hasVideoWindow} onclick={() => void handleCloseVideoWindow()}>Close Video Window</button>
+                  <button type="button" onclick={() => void handleOpenVideoExternal()}>Open External as Backup</button>
+                </div>
               </div>
 
-              <div class="video-detail-copy">
-                <p class="eyebrow">Live Show</p>
-                <h3 id="video-detail-title">{selectedVideo.title}</h3>
-                <p>{videoDetailLine(selectedVideo)}</p>
-                <div class="video-meta-grid">
-                  <div><span>Artist</span><strong>{selectedVideo.artist ?? "Unknown Artist"}</strong></div>
-                  <div><span>Show</span><strong>{selectedVideo.showTitle ?? selectedVideo.albumOrRelease ?? "Not set"}</strong></div>
-                  <div><span>Year</span><strong>{selectedVideo.year ?? "Not set"}</strong></div>
-                  <div><span>Duration</span><strong>{formatVideoDuration(selectedVideo.durationSeconds)}</strong></div>
-                  <div><span>Last watched</span><strong>{formatVideoDuration(selectedVideo.lastPositionSeconds)}</strong></div>
-                  <div><span>Plays</span><strong>{selectedVideo.playCount}</strong></div>
-                </div>
-                {#if videoLocationLine(selectedVideo)}
-                  <p class="video-location">{videoLocationLine(selectedVideo)}</p>
-                {/if}
-                <div class="video-actions">
-                  <button type="button" onclick={() => void handleVideoPlayFromStart()}>Play</button>
+              <div class="video-player-controls" aria-label="Cassette video controls">
+                <div class="video-actions primary-video-actions">
+                  {#if selectedVideoIsActive}
+                    <button type="button" onclick={() => void (isNativeVideoPlaying ? handleNativeVideoPause() : handleNativeVideoResume())}>
+                      {isNativeVideoPlaying ? "Pause" : "Play"}
+                    </button>
+                  {:else}
+                    <button type="button" onclick={() => void handleVideoPlayFromStart()}>Play</button>
+                  {/if}
                   <button type="button" disabled={selectedVideo.lastPositionSeconds <= 0} onclick={() => void handleVideoResume()}>Resume</button>
-                  <button type="button" onclick={handleEditVideoInfo}>Edit Info</button>
-                  <button type="button" onclick={() => void handleResetVideoProgress()}>Reset Progress</button>
-                  <button type="button" onclick={() => void handleOpenVideoExternal()}>Open External</button>
+                  <button type="button" disabled={!selectedVideoIsActive} onclick={() => void handleNativeVideoStop()}>Stop</button>
                 </div>
+
+                <div class="video-native-controls">
+                  <label>
+                    <span>Seek</span>
+                    <input
+                      type="range"
+                      min="0"
+                      max={nativeVideoDurationSeconds ?? selectedVideo.durationSeconds ?? 0}
+                      value={nativeVideoPositionSeconds}
+                      disabled={!selectedVideoIsActive || !(nativeVideoDurationSeconds ?? selectedVideo.durationSeconds)}
+                      oninput={(event) => void handleNativeVideoSeek(event)}
+                    />
+                  </label>
+                  <label>
+                    <span>Volume</span>
+                    <input
+                      type="range"
+                      min="0"
+                      max="1"
+                      step="0.01"
+                      value={nativeVideoVolume}
+                      disabled={!selectedVideoIsActive}
+                      oninput={(event) => void handleNativeVideoVolume(event)}
+                    />
+                  </label>
+                </div>
+
                 {#if videoPlaybackError}
                   <p class="form-message error" role="alert">{videoPlaybackError}</p>
                 {:else if videoPlaybackMessage}
                   <p class="form-message" role="status">{videoPlaybackMessage}</p>
                 {/if}
+              </div>
+
+              <div class="video-detail-copy">
+                <p class="eyebrow">{sourceLabel(selectedVideo.source)}</p>
+                <h3>Details</h3>
+                <p>{videoDetailLine(selectedVideo)}</p>
+                <div class="video-meta-grid">
+                  <div><span>Artist</span><strong>{selectedVideo.artist ?? "Unknown Artist"}</strong></div>
+                  <div><span>Type</span><strong>{videoTypeLabel(selectedVideo.videoType)}</strong></div>
+                  <div><span>Release</span><strong>{selectedVideo.releaseOrCollection ?? "Not set"}</strong></div>
+                  <div><span>Year</span><strong>{selectedVideo.year ?? "Not set"}</strong></div>
+                  <div><span>Duration</span><strong>{formatVideoDuration(nativeVideoDurationSeconds)}</strong></div>
+                  <div><span>Last watched</span><strong>{formatVideoDuration(selectedVideo.lastPositionSeconds)}</strong></div>
+                  <div><span>Plays</span><strong>{selectedVideo.playCount}</strong></div>
+                </div>
+                <div class="video-codec-grid" aria-label="Codec information">
+                  <div><span>Container</span><strong>{isLoadingVideoCodecInfo ? "Loading..." : videoCodecInfo?.container ?? "Unknown"}</strong></div>
+                  <div><span>Video codec</span><strong>{videoCodecInfo?.videoCodec ?? "Unknown"}</strong></div>
+                  <div><span>Audio codec</span><strong>{videoCodecInfo?.audioCodec ?? "Unknown"}</strong></div>
+                  <div><span>Resolution</span><strong>{videoCodecInfo?.resolution ?? "Unknown"}</strong></div>
+                </div>
+                {#if videoCodecInfo?.error}
+                  <p class="video-location">{videoCodecInfo.error}</p>
+                {/if}
+                {#if videoLocationLine(selectedVideo)}
+                  <p class="video-location">{videoLocationLine(selectedVideo)}</p>
+                {/if}
+                {#if selectedVideo.descriptionOrNotes}
+                  <p class="video-location">{selectedVideo.descriptionOrNotes}</p>
+                {/if}
+                <div class="video-actions secondary-video-actions">
+                  <button type="button" onclick={handleEditVideoInfo}>Edit Info</button>
+                  <button type="button" onclick={() => void handleResetVideoProgress()}>Reset Progress</button>
+                </div>
               </div>
             </section>
 
@@ -5570,12 +6161,16 @@
                     <input type="text" value={videoEditDraft.artist} oninput={(event) => updateVideoDraftField("artist", inputValue(event))} />
                   </label>
                   <label>
-                    <span>Show title</span>
-                    <input type="text" value={videoEditDraft.showTitle} oninput={(event) => updateVideoDraftField("showTitle", inputValue(event))} />
+                    <span>Video type</span>
+                    <select value={videoEditDraft.videoType} onchange={(event) => updateVideoDraftField("videoType", selectValue(event))}>
+                      {#each videoTypeOptions as option}
+                        <option value={option.value}>{option.label}</option>
+                      {/each}
+                    </select>
                   </label>
                   <label>
-                    <span>Album/release</span>
-                    <input type="text" value={videoEditDraft.albumOrRelease} oninput={(event) => updateVideoDraftField("albumOrRelease", inputValue(event))} />
+                    <span>Release / Collection</span>
+                    <input type="text" value={videoEditDraft.releaseOrCollection} oninput={(event) => updateVideoDraftField("releaseOrCollection", inputValue(event))} />
                   </label>
                   <label>
                     <span>Year</span>
@@ -5592,6 +6187,10 @@
                   <label>
                     <span>Country</span>
                     <input type="text" value={videoEditDraft.country} oninput={(event) => updateVideoDraftField("country", inputValue(event))} />
+                  </label>
+                  <label class="wide">
+                    <span>Description / Notes</span>
+                    <textarea value={videoEditDraft.descriptionOrNotes} oninput={(event) => updateVideoDraftField("descriptionOrNotes", textAreaValue(event))}></textarea>
                   </label>
                   <div class="video-edit-actions">
                     <button class="primary" type="submit" disabled={isSavingVideoInfo}>
@@ -5641,7 +6240,19 @@
               </button>
             </div>
 
-            <div class="video-stat-grid" aria-label="Live Shows summary">
+            <div class="video-filter-tabs" aria-label="Video type filters">
+              {#each videoTypeFilters as filter}
+                <button
+                  class:active={videoTypeFilter === filter.value}
+                  type="button"
+                  onclick={() => videoTypeFilter = filter.value}
+                >
+                  {filter.label}
+                </button>
+              {/each}
+            </div>
+
+            <div class="video-stat-grid" aria-label="Videos summary">
               {#each videoLibraryStats as stat}
                 <div>
                   <span>{stat.label}</span>
@@ -5650,13 +6261,128 @@
               {/each}
             </div>
 
-            <section class="dvd-placeholder" aria-labelledby="dvd-placeholder-title">
-              <div>
-                <p class="eyebrow">Future Import</p>
-                <h3 id="dvd-placeholder-title">DVD Import</h3>
-                <p>Coming later: import readable live show/music video DVDs. Cassette will not bypass DRM.</p>
+            <section class="dvd-import-panel" aria-labelledby="dvd-import-title">
+              <div class="settings-section-header">
+                <div>
+                  <p class="eyebrow">Source Import</p>
+                  <h3 id="dvd-import-title">DVD Import</h3>
+                  <p>DVD Import supports readable/non-DRM DVDs and VIDEO_TS folders. Cassette does not bypass DRM.</p>
+                </div>
+                <span class="settings-pill">{dvdImportStatus}</span>
               </div>
-              <span>Disabled</span>
+
+              <div class="dvd-actions">
+                <button type="button" disabled={isDetectingDvd || isImportingDvd} onclick={() => void handleDetectDvd()}>
+                  {isDetectingDvd ? "Detecting..." : "Detect DVD"}
+                </button>
+                <button type="button" disabled={isImportingDvd} onclick={() => void handleChooseVideoTsFolder()}>
+                  Choose VIDEO_TS Folder
+                </button>
+                <button type="button" disabled={!dvdSourcePath || isScanningDvdTitles || isImportingDvd} onclick={() => void handleScanDvdTitles()}>
+                  {isScanningDvdTitles ? "Scanning titles..." : "Scan DVD Titles"}
+                </button>
+                <button type="button" disabled={isImportingDvd} onclick={() => void handleChooseDvdOutputFolder()}>
+                  Choose Output Folder
+                </button>
+                <button class="primary" type="button" disabled={isImportingDvd || !selectedDvdTitleNumber || !dvdSourcePath || !dvdOutputFolder} onclick={() => void handleImportDvdTitle()}>
+                  {isImportingDvd ? "Importing..." : "Import Selected Title"}
+                </button>
+              </div>
+
+              <div class="dvd-status-grid">
+                <div><span>Source</span><strong>{dvdSourcePath ?? "No DVD detected"}</strong></div>
+                <div><span>Source type</span><strong>{dvdSourceType === "video_ts_folder" ? "VIDEO_TS folder" : dvdSourceType === "physical_device" ? "Physical DVD" : "Not selected"}</strong></div>
+                <div><span>Output folder</span><strong>{dvdOutputFolder ?? "Not selected"}</strong></div>
+                <div><span>Selected title</span><strong>{selectedDvdTitleNumber ? `Title ${String(selectedDvdTitleNumber).padStart(2, "0")}` : "Not selected"}</strong></div>
+              </div>
+
+              {#if dvdImportError}
+                <p class="form-message error" role="alert">{dvdImportError}</p>
+              {:else if dvdImportMessage}
+                <p class="form-message" role="status">{dvdImportMessage}</p>
+              {/if}
+
+              {#if dvdTitles.length > 0}
+                <div class="dvd-title-table" role="table" aria-label="DVD titles">
+                  <div class="dvd-title-row head" role="row">
+                    <span>Title</span>
+                    <span>Duration</span>
+                    <span>Chapters</span>
+                    <span>Suggested</span>
+                    <span>Select</span>
+                  </div>
+                  {#each dvdTitles as title (title.number)}
+                    <div class:active={selectedDvdTitleNumber === title.number} class="dvd-title-row" role="row">
+                      <span>{String(title.number).padStart(2, "0")}</span>
+                      <span>{title.duration ?? formatVideoDuration(title.durationSeconds)}</span>
+                      <span>{title.chapters ?? "Unknown"}</span>
+                      <span>{title.likelyMainTitle ? "Suggested" : ""}</span>
+                      <label>
+                        <input
+                          type="radio"
+                          name="dvd-title"
+                          checked={selectedDvdTitleNumber === title.number}
+                          onchange={() => handleSelectDvdTitle(title.number)}
+                        />
+                      </label>
+                    </div>
+                  {/each}
+                </div>
+              {/if}
+
+              <form class="dvd-import-form" onsubmit={(event) => { event.preventDefault(); void handleImportDvdTitle(); }}>
+                <label>
+                  <span>Title</span>
+                  <input type="text" value={dvdImportDraft.title} disabled={isImportingDvd} oninput={(event) => updateDvdImportDraftField("title", inputValue(event))} />
+                </label>
+                <label>
+                  <span>Artist</span>
+                  <input type="text" value={dvdImportDraft.artist} disabled={isImportingDvd} oninput={(event) => updateDvdImportDraftField("artist", inputValue(event))} />
+                </label>
+                <label>
+                  <span>Video Type</span>
+                  <select value={dvdImportDraft.videoType} disabled={isImportingDvd} onchange={(event) => updateDvdImportDraftField("videoType", selectValue(event))}>
+                    {#each videoTypeOptions as option}
+                      <option value={option.value}>{option.label}</option>
+                    {/each}
+                  </select>
+                </label>
+                <label>
+                  <span>Release / Collection</span>
+                  <input type="text" value={dvdImportDraft.releaseOrCollection} disabled={isImportingDvd} oninput={(event) => updateDvdImportDraftField("releaseOrCollection", inputValue(event))} />
+                </label>
+                <label>
+                  <span>Year</span>
+                  <input type="number" min="1" max="9999" value={dvdImportDraft.year} disabled={isImportingDvd} oninput={(event) => updateDvdImportDraftField("year", inputValue(event))} />
+                </label>
+                <label>
+                  <span>Venue</span>
+                  <input type="text" value={dvdImportDraft.venue} disabled={isImportingDvd} oninput={(event) => updateDvdImportDraftField("venue", inputValue(event))} />
+                </label>
+                <label>
+                  <span>City</span>
+                  <input type="text" value={dvdImportDraft.city} disabled={isImportingDvd} oninput={(event) => updateDvdImportDraftField("city", inputValue(event))} />
+                </label>
+                <label>
+                  <span>Country</span>
+                  <input type="text" value={dvdImportDraft.country} disabled={isImportingDvd} oninput={(event) => updateDvdImportDraftField("country", inputValue(event))} />
+                </label>
+                <label class="wide">
+                  <span>Description / Notes</span>
+                  <textarea disabled={isImportingDvd} value={dvdImportDraft.descriptionOrNotes} oninput={(event) => updateDvdImportDraftField("descriptionOrNotes", textAreaValue(event))}></textarea>
+                </label>
+                <label class="wide">
+                  <span>Output filename</span>
+                  <input type="text" value={dvdImportDraft.outputFilename} disabled={isImportingDvd} oninput={(event) => updateDvdImportDraftField("outputFilename", inputValue(event))} />
+                </label>
+              </form>
+
+              {#if dvdTitleScan?.rawOutput}
+                <details class="cd-debug-output">
+                  <summary>DVD tool output</summary>
+                  <pre>{dvdTitleScan.rawOutput}</pre>
+                </details>
+              {/if}
             </section>
 
             <p class="settings-note">Video thumbnails/durations use ffmpeg/ffprobe when available.</p>
@@ -6475,29 +7201,31 @@
     </div>
   {/if}
 
-  <NowPlayingBar
-    track={currentTrack}
-    {isPlaying}
-    {positionSeconds}
-    {durationSeconds}
-    {volume}
-    {canPlayPrevious}
-    {canPlayNext}
-    queueCount={playbackQueue.length}
-    {isQueueOpen}
-    {isShuffleEnabled}
-    {repeatMode}
-    onTogglePlayback={handleTogglePlayback}
-    onPrevious={handlePreviousTrack}
-    onNext={handleNextTrack}
-    onSeek={handleSeek}
-    onVolumeChange={handleVolumeChange}
-    onToggleFavorite={handleToggleFavorite}
-    onToggleQueue={handleToggleQueue}
-    onToggleShuffle={handleToggleShuffle}
-    onToggleRepeat={handleToggleRepeat}
-    onOpenNowPlaying={handleNowPlayingSelect}
-  />
+  {#if !isVideoPlaybackActive}
+    <NowPlayingBar
+      track={currentTrack}
+      {isPlaying}
+      {positionSeconds}
+      {durationSeconds}
+      {volume}
+      {canPlayPrevious}
+      {canPlayNext}
+      queueCount={playbackQueue.length}
+      {isQueueOpen}
+      {isShuffleEnabled}
+      {repeatMode}
+      onTogglePlayback={handleTogglePlayback}
+      onPrevious={handlePreviousTrack}
+      onNext={handleNextTrack}
+      onSeek={handleSeek}
+      onVolumeChange={handleVolumeChange}
+      onToggleFavorite={handleToggleFavorite}
+      onToggleQueue={handleToggleQueue}
+      onToggleShuffle={handleToggleShuffle}
+      onToggleRepeat={handleToggleRepeat}
+      onOpenNowPlaying={handleNowPlayingSelect}
+    />
+  {/if}
 </div>
 
 <style>
@@ -8203,15 +8931,45 @@
     padding: 0 32px 0 10px;
   }
 
+  .video-filter-tabs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .video-filter-tabs button {
+    min-height: 36px;
+    border: 1px solid #303844;
+    border-radius: 8px;
+    background: #161a20;
+    color: #d5dce5;
+    cursor: default;
+    font: inherit;
+    font-size: 0.82rem;
+    font-weight: 850;
+    padding: 0 11px;
+  }
+
+  .video-filter-tabs button:hover,
+  .video-filter-tabs button:focus-visible,
+  .video-filter-tabs button.active {
+    border-color: #35544f;
+    background: #17332f;
+    color: #d8fffa;
+    outline: none;
+  }
+
   .video-stat-grid,
-  .video-meta-grid {
+  .video-meta-grid,
+  .video-codec-grid {
     display: grid;
     grid-template-columns: repeat(4, minmax(0, 1fr));
     gap: 10px;
   }
 
   .video-stat-grid > div,
-  .video-meta-grid > div {
+  .video-meta-grid > div,
+  .video-codec-grid > div {
     min-width: 0;
     border: 1px solid #242b35;
     border-radius: 8px;
@@ -8220,7 +8978,8 @@
   }
 
   .video-stat-grid span,
-  .video-meta-grid span {
+  .video-meta-grid span,
+  .video-codec-grid span {
     display: block;
     margin-bottom: 6px;
     color: #8f9aa8;
@@ -8230,7 +8989,8 @@
   }
 
   .video-stat-grid strong,
-  .video-meta-grid strong {
+  .video-meta-grid strong,
+  .video-codec-grid strong {
     display: block;
     overflow: hidden;
     color: #f4f7fb;
@@ -8240,42 +9000,154 @@
     white-space: nowrap;
   }
 
-  .dvd-placeholder {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
+  .dvd-import-panel {
+    display: grid;
     gap: 16px;
-    border: 1px dashed #303844;
+    border: 1px solid #242b35;
     border-radius: 8px;
-    background: #11161d;
+    background: #12161c;
     padding: 16px;
   }
 
-  .dvd-placeholder h3,
-  .dvd-placeholder p {
+  .dvd-import-panel h3,
+  .dvd-import-panel p {
     margin: 0;
   }
 
-  .dvd-placeholder h3 {
+  .dvd-import-panel h3 {
     color: #f4f7fb;
     font-size: 1rem;
   }
 
-  .dvd-placeholder p:not(.eyebrow) {
+  .dvd-import-panel p:not(.eyebrow):not(.form-message) {
     margin-top: 4px;
     color: #9aa4b1;
     font-size: 0.9rem;
     font-weight: 700;
   }
 
-  .dvd-placeholder > span {
+  .dvd-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+
+  .dvd-actions button {
+    min-height: 38px;
     border: 1px solid #303844;
-    border-radius: 999px;
+    border-radius: 8px;
+    background: #161a20;
+    color: #d5dce5;
+    cursor: default;
+    font: inherit;
+    font-size: 0.84rem;
+    font-weight: 850;
+    padding: 0 12px;
+  }
+
+  .dvd-actions button.primary {
+    border-color: #35544f;
+    background: #17332f;
+    color: #d8fffa;
+  }
+
+  .dvd-actions button:hover:not(:disabled),
+  .dvd-actions button:focus-visible:not(:disabled) {
+    border-color: #35544f;
+    background: #1b2027;
+    outline: none;
+  }
+
+  .dvd-actions button.primary:hover:not(:disabled),
+  .dvd-actions button.primary:focus-visible:not(:disabled) {
+    border-color: #2f8f83;
+    background: #1b403a;
+  }
+
+  .dvd-actions button:disabled {
+    border-color: #303844;
+    background: #151a21;
+    color: #626c79;
+  }
+
+  .dvd-status-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 10px;
+  }
+
+  .dvd-status-grid > div {
+    min-width: 0;
+    border: 1px solid #242b35;
+    border-radius: 8px;
+    background: #151a21;
+    padding: 12px;
+  }
+
+  .dvd-status-grid span,
+  .dvd-import-form span {
+    display: block;
+    margin-bottom: 6px;
     color: #8f9aa8;
-    font-size: 0.76rem;
-    font-weight: 900;
-    padding: 6px 10px;
+    font-size: 0.74rem;
+    font-weight: 850;
     text-transform: uppercase;
+  }
+
+  .dvd-status-grid strong {
+    display: block;
+    overflow: hidden;
+    color: #f4f7fb;
+    font-size: 0.9rem;
+    font-weight: 850;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .dvd-title-table {
+    overflow: hidden;
+    border: 1px solid #242b35;
+    border-radius: 8px;
+    background: #151a21;
+  }
+
+  .dvd-title-row {
+    display: grid;
+    grid-template-columns: 76px 1fr 92px 110px 76px;
+    min-height: 42px;
+    align-items: center;
+    gap: 10px;
+    border-top: 1px solid #242b35;
+    color: #d5dce5;
+    font-size: 0.86rem;
+    font-weight: 750;
+    padding: 8px 12px;
+  }
+
+  .dvd-title-row:first-child {
+    border-top: 0;
+  }
+
+  .dvd-title-row.head {
+    background: #10141a;
+    color: #8f9aa8;
+    font-size: 0.74rem;
+    font-weight: 850;
+    text-transform: uppercase;
+  }
+
+  .dvd-title-row.active {
+    background: #172521;
+  }
+
+  .dvd-title-row input {
+    accent-color: #2f8f83;
+  }
+
+  .dvd-import-form {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 10px;
   }
 
   .video-grid {
@@ -8361,51 +9233,152 @@
 
   .video-detail-hero {
     display: grid;
-    grid-template-columns: minmax(360px, 1.2fr) minmax(300px, 0.8fr);
-    gap: 18px;
-    align-items: start;
+    gap: 14px;
   }
 
-  .video-player-panel {
+  .video-session-card {
     display: grid;
-    overflow: hidden;
-    min-width: 0;
-    aspect-ratio: 16 / 9;
-    place-items: center;
+    grid-template-columns: 180px minmax(0, 1fr) minmax(220px, 0.45fr);
+    gap: 16px;
+    align-items: center;
     border: 1px solid #242b35;
     border-radius: 8px;
-    background: #0b0e12;
+    background: #11161c;
+    padding: 16px;
   }
 
-  .video-player-panel video,
-  .video-player-panel img {
-    width: 100%;
-    height: 100%;
-    object-fit: contain;
-  }
-
-  .video-placeholder {
+  .video-session-thumb {
     display: grid;
+    overflow: hidden;
+    aspect-ratio: 16 / 9;
+    min-width: 0;
+    place-items: center;
+    border: 1px solid #303844;
+    border-radius: 8px;
+    background: #0b0e12;
+    color: #8fb9f2;
+    font-size: 2rem;
+    font-weight: 900;
+  }
+
+  .video-session-thumb img {
     width: 100%;
     height: 100%;
-    place-items: center;
-    color: #8fb9f2;
-    font-size: 2.4rem;
-    font-weight: 900;
+    object-fit: cover;
+  }
+
+  .video-session-copy {
+    display: grid;
+    min-width: 0;
+    gap: 6px;
+  }
+
+  .video-session-copy h3 {
+    overflow: hidden;
+    margin: 0;
+    color: #f4f7fb;
+    font-size: clamp(1.35rem, 3vw, 2.25rem);
+    line-height: 1.08;
+    text-overflow: ellipsis;
+  }
+
+  .video-session-copy > p:not(.eyebrow),
+  .video-window-note {
+    margin: 0;
+    color: #9aa4b1;
+    font-weight: 750;
+  }
+
+  .video-session-progress {
+    display: grid;
+    gap: 6px;
+    margin-top: 6px;
+  }
+
+  .video-session-progress > div:first-child {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    color: #d5dce5;
+    font-size: 0.82rem;
+    font-variant-numeric: tabular-nums;
+    font-weight: 850;
+  }
+
+  .video-panel-progress {
+    overflow: hidden;
+    height: 6px;
+    border-radius: 999px;
+    background: rgba(244, 247, 251, 0.12);
+  }
+
+  .video-panel-progress::before {
+    display: block;
+    width: var(--progress);
+    height: 100%;
+    background: #38a394;
+    content: "";
+  }
+
+  .video-session-status {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+  }
+
+  .video-session-status > div {
+    display: grid;
+    gap: 4px;
+    border: 1px solid #242b35;
+    border-radius: 8px;
+    background: #0f1318;
+    padding: 10px;
+  }
+
+  .video-session-status span {
+    color: #8f9aa8;
+    font-size: 0.72rem;
+    font-weight: 850;
+    text-transform: uppercase;
+  }
+
+  .video-session-status strong {
+    color: #f4f7fb;
+    font-size: 0.9rem;
+  }
+
+  .video-window-note,
+  .video-window-actions {
+    grid-column: 2 / -1;
+  }
+
+  .video-window-note {
+    font-size: 0.88rem;
+  }
+
+  .video-player-controls {
+    display: grid;
+    gap: 12px;
+    border: 1px solid #242b35;
+    border-radius: 8px;
+    background: #11161c;
+    padding: 14px;
   }
 
   .video-detail-copy {
     display: grid;
     min-width: 0;
     gap: 14px;
+    border-top: 1px solid #242b35;
+    padding-top: 18px;
   }
 
   .video-detail-copy h3 {
     overflow: hidden;
     margin: 0;
     color: #f4f7fb;
-    font-size: clamp(1.65rem, 4vw, 3rem);
-    line-height: 1.04;
+    font-size: 1.35rem;
+    line-height: 1.15;
     text-overflow: ellipsis;
   }
 
@@ -8415,8 +9388,14 @@
     font-weight: 750;
   }
 
-  .video-meta-grid {
+  .video-meta-grid,
+  .video-codec-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .video-codec-grid {
+    display: grid;
+    gap: 10px;
   }
 
   .video-location {
@@ -8428,6 +9407,37 @@
     display: flex;
     flex-wrap: wrap;
     gap: 10px;
+  }
+
+  .primary-video-actions button:first-child {
+    border-color: #3f746c;
+    background: #153d37;
+    color: #d8fffa;
+  }
+
+  .secondary-video-actions {
+    padding-top: 4px;
+  }
+
+  .video-native-controls {
+    display: grid;
+    gap: 10px;
+  }
+
+  .video-native-controls label {
+    display: grid;
+    grid-template-columns: 64px minmax(0, 1fr);
+    align-items: center;
+    gap: 10px;
+    color: #8f9aa8;
+    font-size: 0.78rem;
+    font-weight: 850;
+    text-transform: uppercase;
+  }
+
+  .video-native-controls input[type="range"] {
+    width: 100%;
+    accent-color: #2f8f83;
   }
 
   .video-edit-panel {
@@ -8445,7 +9455,8 @@
     gap: 12px;
   }
 
-  .video-edit-form label {
+  .video-edit-form label,
+  .dvd-import-form label {
     display: grid;
     gap: 7px;
     color: #8f9aa8;
@@ -8454,7 +9465,17 @@
     text-transform: uppercase;
   }
 
-  .video-edit-form input {
+  .video-edit-form label.wide,
+  .dvd-import-form label.wide {
+    grid-column: 1 / -1;
+  }
+
+  .video-edit-form input,
+  .video-edit-form select,
+  .video-edit-form textarea,
+  .dvd-import-form input,
+  .dvd-import-form select,
+  .dvd-import-form textarea {
     min-width: 0;
     min-height: 42px;
     border: 1px solid #303844;
@@ -8468,7 +9489,19 @@
     padding: 0 12px;
   }
 
-  .video-edit-form input:focus {
+  .video-edit-form textarea,
+  .dvd-import-form textarea {
+    min-height: 78px;
+    padding: 10px 12px;
+    resize: vertical;
+  }
+
+  .video-edit-form input:focus,
+  .video-edit-form select:focus,
+  .video-edit-form textarea:focus,
+  .dvd-import-form input:focus,
+  .dvd-import-form select:focus,
+  .dvd-import-form textarea:focus {
     border-color: #2f8f83;
     box-shadow: 0 0 0 2px rgba(47, 143, 131, 0.18);
   }
@@ -9791,7 +10824,22 @@
       grid-template-columns: 1fr;
     }
 
+    .video-session-card {
+      grid-template-columns: 160px minmax(0, 1fr);
+    }
+
+    .video-session-status,
+    .video-window-note,
+    .video-window-actions {
+      grid-column: 1 / -1;
+    }
+
     .video-stat-grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .dvd-status-grid,
+    .dvd-import-form {
       grid-template-columns: repeat(2, minmax(0, 1fr));
     }
 
@@ -9952,13 +11000,25 @@
     .settings-stat-grid,
     .video-stat-grid,
     .video-meta-grid,
+    .video-codec-grid,
     .video-edit-form,
+    .dvd-status-grid,
+    .dvd-import-form,
     .cd-status-grid,
     .cd-metadata-form,
     .settings-status-list,
     .settings-tool-grid,
     .stats-overview-grid {
       grid-template-columns: 1fr;
+    }
+
+    .video-session-card,
+    .video-session-status {
+      grid-template-columns: 1fr;
+    }
+
+    .video-session-thumb {
+      width: 100%;
     }
 
     .cd-track-head {
@@ -9969,6 +11029,21 @@
       grid-template-columns: 48px minmax(0, 1fr);
       gap: 8px 12px;
       align-items: start;
+    }
+
+    .dvd-title-row {
+      grid-template-columns: 52px minmax(0, 1fr);
+      gap: 6px 10px;
+      align-items: start;
+    }
+
+    .dvd-title-row.head {
+      display: none;
+    }
+
+    .dvd-title-row span:nth-child(n + 2),
+    .dvd-title-row label {
+      grid-column: 2;
     }
 
     .cd-track-row span:nth-child(n + 2) {

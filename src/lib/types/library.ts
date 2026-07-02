@@ -56,18 +56,23 @@ export type Playlist = {
   trackIds: string[];
 };
 
+export type VideoType = "music_video" | "live_show" | "concert" | "interview_documentary" | "behind_the_scenes" | "other";
+export type VideoSource = "local_file" | "dvd_import";
+
 export type VideoEntry = {
   id: string;
   filePath: string;
   fileName: string;
   title: string;
   artist: string | null;
-  showTitle: string | null;
-  albumOrRelease: string | null;
+  videoType: VideoType;
+  source: VideoSource;
+  releaseOrCollection: string | null;
   year: number | null;
   venue: string | null;
   city: string | null;
   country: string | null;
+  descriptionOrNotes: string | null;
   durationSeconds: number | null;
   thumbnailPath: string | null;
   lastPositionSeconds: number;
@@ -86,12 +91,62 @@ export type VideoLibrary = {
 export type VideoInfoUpdate = {
   title: string;
   artist: string | null;
-  showTitle: string | null;
-  albumOrRelease: string | null;
+  videoType: VideoType;
+  releaseOrCollection: string | null;
   year: number | null;
   venue: string | null;
   city: string | null;
   country: string | null;
+  descriptionOrNotes: string | null;
+};
+
+export type DvdDetectResult = {
+  found: boolean;
+  devicePath: string | null;
+  readable: boolean;
+  error: string | null;
+};
+
+export type DvdTitle = {
+  number: number;
+  duration: string | null;
+  durationSeconds: number | null;
+  chapters: number | null;
+  likelyMainTitle: boolean;
+};
+
+export type DvdTitleScanResult = {
+  sourceType: "physical_device" | "video_ts_folder";
+  sourcePath: string;
+  titles: DvdTitle[];
+  rawOutput: string | null;
+  error: string | null;
+};
+
+export type DvdImportMetadata = {
+  title: string;
+  artist: string;
+  videoType: VideoType;
+  releaseOrCollection: string | null;
+  year: number | null;
+  venue: string | null;
+  city: string | null;
+  country: string | null;
+  descriptionOrNotes: string | null;
+  outputFilename: string | null;
+};
+
+export type DvdImportResult = {
+  video: VideoEntry;
+  outputFolder: string;
+  outputPath: string;
+};
+
+export type DvdImportEvent = {
+  outputFolder?: string;
+  outputPath?: string;
+  titleNumber?: number;
+  message?: string;
 };
 
 export type NavItem = {
@@ -106,6 +161,29 @@ export type PlaybackStatus = {
   positionSeconds: number;
   durationSeconds: number | null;
   volume: number;
+};
+
+export type VideoPlaybackStatus = {
+  videoId: string | null;
+  filePath: string | null;
+  isPlaying: boolean;
+  hasEnded: boolean;
+  positionSeconds: number;
+  durationSeconds: number | null;
+  volume: number;
+  hasVideoWindow: boolean;
+  isFullscreen: boolean;
+  backend: string;
+  error: string | null;
+};
+
+export type VideoCodecInfo = {
+  container: string | null;
+  videoCodec: string | null;
+  audioCodec: string | null;
+  resolution: string | null;
+  durationSeconds: number | null;
+  error: string | null;
 };
 
 export type LibraryCache = {

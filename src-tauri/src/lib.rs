@@ -11,12 +11,14 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::ffi::CStr;
 use std::fs;
-use std::io::{self, Read};
+use std::io::{self, BufRead, BufReader, Read, Write};
+#[cfg(unix)]
+use std::os::unix::net::UnixStream;
 use std::os::raw::{c_char, c_int, c_uint, c_void};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Child, Command, Output, Stdio};
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 mod mpris;
@@ -88,12 +90,14 @@ struct VideoEntry {
     file_name: String,
     title: String,
     artist: Option<String>,
-    show_title: Option<String>,
-    album_or_release: Option<String>,
+    video_type: String,
+    source: String,
+    release_or_collection: Option<String>,
     year: Option<u16>,
     venue: Option<String>,
     city: Option<String>,
     country: Option<String>,
+    description_or_notes: Option<String>,
     duration_seconds: Option<u32>,
     thumbnail_path: Option<String>,
     last_position_seconds: u32,
@@ -116,12 +120,74 @@ struct VideoLibrary {
 struct VideoInfoUpdate {
     title: String,
     artist: Option<String>,
-    show_title: Option<String>,
-    album_or_release: Option<String>,
+    video_type: String,
+    release_or_collection: Option<String>,
     year: Option<u16>,
     venue: Option<String>,
     city: Option<String>,
     country: Option<String>,
+    description_or_notes: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DvdDetectResult {
+    found: bool,
+    device_path: Option<String>,
+    readable: bool,
+    error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DvdTitle {
+    number: u32,
+    duration: Option<String>,
+    duration_seconds: Option<u32>,
+    chapters: Option<u32>,
+    likely_main_title: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DvdTitleScanResult {
+    source_type: String,
+    source_path: String,
+    titles: Vec<DvdTitle>,
+    raw_output: Option<String>,
+    error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DvdImportEvent {
+    output_folder: Option<String>,
+    output_path: Option<String>,
+    title_number: Option<u32>,
+    message: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DvdImportMetadata {
+    title: String,
+    artist: String,
+    video_type: String,
+    release_or_collection: Option<String>,
+    year: Option<u16>,
+    venue: Option<String>,
+    city: Option<String>,
+    country: Option<String>,
+    description_or_notes: Option<String>,
+    output_filename: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DvdImportResult {
+    video: VideoEntry,
+    output_folder: String,
+    output_path: String,
 }
 
 #[derive(Debug, Clone)]
@@ -316,11 +382,63 @@ struct PlaybackStatus {
     volume: f64,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VideoPlaybackStatus {
+    video_id: Option<String>,
+    file_path: Option<String>,
+    is_playing: bool,
+    has_ended: bool,
+    position_seconds: u64,
+    duration_seconds: Option<u64>,
+    volume: f64,
+    has_video_window: bool,
+    is_fullscreen: bool,
+    backend: String,
+    error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VideoCodecInfo {
+    container: Option<String>,
+    video_codec: Option<String>,
+    audio_codec: Option<String>,
+    resolution: Option<String>,
+    duration_seconds: Option<u32>,
+    error: Option<String>,
+}
+
 #[derive(Debug, Default)]
 struct PlaybackState {
     playbin: Option<gst::Element>,
     current_path: Option<String>,
     is_playing: bool,
+    has_ended: bool,
+}
+
+#[derive(Debug, Default)]
+struct VideoPlaybackState {
+    child: Option<Child>,
+    ipc_path: Option<PathBuf>,
+    log_path: Option<PathBuf>,
+    current_video_id: Option<String>,
+    current_path: Option<String>,
+    is_playing: bool,
+    has_ended: bool,
+    position_seconds: u64,
+    duration_seconds: Option<u64>,
+    volume: f64,
+    has_video_window: bool,
+    is_fullscreen: bool,
+    request_id: u64,
+    last_error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct VideoProgressSnapshot {
+    video_id: String,
+    position_seconds: u64,
     has_ended: bool,
 }
 
@@ -357,6 +475,12 @@ struct LibraryDatabase {
 struct PlaybackHistory {
     play_count: i64,
     last_played_at: Option<i64>,
+}
+
+struct ImportedDvdVideo {
+    video: VideoEntry,
+    output_folder: String,
+    output_path: String,
 }
 
 #[tauri::command]
@@ -434,6 +558,221 @@ fn update_video_progress(
         .map_err(|_| "Library cache is unavailable.".to_owned())?;
 
     library.update_video_progress(&video_id, last_position_seconds, increment_play_count)
+}
+
+#[tauri::command]
+async fn play_video(
+    video_id: String,
+    start_position_seconds: Option<f64>,
+    video_playback: State<'_, Mutex<VideoPlaybackState>>,
+    library: State<'_, Mutex<LibraryDatabase>>,
+    playback: State<'_, Mutex<PlaybackState>>,
+    mpris: State<'_, MprisState>,
+) -> Result<VideoPlaybackStatus, String> {
+    let video = {
+        let library = library
+            .lock()
+            .map_err(|_| "Library cache is unavailable.".to_owned())?;
+
+        library
+            .video_by_id(&video_id)?
+            .ok_or_else(|| "Video is not in the library.".to_owned())?
+    };
+
+    if let Ok(mut playback) = playback.lock() {
+        let status = playback.pause()?;
+        mpris.update_playback(status.is_playing, status.position_seconds, status.volume);
+    }
+
+    let mut video_playback = video_playback
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    video_playback.play(&video, start_position_seconds)
+}
+
+#[tauri::command]
+fn pause_video(
+    video_playback: State<'_, Mutex<VideoPlaybackState>>,
+) -> Result<VideoPlaybackStatus, String> {
+    let mut video_playback = video_playback
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    video_playback.pause()
+}
+
+#[tauri::command]
+fn resume_video(
+    video_playback: State<'_, Mutex<VideoPlaybackState>>,
+) -> Result<VideoPlaybackStatus, String> {
+    let mut video_playback = video_playback
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    video_playback.resume()
+}
+
+#[tauri::command]
+fn stop_video(
+    video_playback: State<'_, Mutex<VideoPlaybackState>>,
+    library: State<'_, Mutex<LibraryDatabase>>,
+) -> Result<VideoPlaybackStatus, String> {
+    save_active_video_progress(&video_playback, &library, false)?;
+
+    let mut video_playback = video_playback
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    video_playback.stop()
+}
+
+#[tauri::command]
+fn seek_video(
+    position_seconds: f64,
+    video_playback: State<'_, Mutex<VideoPlaybackState>>,
+) -> Result<VideoPlaybackStatus, String> {
+    let mut video_playback = video_playback
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    video_playback.seek(position_seconds)
+}
+
+#[tauri::command]
+fn set_video_volume(
+    volume: f64,
+    video_playback: State<'_, Mutex<VideoPlaybackState>>,
+) -> Result<VideoPlaybackStatus, String> {
+    let mut video_playback = video_playback
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    video_playback.set_volume(volume)
+}
+
+#[tauri::command]
+fn get_video_state(
+    video_playback: State<'_, Mutex<VideoPlaybackState>>,
+    library: State<'_, Mutex<LibraryDatabase>>,
+) -> Result<VideoPlaybackStatus, String> {
+    let (status, closed_progress) = {
+        let mut video_playback = video_playback
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let closed_progress = video_playback.refresh();
+
+        (video_playback.status(), closed_progress)
+    };
+
+    if let Some(progress) = closed_progress {
+        save_video_progress_snapshot(&library, &progress)?;
+    }
+
+    Ok(status)
+}
+
+#[tauri::command]
+fn get_video_position(
+    video_playback: State<'_, Mutex<VideoPlaybackState>>,
+    library: State<'_, Mutex<LibraryDatabase>>,
+) -> Result<VideoPlaybackStatus, String> {
+    get_video_state(video_playback, library)
+}
+
+#[tauri::command]
+fn bring_video_window_to_front(
+    video_playback: State<'_, Mutex<VideoPlaybackState>>,
+) -> Result<VideoPlaybackStatus, String> {
+    let mut video_playback = video_playback
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    video_playback.bring_to_front()?;
+
+    Ok(video_playback.status())
+}
+
+#[tauri::command]
+fn fullscreen_video_window(
+    video_playback: State<'_, Mutex<VideoPlaybackState>>,
+) -> Result<VideoPlaybackStatus, String> {
+    let mut video_playback = video_playback
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    video_playback.toggle_fullscreen()?;
+
+    Ok(video_playback.status())
+}
+
+#[tauri::command]
+fn close_video_window(
+    video_playback: State<'_, Mutex<VideoPlaybackState>>,
+    library: State<'_, Mutex<LibraryDatabase>>,
+) -> Result<VideoPlaybackStatus, String> {
+    save_active_video_progress(&video_playback, &library, false)?;
+    let mut video_playback = video_playback
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    video_playback.stop()
+}
+
+#[tauri::command]
+fn get_video_codec_info(
+    video_id: String,
+    library: State<'_, Mutex<LibraryDatabase>>,
+) -> Result<VideoCodecInfo, String> {
+    let video = {
+        let library = library
+            .lock()
+            .map_err(|_| "Library cache is unavailable.".to_owned())?;
+
+        library
+            .video_by_id(&video_id)?
+            .ok_or_else(|| "Video is not in the library.".to_owned())?
+    };
+
+    Ok(ffprobe_video_codec_info(Path::new(&video.file_path)))
+}
+
+#[tauri::command]
+async fn detect_dvd() -> Result<DvdDetectResult, String> {
+    tauri::async_runtime::spawn_blocking(detect_dvd_blocking)
+        .await
+        .map_err(|error| format!("Could not detect DVD: {error}"))
+}
+
+#[tauri::command]
+async fn scan_dvd_titles(source: String) -> Result<DvdTitleScanResult, String> {
+    tauri::async_runtime::spawn_blocking(move || scan_dvd_titles_blocking(source))
+        .await
+        .map_err(|error| format!("Could not scan DVD titles: {error}"))?
+}
+
+#[tauri::command]
+async fn import_dvd_title(
+    source: String,
+    title_number: u32,
+    output_folder: String,
+    metadata: DvdImportMetadata,
+    app: AppHandle,
+    library: State<'_, Mutex<LibraryDatabase>>,
+) -> Result<DvdImportResult, String> {
+    let imported = tauri::async_runtime::spawn_blocking(move || {
+        import_dvd_title_blocking(source, title_number, output_folder, metadata, app)
+    })
+    .await
+    .map_err(|error| format!("Could not import DVD title: {error}"))??;
+
+    let mut library = library
+        .lock()
+        .map_err(|_| "Library cache is unavailable.".to_owned())?;
+    let video = library.upsert_video(imported.video)?;
+
+    Ok(DvdImportResult {
+        video,
+        output_folder: imported.output_folder,
+        output_path: imported.output_path,
+    })
 }
 
 #[tauri::command]
@@ -1561,6 +1900,398 @@ fn short_command_error(output: &Output) -> String {
         .to_owned()
 }
 
+fn detect_dvd_blocking() -> DvdDetectResult {
+    for device_path in ["/dev/dvd", "/dev/sr0", "/dev/cdrom"] {
+        let path = Path::new(device_path);
+
+        if !path.exists() {
+            continue;
+        }
+
+        return DvdDetectResult {
+            found: true,
+            device_path: Some(device_path.to_owned()),
+            readable: fs::File::open(path).is_ok(),
+            error: None,
+        };
+    }
+
+    DvdDetectResult {
+        found: false,
+        device_path: None,
+        readable: false,
+        error: Some("No DVD drive was found at /dev/dvd, /dev/sr0, or /dev/cdrom.".to_owned()),
+    }
+}
+
+fn scan_dvd_titles_blocking(source: String) -> Result<DvdTitleScanResult, String> {
+    ensure_command_available(
+        "lsdvd",
+        "lsdvd is not installed. Install lsdvd to scan readable DVD titles.",
+    )?;
+    let source_path = PathBuf::from(source);
+    let source_type = dvd_source_type(&source_path)?;
+    let output = Command::new("lsdvd")
+        .arg(&source_path)
+        .output()
+        .map_err(|error| format!("Could not run lsdvd: {error}"))?;
+    let raw_output = command_output_text(&output);
+
+    if !output.status.success() {
+        return Ok(DvdTitleScanResult {
+            source_type,
+            source_path: source_path.to_string_lossy().into_owned(),
+            titles: Vec::new(),
+            raw_output: Some(raw_output.clone()),
+            error: Some(dvd_tool_error(&raw_output, "Could not scan DVD titles with lsdvd.")),
+        });
+    }
+
+    let mut titles = parse_lsdvd_titles(&raw_output);
+    mark_likely_main_title(&mut titles);
+    let error = titles
+        .is_empty()
+        .then(|| "No DVD titles were found. The source may not be a readable video DVD.".to_owned());
+
+    Ok(DvdTitleScanResult {
+        source_type,
+        source_path: source_path.to_string_lossy().into_owned(),
+        titles,
+        raw_output: Some(raw_output),
+        error,
+    })
+}
+
+fn import_dvd_title_blocking(
+    source: String,
+    title_number: u32,
+    output_folder: String,
+    metadata: DvdImportMetadata,
+    app: AppHandle,
+) -> Result<ImportedDvdVideo, String> {
+    ensure_command_available(
+        "ffmpeg",
+        "ffmpeg is not installed. Install ffmpeg to import readable DVD titles.",
+    )?;
+
+    if title_number == 0 {
+        return Err("Choose a DVD title before importing.".to_owned());
+    }
+
+    let source_path = PathBuf::from(source);
+    let _source_type = dvd_source_type(&source_path)?;
+    let output_root = PathBuf::from(output_folder);
+
+    if !output_root.exists() {
+        return Err("Selected DVD import output folder does not exist.".to_owned());
+    }
+
+    if !output_root.is_dir() {
+        return Err("Selected DVD import output path is not a folder.".to_owned());
+    }
+
+    let title = clean_text(Some(metadata.title)).unwrap_or_else(|| format!("DVD Title {title_number:02}"));
+    let artist = clean_text(Some(metadata.artist)).unwrap_or_else(|| "Unknown Artist".to_owned());
+    let video_type = normalize_video_type(&metadata.video_type);
+    let fallback_folder = format!("DVD Import {}", rip_folder_timestamp());
+    let raw_folder = metadata
+        .year
+        .map(|year| format!("{artist} - {title} ({year})"))
+        .unwrap_or_else(|| format!("{artist} - {title}"));
+    let (folder_name, _) = sanitize_path_component(&raw_folder, &fallback_folder);
+    let import_folder = unique_child_folder(&output_root, &folder_name);
+    fs::create_dir_all(&import_folder)
+        .map_err(|error| format!("Could not create DVD import folder: {error}"))?;
+
+    let fallback_filename = format!("DVD Import {}.mkv", rip_folder_timestamp());
+    let output_stem = metadata
+        .output_filename
+        .as_deref()
+        .and_then(|value| clean_text(Some(value.to_owned())))
+        .unwrap_or_else(|| raw_folder.clone());
+    let (mut output_filename, _) = sanitize_path_component(&output_stem, &fallback_filename);
+
+    if !output_filename.to_lowercase().ends_with(".mkv") {
+        output_filename.push_str(".mkv");
+    }
+
+    let output_path = import_folder.join(output_filename);
+    let _ = app.emit(
+        "dvd-import-started",
+        DvdImportEvent {
+            output_folder: Some(import_folder.to_string_lossy().into_owned()),
+            output_path: Some(output_path.to_string_lossy().into_owned()),
+            title_number: Some(title_number),
+            message: Some("DVD import started.".to_owned()),
+        },
+    );
+    let _ = app.emit(
+        "dvd-import-title-started",
+        DvdImportEvent {
+            output_folder: Some(import_folder.to_string_lossy().into_owned()),
+            output_path: Some(output_path.to_string_lossy().into_owned()),
+            title_number: Some(title_number),
+            message: Some(format!("Importing DVD title {title_number:02}.")),
+        },
+    );
+
+    let copy_result = run_dvd_ffmpeg_import(&source_path, title_number, &output_path, true);
+
+    if let Err(copy_error) = copy_result {
+        let _ = app.emit(
+            "dvd-import-progress",
+            DvdImportEvent {
+                output_folder: Some(import_folder.to_string_lossy().into_owned()),
+                output_path: Some(output_path.to_string_lossy().into_owned()),
+                title_number: Some(title_number),
+                message: Some("Stream copy failed; retrying with an encode fallback.".to_owned()),
+            },
+        );
+
+        if is_dvd_unsupported_error(&copy_error) {
+            let message = dvd_tool_error(&copy_error, "DVD import failed.");
+            let _ = app.emit(
+                "dvd-import-error",
+                DvdImportEvent {
+                    output_folder: Some(import_folder.to_string_lossy().into_owned()),
+                    output_path: Some(output_path.to_string_lossy().into_owned()),
+                    title_number: Some(title_number),
+                    message: Some(message.clone()),
+                },
+            );
+            return Err(message);
+        }
+
+        if let Err(encode_error) = run_dvd_ffmpeg_import(&source_path, title_number, &output_path, false) {
+            let message = dvd_tool_error(&encode_error, "DVD import failed.");
+            let _ = app.emit(
+                "dvd-import-error",
+                DvdImportEvent {
+                    output_folder: Some(import_folder.to_string_lossy().into_owned()),
+                    output_path: Some(output_path.to_string_lossy().into_owned()),
+                    title_number: Some(title_number),
+                    message: Some(message.clone()),
+                },
+            );
+            return Err(message);
+        }
+    }
+
+    let duration_seconds = ffprobe_video_duration_seconds(&output_path);
+    let thumbnail_path = app
+        .path()
+        .app_data_dir()
+        .ok()
+        .map(|path| path.join("video-thumbnails"))
+        .and_then(|thumbnail_dir| generate_video_thumbnail(&output_path, duration_seconds, &thumbnail_dir));
+    let now = unix_timestamp();
+    let file_name = output_path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "dvd-import.mkv".to_owned());
+    let video = VideoEntry {
+        id: output_path.to_string_lossy().into_owned(),
+        file_path: output_path.to_string_lossy().into_owned(),
+        file_name,
+        title,
+        artist: Some(artist),
+        video_type,
+        source: normalize_video_source("dvd_import"),
+        release_or_collection: clean_text(metadata.release_or_collection),
+        year: metadata.year,
+        venue: clean_text(metadata.venue),
+        city: clean_text(metadata.city),
+        country: clean_text(metadata.country),
+        description_or_notes: clean_text(metadata.description_or_notes),
+        duration_seconds,
+        thumbnail_path,
+        last_position_seconds: 0,
+        play_count: 0,
+        last_played_at: None,
+        created_at: now,
+        updated_at: now,
+    };
+
+    let _ = app.emit(
+        "dvd-import-finished",
+        DvdImportEvent {
+            output_folder: Some(import_folder.to_string_lossy().into_owned()),
+            output_path: Some(output_path.to_string_lossy().into_owned()),
+            title_number: Some(title_number),
+            message: Some("DVD import complete.".to_owned()),
+        },
+    );
+
+    Ok(ImportedDvdVideo {
+        video,
+        output_folder: import_folder.to_string_lossy().into_owned(),
+        output_path: output_path.to_string_lossy().into_owned(),
+    })
+}
+
+fn run_dvd_ffmpeg_import(
+    source_path: &Path,
+    title_number: u32,
+    output_path: &Path,
+    stream_copy: bool,
+) -> Result<(), String> {
+    let mut command = Command::new("ffmpeg");
+    command
+        .args(["-y", "-hide_banner", "-loglevel", "info", "-f", "dvdvideo", "-title"])
+        .arg(title_number.to_string())
+        .arg("-i")
+        .arg(source_path)
+        .args(["-map", "0"]);
+
+    if stream_copy {
+        command.args(["-c", "copy"]);
+    } else {
+        command.args(["-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-c:a", "aac", "-b:a", "192k"]);
+    }
+
+    let output = command
+        .arg(output_path)
+        .output()
+        .map_err(|error| format!("Could not run ffmpeg: {error}"))?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(command_output_text(&output))
+    }
+}
+
+fn dvd_source_type(path: &Path) -> Result<String, String> {
+    if path.is_dir() {
+        if is_video_ts_folder(path) {
+            return Ok("video_ts_folder".to_owned());
+        }
+
+        return Err("Selected folder is not a VIDEO_TS folder.".to_owned());
+    }
+
+    if path.exists() {
+        return Ok("physical_device".to_owned());
+    }
+
+    Err("DVD source does not exist.".to_owned())
+}
+
+fn is_video_ts_folder(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.eq_ignore_ascii_case("VIDEO_TS"))
+        .unwrap_or(false)
+        && path.join("VIDEO_TS.IFO").exists()
+}
+
+fn parse_lsdvd_titles(raw_output: &str) -> Vec<DvdTitle> {
+    let mut titles = Vec::new();
+
+    for line in raw_output.lines().map(str::trim) {
+        if !line.starts_with("Title:") {
+            continue;
+        }
+
+        let Some(number) = parse_lsdvd_title_number(line) else {
+            continue;
+        };
+        let duration = parse_lsdvd_field(line, "Length:");
+        let duration_seconds = duration.as_deref().and_then(parse_dvd_duration_seconds);
+        let chapters = parse_lsdvd_field(line, "Chapters:")
+            .and_then(|value| value.parse::<u32>().ok());
+
+        titles.push(DvdTitle {
+            number,
+            duration,
+            duration_seconds,
+            chapters,
+            likely_main_title: false,
+        });
+    }
+
+    titles
+}
+
+fn parse_lsdvd_title_number(line: &str) -> Option<u32> {
+    let value = line.strip_prefix("Title:")?.trim();
+    let number = value
+        .split([',', ' '])
+        .find(|part| !part.trim().is_empty())?
+        .trim()
+        .trim_start_matches('0');
+
+    if number.is_empty() {
+        Some(0)
+    } else {
+        number.parse::<u32>().ok()
+    }
+}
+
+fn parse_lsdvd_field(line: &str, key: &str) -> Option<String> {
+    let start = line.find(key)? + key.len();
+    let value = line[start..]
+        .split(',')
+        .next()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+
+    Some(value.to_owned())
+}
+
+fn parse_dvd_duration_seconds(value: &str) -> Option<u32> {
+    let time = value.split('.').next().unwrap_or(value);
+    let parts = time
+        .split(':')
+        .filter_map(|part| part.parse::<u32>().ok())
+        .collect::<Vec<_>>();
+
+    match parts.as_slice() {
+        [hours, minutes, seconds] => Some(hours * 3600 + minutes * 60 + seconds),
+        [minutes, seconds] => Some(minutes * 60 + seconds),
+        [seconds] => Some(*seconds),
+        _ => None,
+    }
+}
+
+fn mark_likely_main_title(titles: &mut [DvdTitle]) {
+    let Some((index, _)) = titles
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, title)| title.duration_seconds.unwrap_or(0))
+    else {
+        return;
+    };
+
+    if titles[index].duration_seconds.unwrap_or(0) > 0 {
+        titles[index].likely_main_title = true;
+    }
+}
+
+fn is_dvd_unsupported_error(output: &str) -> bool {
+    let lower = output.to_lowercase();
+    lower.contains("encrypted")
+        || lower.contains("libdvdcss")
+        || lower.contains("css")
+        || lower.contains("scrambled")
+        || lower.contains("permission denied")
+        || lower.contains("input/output error")
+}
+
+fn dvd_tool_error(output: &str, fallback: &str) -> String {
+    if is_dvd_unsupported_error(output) {
+        return "This DVD is not readable by system tools. Cassette does not bypass DVD DRM.".to_owned();
+    }
+
+    output
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(|line| format!("{fallback} {line}"))
+        .unwrap_or_else(|| fallback.to_owned())
+}
+
 fn cd_track_filename(track_number: u32) -> String {
     format!("{track_number:02} - Track {track_number:02}.flac")
 }
@@ -1874,10 +2605,14 @@ impl LibraryDatabase {
                 artist TEXT,
                 show_title TEXT,
                 album_or_release TEXT,
+                video_type TEXT NOT NULL DEFAULT 'other',
+                source TEXT NOT NULL DEFAULT 'local_file',
+                release_or_collection TEXT,
                 year INTEGER,
                 venue TEXT,
                 city TEXT,
                 country TEXT,
+                description_or_notes TEXT,
                 duration_seconds INTEGER,
                 thumbnail_path TEXT,
                 last_position_seconds INTEGER NOT NULL DEFAULT 0,
@@ -1928,6 +2663,42 @@ impl LibraryDatabase {
         if !self.has_column("tracks", "last_played_at")? {
             self.connection
                 .execute("ALTER TABLE tracks ADD COLUMN last_played_at INTEGER", [])?;
+        }
+
+        if !self.has_column("videos", "video_type")? {
+            self.connection.execute(
+                "ALTER TABLE videos ADD COLUMN video_type TEXT NOT NULL DEFAULT 'live_show'",
+                [],
+            )?;
+        }
+
+        if !self.has_column("videos", "source")? {
+            self.connection.execute(
+                "ALTER TABLE videos ADD COLUMN source TEXT NOT NULL DEFAULT 'local_file'",
+                [],
+            )?;
+        }
+
+        if !self.has_column("videos", "release_or_collection")? {
+            self.connection
+                .execute("ALTER TABLE videos ADD COLUMN release_or_collection TEXT", [])?;
+            if self.has_column("videos", "album_or_release")? {
+                self.connection.execute(
+                    "
+                    UPDATE videos
+                    SET release_or_collection = album_or_release
+                    WHERE release_or_collection IS NULL
+                        AND album_or_release IS NOT NULL
+                        AND trim(album_or_release) != ''
+                    ",
+                    [],
+                )?;
+            }
+        }
+
+        if !self.has_column("videos", "description_or_notes")? {
+            self.connection
+                .execute("ALTER TABLE videos ADD COLUMN description_or_notes TEXT", [])?;
         }
 
         Ok(())
@@ -2011,12 +2782,14 @@ impl LibraryDatabase {
                     file_name,
                     title,
                     artist,
-                    show_title,
-                    album_or_release,
+                    video_type,
+                    source,
+                    release_or_collection,
                     year,
                     venue,
                     city,
                     country,
+                    description_or_notes,
                     duration_seconds,
                     thumbnail_path,
                     last_position_seconds,
@@ -2065,12 +2838,14 @@ impl LibraryDatabase {
             if let Some(existing) = existing_videos.get(&video.id) {
                 video.title = existing.title.clone();
                 video.artist = existing.artist.clone();
-                video.show_title = existing.show_title.clone();
-                video.album_or_release = existing.album_or_release.clone();
+                video.video_type = existing.video_type.clone();
+                video.source = existing.source.clone();
+                video.release_or_collection = existing.release_or_collection.clone();
                 video.year = existing.year;
                 video.venue = existing.venue.clone();
                 video.city = existing.city.clone();
                 video.country = existing.country.clone();
+                video.description_or_notes = existing.description_or_notes.clone();
                 video.last_position_seconds = existing.last_position_seconds;
                 video.play_count = existing.play_count;
                 video.last_played_at = existing.last_played_at;
@@ -2088,12 +2863,14 @@ impl LibraryDatabase {
                         file_name,
                         title,
                         artist,
-                        show_title,
-                        album_or_release,
+                        video_type,
+                        source,
+                        release_or_collection,
                         year,
                         venue,
                         city,
                         country,
+                        description_or_notes,
                         duration_seconds,
                         thumbnail_path,
                         last_position_seconds,
@@ -2101,18 +2878,20 @@ impl LibraryDatabase {
                         last_played_at,
                         created_at,
                         updated_at
-                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
                     ON CONFLICT(id) DO UPDATE SET
                         file_path = excluded.file_path,
                         file_name = excluded.file_name,
                         title = excluded.title,
                         artist = excluded.artist,
-                        show_title = excluded.show_title,
-                        album_or_release = excluded.album_or_release,
+                        video_type = excluded.video_type,
+                        source = excluded.source,
+                        release_or_collection = excluded.release_or_collection,
                         year = excluded.year,
                         venue = excluded.venue,
                         city = excluded.city,
                         country = excluded.country,
+                        description_or_notes = excluded.description_or_notes,
                         duration_seconds = excluded.duration_seconds,
                         thumbnail_path = excluded.thumbnail_path,
                         last_position_seconds = excluded.last_position_seconds,
@@ -2132,12 +2911,14 @@ impl LibraryDatabase {
                         &video.file_name,
                         &video.title,
                         &video.artist,
-                        &video.show_title,
-                        &video.album_or_release,
+                        &video.video_type,
+                        &video.source,
+                        &video.release_or_collection,
                         video.year,
                         &video.venue,
                         &video.city,
                         &video.country,
+                        &video.description_or_notes,
                         video.duration_seconds,
                         &video.thumbnail_path,
                         video.last_position_seconds,
@@ -2191,12 +2972,14 @@ impl LibraryDatabase {
                     file_name,
                     title,
                     artist,
-                    show_title,
-                    album_or_release,
+                    video_type,
+                    source,
+                    release_or_collection,
                     year,
                     venue,
                     city,
                     country,
+                    description_or_notes,
                     duration_seconds,
                     thumbnail_path,
                     last_position_seconds,
@@ -2214,6 +2997,78 @@ impl LibraryDatabase {
             .map_err(|error| format!("Could not read video: {error}"))
     }
 
+    fn upsert_video(&mut self, video: VideoEntry) -> Result<VideoEntry, String> {
+        self.connection
+            .execute(
+                "
+                INSERT INTO videos (
+                    id,
+                    file_path,
+                    file_name,
+                    title,
+                    artist,
+                    video_type,
+                    source,
+                    release_or_collection,
+                    year,
+                    venue,
+                    city,
+                    country,
+                    description_or_notes,
+                    duration_seconds,
+                    thumbnail_path,
+                    last_position_seconds,
+                    play_count,
+                    last_played_at,
+                    created_at,
+                    updated_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
+                ON CONFLICT(id) DO UPDATE SET
+                    file_path = excluded.file_path,
+                    file_name = excluded.file_name,
+                    title = excluded.title,
+                    artist = excluded.artist,
+                    video_type = excluded.video_type,
+                    source = excluded.source,
+                    release_or_collection = excluded.release_or_collection,
+                    year = excluded.year,
+                    venue = excluded.venue,
+                    city = excluded.city,
+                    country = excluded.country,
+                    description_or_notes = excluded.description_or_notes,
+                    duration_seconds = excluded.duration_seconds,
+                    thumbnail_path = excluded.thumbnail_path,
+                    updated_at = excluded.updated_at
+                ",
+                params![
+                    &video.id,
+                    &video.file_path,
+                    &video.file_name,
+                    &video.title,
+                    &video.artist,
+                    &video.video_type,
+                    &video.source,
+                    &video.release_or_collection,
+                    video.year,
+                    &video.venue,
+                    &video.city,
+                    &video.country,
+                    &video.description_or_notes,
+                    video.duration_seconds,
+                    &video.thumbnail_path,
+                    video.last_position_seconds,
+                    video.play_count,
+                    video.last_played_at,
+                    video.created_at,
+                    video.updated_at,
+                ],
+            )
+            .map_err(|error| format!("Could not save imported video: {error}"))?;
+
+        self.video_by_id(&video.id)?
+            .ok_or_else(|| "Imported video was not saved.".to_owned())
+    }
+
     fn update_video_info(&self, id: &str, info: VideoInfoUpdate) -> Result<VideoEntry, String> {
         let title = clean_text(Some(info.title)).unwrap_or_else(|| "Untitled Video".to_owned());
         let updated = self
@@ -2223,25 +3078,27 @@ impl LibraryDatabase {
                 UPDATE videos
                 SET title = ?2,
                     artist = ?3,
-                    show_title = ?4,
-                    album_or_release = ?5,
+                    video_type = ?4,
+                    release_or_collection = ?5,
                     year = ?6,
                     venue = ?7,
                     city = ?8,
                     country = ?9,
-                    updated_at = ?10
+                    description_or_notes = ?10,
+                    updated_at = ?11
                 WHERE id = ?1
                 ",
                 params![
                     id,
                     title,
                     clean_text(info.artist),
-                    clean_text(info.show_title),
-                    clean_text(info.album_or_release),
+                    normalize_video_type(&info.video_type),
+                    clean_text(info.release_or_collection),
                     info.year,
                     clean_text(info.venue),
                     clean_text(info.city),
                     clean_text(info.country),
+                    clean_text(info.description_or_notes),
                     unix_timestamp(),
                 ],
             )
@@ -3212,6 +4069,532 @@ impl PlaybackState {
     }
 }
 
+impl VideoPlaybackState {
+    fn play(
+        &mut self,
+        video: &VideoEntry,
+        start_position_seconds: Option<f64>,
+    ) -> Result<VideoPlaybackStatus, String> {
+        let path = PathBuf::from(&video.file_path);
+
+        if !path.exists() {
+            return Err("Selected video no longer exists.".to_owned());
+        }
+
+        if !path.is_file() {
+            return Err("Selected video is not a file.".to_owned());
+        }
+
+        self.stop_process();
+        self.last_error = None;
+
+        ensure_mpv_available(&video.file_path)?;
+
+        let ipc_path = mpv_ipc_path();
+        let log_path = mpv_log_path();
+        let _ = fs::remove_file(&ipc_path);
+        let _ = fs::remove_file(&log_path);
+        let start_position = start_position_seconds.unwrap_or(0.0).max(0.0);
+        let title = video_window_title(video);
+        let mut command = Command::new("mpv");
+        command
+            .arg("--force-window=yes")
+            .arg("--keep-open=yes")
+            .arg("--input-terminal=no")
+            .arg("--no-terminal")
+            .arg(format!("--input-ipc-server={}", ipc_path.to_string_lossy()))
+            .arg(format!("--log-file={}", log_path.to_string_lossy()))
+            .arg(format!("--title={title}"))
+            .arg("--autofit=1280x720")
+            .arg("--autofit-smaller=960x540")
+            .arg("--geometry=50%:50%")
+            .arg(format!("--start={start_position:.3}"))
+            .arg(format!("--volume={}", (self.volume_or_default() * 100.0).round()))
+            .arg(&video.file_path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+
+        let mut child = command
+            .spawn()
+            .map_err(|error| video_playback_error("mpv", &video.file_path, &format!("Could not start mpv: {error}")))?;
+
+        wait_for_mpv_ipc(&mut child, &ipc_path, &log_path, &video.file_path)?;
+
+        self.child = Some(child);
+        self.ipc_path = Some(ipc_path);
+        self.log_path = Some(log_path);
+        self.current_video_id = Some(video.id.clone());
+        self.current_path = Some(video.file_path.clone());
+        self.is_playing = true;
+        self.has_ended = false;
+        self.position_seconds = start_position.floor() as u64;
+        self.duration_seconds = video.duration_seconds.map(u64::from);
+        self.has_video_window = true;
+        self.is_fullscreen = false;
+        self.update_from_mpv()?;
+
+        Ok(self.status())
+    }
+
+    fn pause(&mut self) -> Result<VideoPlaybackStatus, String> {
+        if self.child.is_some() {
+            self.mpv_command(serde_json::json!(["set_property", "pause", true]))?;
+            self.is_playing = false;
+            self.update_from_mpv()?;
+        }
+
+        Ok(self.status())
+    }
+
+    fn resume(&mut self) -> Result<VideoPlaybackStatus, String> {
+        if self.child.is_some() {
+            self.mpv_command(serde_json::json!(["set_property", "pause", false]))?;
+            self.is_playing = self.current_path.is_some();
+            self.has_ended = false;
+            self.update_from_mpv()?;
+        }
+
+        Ok(self.status())
+    }
+
+    fn stop(&mut self) -> Result<VideoPlaybackStatus, String> {
+        self.stop_process();
+        self.clear_active_video(false);
+
+        Ok(self.status())
+    }
+
+    fn refresh(&mut self) -> Option<VideoProgressSnapshot> {
+        if self.child.is_none() {
+            return None;
+        }
+
+        if self.process_has_exited() {
+            let snapshot = self.progress_snapshot();
+            self.clear_active_video(false);
+            return snapshot;
+        }
+
+        if let Err(error) = self.update_from_mpv() {
+            self.last_error = Some(error);
+        }
+
+        None
+    }
+
+    fn seek(&mut self, position_seconds: f64) -> Result<VideoPlaybackStatus, String> {
+        if !position_seconds.is_finite() || self.current_path.is_none() {
+            return Ok(self.status());
+        }
+
+        if self.child.is_none() {
+            return Ok(self.status());
+        }
+        let duration = self
+            .duration_seconds
+            .map(|duration| duration as f64)
+            .filter(|duration| *duration > 0.0)
+            .unwrap_or(position_seconds.max(0.0));
+        let clamped_position_seconds = position_seconds.clamp(0.0, duration);
+        self.mpv_command(serde_json::json!(["seek", clamped_position_seconds, "absolute", "exact"]))?;
+        self.has_ended = false;
+        self.position_seconds = clamped_position_seconds.floor() as u64;
+        self.update_from_mpv()?;
+
+        Ok(self.status())
+    }
+
+    fn set_volume(&mut self, volume: f64) -> Result<VideoPlaybackStatus, String> {
+        let volume = volume.clamp(0.0, 1.0);
+        self.volume = volume;
+
+        if self.child.is_some() {
+            self.mpv_command(serde_json::json!(["set_property", "volume", volume * 100.0]))?;
+            self.update_from_mpv()?;
+        }
+
+        Ok(self.status())
+    }
+
+    fn bring_to_front(&mut self) -> Result<VideoPlaybackStatus, String> {
+        if self.child.is_some() {
+            let _ = self.mpv_command(serde_json::json!(["set_property", "window-minimized", false]));
+            let _ = self.mpv_command(serde_json::json!(["set_property", "ontop", true]));
+            let _ = self.mpv_command(serde_json::json!(["set_property", "ontop", false]));
+            self.update_from_mpv()?;
+        }
+
+        Ok(self.status())
+    }
+
+    fn toggle_fullscreen(&mut self) -> Result<VideoPlaybackStatus, String> {
+        if self.child.is_some() {
+            let next_fullscreen = !self.is_fullscreen;
+            self.mpv_command(serde_json::json!(["set_property", "fullscreen", next_fullscreen]))?;
+            self.is_fullscreen = next_fullscreen;
+            self.update_from_mpv()?;
+        }
+
+        Ok(self.status())
+    }
+
+    fn update_from_mpv(&mut self) -> Result<(), String> {
+        if self.process_has_exited() {
+            return Ok(());
+        }
+
+        let pause = self
+            .mpv_get_property("pause")
+            .ok()
+            .and_then(|value| value.as_bool())
+            .unwrap_or(!self.is_playing);
+        let eof_reached = self
+            .mpv_get_property("eof-reached")
+            .ok()
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+
+        if let Some(position) = self
+            .mpv_get_property("time-pos")
+            .ok()
+            .and_then(|value| value.as_f64())
+            .filter(|value| value.is_finite() && *value >= 0.0)
+        {
+            self.position_seconds = position.floor() as u64;
+        }
+
+        if let Some(duration) = self
+            .mpv_get_property("duration")
+            .ok()
+            .and_then(|value| value.as_f64())
+            .filter(|value| value.is_finite() && *value > 0.0)
+        {
+            self.duration_seconds = Some(duration.round() as u64);
+        }
+
+        if let Some(volume) = self
+            .mpv_get_property("volume")
+            .ok()
+            .and_then(|value| value.as_f64())
+            .filter(|value| value.is_finite())
+        {
+            self.volume = (volume / 100.0).clamp(0.0, 1.0);
+        }
+
+        if let Some(fullscreen) = self
+            .mpv_get_property("fullscreen")
+            .ok()
+            .and_then(|value| value.as_bool())
+        {
+            self.is_fullscreen = fullscreen;
+        }
+
+        self.has_ended = eof_reached;
+        self.is_playing = self.current_path.is_some() && !pause && !eof_reached;
+        self.has_video_window = self.current_path.is_some() && self.child.is_some();
+        self.last_error = None;
+
+        Ok(())
+    }
+
+    fn mpv_get_property(&mut self, property: &str) -> Result<serde_json::Value, String> {
+        self.mpv_command(serde_json::json!(["get_property", property]))
+    }
+
+    #[cfg(unix)]
+    fn mpv_command(&mut self, command: serde_json::Value) -> Result<serde_json::Value, String> {
+        let Some(ipc_path) = self.ipc_path.as_ref() else {
+            return Err("mpv IPC is not available.".to_owned());
+        };
+        let file_path = self.current_path.as_deref().unwrap_or("unknown video");
+        self.request_id = self.request_id.wrapping_add(1).max(1);
+        let request_id = self.request_id;
+        let mut stream = UnixStream::connect(ipc_path)
+            .map_err(|error| video_playback_error("mpv", file_path, &format!("Could not connect to mpv IPC: {error}")))?;
+        stream
+            .set_read_timeout(Some(Duration::from_millis(1200)))
+            .ok();
+        stream
+            .set_write_timeout(Some(Duration::from_millis(1200)))
+            .ok();
+        let request = serde_json::json!({
+            "command": command,
+            "request_id": request_id,
+        });
+        writeln!(stream, "{request}")
+            .map_err(|error| video_playback_error("mpv", file_path, &format!("Could not send mpv command: {error}")))?;
+
+        let mut reader = BufReader::new(stream);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            let bytes = reader
+                .read_line(&mut line)
+                .map_err(|error| video_playback_error("mpv", file_path, &format!("Could not read mpv response: {error}")))?;
+
+            if bytes == 0 {
+                return Err(video_playback_error("mpv", file_path, "mpv closed the IPC connection."));
+            }
+
+            let response = serde_json::from_str::<serde_json::Value>(&line)
+                .map_err(|error| video_playback_error("mpv", file_path, &format!("Could not parse mpv response: {error}")))?;
+
+            if response
+                .get("request_id")
+                .and_then(serde_json::Value::as_u64)
+                != Some(request_id)
+            {
+                continue;
+            }
+
+            let error = response
+                .get("error")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown");
+
+            if error != "success" {
+                return Err(video_playback_error(
+                    "mpv",
+                    file_path,
+                    &format!("mpv command failed: {error}"),
+                ));
+            }
+
+            return Ok(response.get("data").cloned().unwrap_or(serde_json::Value::Null));
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn mpv_command(&mut self, _command: serde_json::Value) -> Result<serde_json::Value, String> {
+        Err("Cassette video playback through mpv IPC is only implemented on Unix-like systems.".to_owned())
+    }
+
+    fn process_has_exited(&mut self) -> bool {
+        match self.child.as_mut().and_then(|child| child.try_wait().ok()).flatten() {
+            Some(_) => true,
+            None => false,
+        }
+    }
+
+    fn progress_snapshot(&self) -> Option<VideoProgressSnapshot> {
+        self.current_video_id
+            .as_ref()
+            .map(|video_id| VideoProgressSnapshot {
+                video_id: video_id.clone(),
+                position_seconds: self.position_seconds,
+                has_ended: self.has_ended,
+            })
+    }
+
+    fn stop_process(&mut self) {
+        if self.child.is_some() {
+            let _ = self.mpv_command(serde_json::json!(["quit"]));
+        }
+
+        if let Some(mut child) = self.child.take() {
+            for _ in 0..20 {
+                if child.try_wait().ok().flatten().is_some() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+
+            if child.try_wait().ok().flatten().is_none() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+
+        self.cleanup_mpv_files();
+    }
+
+    fn cleanup_mpv_files(&mut self) {
+        if let Some(path) = self.ipc_path.take() {
+            let _ = fs::remove_file(path);
+        }
+
+        if let Some(path) = self.log_path.take() {
+            let _ = fs::remove_file(path);
+        }
+    }
+
+    fn clear_active_video(&mut self, has_ended: bool) {
+        self.current_video_id = None;
+        self.current_path = None;
+        self.is_playing = false;
+        self.has_ended = has_ended;
+        self.position_seconds = 0;
+        self.duration_seconds = None;
+        self.has_video_window = false;
+        self.is_fullscreen = false;
+        self.last_error = None;
+    }
+
+    fn volume_or_default(&self) -> f64 {
+        if self.volume > 0.0 {
+            self.volume
+        } else {
+            1.0
+        }
+    }
+
+    fn status(&self) -> VideoPlaybackStatus {
+        VideoPlaybackStatus {
+            video_id: self.current_video_id.clone(),
+            file_path: self.current_path.clone(),
+            is_playing: self.is_playing,
+            has_ended: self.has_ended,
+            position_seconds: self.position_seconds,
+            duration_seconds: self.duration_seconds,
+            volume: self.volume_or_default(),
+            has_video_window: self.has_video_window,
+            is_fullscreen: self.is_fullscreen,
+            backend: "mpv".to_owned(),
+            error: self.last_error.clone(),
+        }
+    }
+}
+
+fn video_window_title(video: &VideoEntry) -> String {
+    let artist = video
+        .artist
+        .as_deref()
+        .map(str::trim)
+        .filter(|artist| !artist.is_empty())
+        .unwrap_or("Unknown Artist");
+
+    format!("Cassette — {artist} - {}", video.title)
+}
+
+fn save_active_video_progress(
+    video_playback: &State<'_, Mutex<VideoPlaybackState>>,
+    library: &State<'_, Mutex<LibraryDatabase>>,
+    reset_finished: bool,
+) -> Result<(), String> {
+    let snapshot = {
+        let mut video_playback = video_playback
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        video_playback.refresh();
+        video_playback.progress_snapshot()
+    };
+
+    let Some(snapshot) = snapshot else {
+        return Ok(());
+    };
+
+    save_video_progress_snapshot_with_reset(library, &snapshot, reset_finished)
+}
+
+fn save_video_progress_snapshot(
+    library: &State<'_, Mutex<LibraryDatabase>>,
+    snapshot: &VideoProgressSnapshot,
+) -> Result<(), String> {
+    save_video_progress_snapshot_with_reset(library, snapshot, false)
+}
+
+fn save_video_progress_snapshot_with_reset(
+    library: &State<'_, Mutex<LibraryDatabase>>,
+    snapshot: &VideoProgressSnapshot,
+    reset_finished: bool,
+) -> Result<(), String> {
+    let library = library
+        .lock()
+        .map_err(|_| "Library cache is unavailable.".to_owned())?;
+    let position = if snapshot.has_ended && reset_finished {
+        0
+    } else {
+        u32::try_from(snapshot.position_seconds).unwrap_or(u32::MAX)
+    };
+    library.update_video_progress(&snapshot.video_id, position, false)?;
+
+    Ok(())
+}
+
+fn mpv_ipc_path() -> PathBuf {
+    std::env::temp_dir().join(format!("cassette-mpv-{}.sock", unique_timestamp_nanos()))
+}
+
+fn mpv_log_path() -> PathBuf {
+    std::env::temp_dir().join(format!("cassette-mpv-{}.log", unique_timestamp_nanos()))
+}
+
+fn ensure_mpv_available(file_path: &str) -> Result<(), String> {
+    match Command::new("mpv")
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+    {
+        Ok(status) if status.success() => Ok(()),
+        Ok(status) => Err(video_playback_error(
+            "mpv",
+            file_path,
+            &format!("mpv --version exited with status {status}."),
+        )),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Err(video_playback_error(
+            "mpv",
+            file_path,
+            "Cassette video engine requires mpv on Linux.\nInstall with: sudo dnf install mpv",
+        )),
+        Err(error) => Err(video_playback_error(
+            "mpv",
+            file_path,
+            &format!("Could not run mpv: {error}"),
+        )),
+    }
+}
+
+fn wait_for_mpv_ipc(
+    child: &mut Child,
+    ipc_path: &Path,
+    log_path: &Path,
+    file_path: &str,
+) -> Result<(), String> {
+    for _ in 0..80 {
+        if ipc_path.exists() {
+            return Ok(());
+        }
+
+        if let Ok(Some(status)) = child.try_wait() {
+            let log = read_mpv_log(log_path);
+            let detail = if log.is_empty() {
+                format!("mpv exited before playback became controllable with status {status}.")
+            } else {
+                format!("mpv exited before playback became controllable with status {status}.\nmpv log:\n{log}")
+            };
+
+            return Err(video_playback_error("mpv", file_path, &detail));
+        }
+
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let _ = child.kill();
+    let _ = child.wait();
+
+    Err(video_playback_error(
+        "mpv",
+        file_path,
+        "mpv started, but its control socket did not become available.",
+    ))
+}
+
+fn read_mpv_log(log_path: &Path) -> String {
+    fs::read_to_string(log_path)
+        .unwrap_or_default()
+        .lines()
+        .rev()
+        .take(20)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn playback_details(playbin: &gst::Element) -> (u64, Option<u64>, f64) {
     let position_seconds = playbin
         .query_position::<gst::ClockTime>()
@@ -3265,6 +4648,151 @@ fn check_for_playback_error(playbin: &gst::Element) -> Result<(), String> {
     }
 }
 
+fn video_playback_error(backend: &str, file_path: &str, detail: &str) -> String {
+    let codec_info = ffprobe_video_codec_info(Path::new(file_path));
+    let mut message = format!(
+        "Cassette could not play this video internally.\nBackend: {backend}\nFile: {file_path}"
+    );
+
+    if let Some(container) = codec_info.container {
+        message.push_str(&format!("\nContainer: {container}"));
+    }
+
+    if let Some(video_codec) = codec_info.video_codec {
+        message.push_str(&format!("\nVideo codec: {video_codec}"));
+    }
+
+    if let Some(audio_codec) = codec_info.audio_codec {
+        message.push_str(&format!("\nAudio codec: {audio_codec}"));
+    }
+
+    if let Some(resolution) = codec_info.resolution {
+        message.push_str(&format!("\nResolution: {resolution}"));
+    }
+
+    if let Some(error) = codec_info.error {
+        message.push_str(&format!("\nffprobe: {error}"));
+    }
+
+    message.push_str("\nTry Open External as a backup.");
+
+    if !detail.trim().is_empty() {
+        message.push_str(&format!("\n{backend}: {}", detail.trim()));
+    }
+
+    message
+}
+
+fn ffprobe_video_codec_info(path: &Path) -> VideoCodecInfo {
+    let output = match Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "format=format_name,duration",
+            "-show_entries",
+            "stream=codec_type,codec_name,width,height",
+            "-of",
+            "json",
+        ])
+        .arg(path)
+        .output()
+    {
+        Ok(output) => output,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return VideoCodecInfo {
+                container: None,
+                video_codec: None,
+                audio_codec: None,
+                resolution: None,
+                duration_seconds: None,
+                error: Some("ffprobe is not installed.".to_owned()),
+            };
+        }
+        Err(error) => {
+            return VideoCodecInfo {
+                container: None,
+                video_codec: None,
+                audio_codec: None,
+                resolution: None,
+                duration_seconds: None,
+                error: Some(format!("Could not run ffprobe: {error}")),
+            };
+        }
+    };
+
+    if !output.status.success() {
+        return VideoCodecInfo {
+            container: None,
+            video_codec: None,
+            audio_codec: None,
+            resolution: None,
+            duration_seconds: None,
+            error: Some(short_command_error(&output)),
+        };
+    }
+
+    let value = match serde_json::from_slice::<serde_json::Value>(&output.stdout) {
+        Ok(value) => value,
+        Err(error) => {
+            return VideoCodecInfo {
+                container: None,
+                video_codec: None,
+                audio_codec: None,
+                resolution: None,
+                duration_seconds: None,
+                error: Some(format!("Could not parse ffprobe output: {error}")),
+            };
+        }
+    };
+    let container = value
+        .get("format")
+        .and_then(|format| format.get("format_name"))
+        .and_then(|value| value.as_str())
+        .map(str::to_owned);
+    let duration_seconds = value
+        .get("format")
+        .and_then(|format| format.get("duration"))
+        .and_then(|value| value.as_str())
+        .and_then(|value| value.parse::<f64>().ok())
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .map(|value| value.round() as u32);
+    let streams = value
+        .get("streams")
+        .and_then(|value| value.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let video_stream = streams
+        .iter()
+        .find(|stream| stream.get("codec_type").and_then(|value| value.as_str()) == Some("video"));
+    let audio_stream = streams
+        .iter()
+        .find(|stream| stream.get("codec_type").and_then(|value| value.as_str()) == Some("audio"));
+    let video_codec = video_stream
+        .and_then(|stream| stream.get("codec_name"))
+        .and_then(|value| value.as_str())
+        .map(str::to_owned);
+    let audio_codec = audio_stream
+        .and_then(|stream| stream.get("codec_name"))
+        .and_then(|value| value.as_str())
+        .map(str::to_owned);
+    let resolution = video_stream.and_then(|stream| {
+        let width = stream.get("width").and_then(|value| value.as_u64())?;
+        let height = stream.get("height").and_then(|value| value.as_u64())?;
+
+        Some(format!("{width}x{height}"))
+    });
+
+    VideoCodecInfo {
+        container,
+        video_codec,
+        audio_codec,
+        resolution,
+        duration_seconds,
+        error: None,
+    }
+}
+
 fn row_to_track(row: &rusqlite::Row<'_>) -> rusqlite::Result<Track> {
     Ok(Track {
         id: row.get(0)?,
@@ -3299,19 +4827,21 @@ fn row_to_video(row: &rusqlite::Row<'_>) -> rusqlite::Result<VideoEntry> {
         file_name: row.get(2)?,
         title: row.get(3)?,
         artist: row.get(4)?,
-        show_title: row.get(5)?,
-        album_or_release: row.get(6)?,
-        year: row.get(7)?,
-        venue: row.get(8)?,
-        city: row.get(9)?,
-        country: row.get(10)?,
-        duration_seconds: row.get(11)?,
-        thumbnail_path: row.get(12)?,
-        last_position_seconds: row.get(13)?,
-        play_count: row.get(14)?,
-        last_played_at: row.get(15)?,
-        created_at: row.get(16)?,
-        updated_at: row.get(17)?,
+        video_type: row.get(5)?,
+        source: row.get(6)?,
+        release_or_collection: row.get(7)?,
+        year: row.get(8)?,
+        venue: row.get(9)?,
+        city: row.get(10)?,
+        country: row.get(11)?,
+        description_or_notes: row.get(12)?,
+        duration_seconds: row.get(13)?,
+        thumbnail_path: row.get(14)?,
+        last_position_seconds: row.get(15)?,
+        play_count: row.get(16)?,
+        last_played_at: row.get(17)?,
+        created_at: row.get(18)?,
+        updated_at: row.get(19)?,
     })
 }
 
@@ -3363,6 +4893,22 @@ fn normalize_manual_genres(genres: Vec<String>) -> Vec<String> {
     normalized
 }
 
+fn normalize_video_type(value: &str) -> String {
+    match value {
+        "music_video" | "live_show" | "concert" | "interview_documentary" | "behind_the_scenes" | "other" => {
+            value.to_owned()
+        }
+        _ => "other".to_owned(),
+    }
+}
+
+fn normalize_video_source(value: &str) -> String {
+    match value {
+        "local_file" | "dvd_import" => value.to_owned(),
+        _ => "local_file".to_owned(),
+    }
+}
+
 fn favorite_track_ids(connection: &Connection) -> rusqlite::Result<HashSet<String>> {
     let mut statement = connection.prepare("SELECT id FROM tracks WHERE is_favorite = 1")?;
     let ids = statement
@@ -3399,12 +4945,14 @@ fn existing_videos_by_id(connection: &Connection) -> rusqlite::Result<HashMap<St
             file_name,
             title,
             artist,
-            show_title,
-            album_or_release,
+            video_type,
+            source,
+            release_or_collection,
             year,
             venue,
             city,
             country,
+            description_or_notes,
             duration_seconds,
             thumbnail_path,
             last_position_seconds,
@@ -3596,12 +5144,14 @@ fn video_from_path(
         file_name,
         title: video_title_from_path(&path),
         artist: None,
-        show_title: None,
-        album_or_release: None,
+        video_type: "other".to_owned(),
+        source: "local_file".to_owned(),
+        release_or_collection: None,
         year: None,
         venue: None,
         city: None,
         country: None,
+        description_or_notes: None,
         duration_seconds,
         thumbnail_path,
         last_position_seconds: 0,
@@ -4546,6 +6096,7 @@ fn video_title_from_path(path: &Path) -> String {
 pub fn run() {
     tauri::Builder::default()
         .manage(Mutex::new(PlaybackState::default()))
+        .manage(Mutex::new(VideoPlaybackState::default()))
         .setup(|app| {
             let db_path = app
                 .path()
@@ -4570,6 +6121,21 @@ pub fn run() {
             scan_video_folder,
             update_video_info,
             update_video_progress,
+            play_video,
+            pause_video,
+            resume_video,
+            stop_video,
+            seek_video,
+            set_video_volume,
+            get_video_position,
+            get_video_state,
+            bring_video_window_to_front,
+            fullscreen_video_window,
+            close_video_window,
+            get_video_codec_info,
+            detect_dvd,
+            scan_dvd_titles,
+            import_dvd_title,
             scan_library,
             toggle_track_favorite,
             record_track_play,

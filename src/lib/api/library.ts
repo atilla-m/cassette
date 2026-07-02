@@ -5,6 +5,10 @@ import type {
   CdCoverLookupResult,
   CdDetectResult,
   CdMetadataLookupResult,
+  DvdDetectResult,
+  DvdImportMetadata,
+  DvdImportResult,
+  DvdTitleScanResult,
   CdRipMetadata,
   CdRipResult,
   LibraryCache,
@@ -44,6 +48,28 @@ export async function chooseVideoFolder(): Promise<string | null> {
     multiple: false,
     recursive: true,
     title: "Choose Video Folder",
+  });
+
+  return typeof selected === "string" ? selected : null;
+}
+
+export async function chooseVideoTsFolder(): Promise<string | null> {
+  const selected = await open({
+    directory: true,
+    multiple: false,
+    recursive: true,
+    title: "Choose VIDEO_TS Folder",
+  });
+
+  return typeof selected === "string" ? selected : null;
+}
+
+export async function chooseDvdImportOutputFolder(): Promise<string | null> {
+  const selected = await open({
+    directory: true,
+    multiple: false,
+    recursive: true,
+    title: "Choose DVD Import Output Folder",
   });
 
   return typeof selected === "string" ? selected : null;
@@ -91,6 +117,23 @@ export async function updateVideoProgress(
   incrementPlayCount = false,
 ): Promise<VideoEntry> {
   return invoke<VideoEntry>("update_video_progress", { videoId, lastPositionSeconds, incrementPlayCount });
+}
+
+export async function detectDvd(): Promise<DvdDetectResult> {
+  return invoke<DvdDetectResult>("detect_dvd");
+}
+
+export async function scanDvdTitles(source: string): Promise<DvdTitleScanResult> {
+  return invoke<DvdTitleScanResult>("scan_dvd_titles", { source });
+}
+
+export async function importDvdTitle(
+  source: string,
+  titleNumber: number,
+  outputFolder: string,
+  metadata: DvdImportMetadata,
+): Promise<DvdImportResult> {
+  return invoke<DvdImportResult>("import_dvd_title", { source, titleNumber, outputFolder, metadata });
 }
 
 export async function toggleTrackFavorite(id: string): Promise<boolean> {
