@@ -200,11 +200,31 @@ export type TrackLyrics = {
   source: "local" | "lrclib";
   fetchedAt: number | null;
   trackPath: string | null;
+  selectedTrackName: string | null;
+  selectedArtistName: string | null;
+  selectedAlbumName: string | null;
+  offsetSeconds: number;
+};
+
+export type LrclibLyricsResult = {
+  trackName: string;
+  artistName: string;
+  albumName: string | null;
+  durationSeconds: number | null;
+  hasSyncedLyrics: boolean;
+  hasPlainLyrics: boolean;
+  syncedLyrics: string | null;
+  plainLyrics: string | null;
+  titleMatch: string;
+  artistMatch: string;
+  durationDifferenceSeconds: number | null;
+  source: "LRCLIB";
 };
 
 export type AutoLyricsResult = {
-  status: "existing" | "synced" | "plain" | "not_found";
+  status: "existing" | "select" | "not_found";
   lyrics: TrackLyrics | null;
+  results: LrclibLyricsResult[];
 };
 
 export type CdRipTrackStatus = "pending" | "ripping" | "done" | "error";

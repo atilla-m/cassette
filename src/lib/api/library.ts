@@ -12,6 +12,7 @@ import type {
   CdRipMetadata,
   CdRipResult,
   LibraryCache,
+  LrclibLyricsResult,
   Playlist,
   Track,
   TrackLyrics,
@@ -186,6 +187,22 @@ export async function readTrackLyrics(trackPath: string): Promise<TrackLyrics | 
 
 export async function autoFindTrackLyrics(trackPath: string, replaceCached = false): Promise<AutoLyricsResult> {
   return invoke<AutoLyricsResult>("auto_find_track_lyrics", { trackPath, replaceCached });
+}
+
+export async function saveTrackLyricsResult(
+  trackPath: string,
+  result: LrclibLyricsResult,
+  replaceCached = true,
+): Promise<TrackLyrics> {
+  return invoke<TrackLyrics>("save_track_lyrics_result", { trackPath, result, replaceCached });
+}
+
+export async function removeCachedTrackLyrics(trackPath: string): Promise<void> {
+  return invoke<void>("remove_cached_track_lyrics", { trackPath });
+}
+
+export async function setTrackLyricsOffset(trackPath: string, offsetSeconds: number): Promise<number> {
+  return invoke<number>("set_track_lyrics_offset", { trackPath, offsetSeconds });
 }
 
 export async function detectAudioCd(): Promise<CdDetectResult> {

@@ -20,6 +20,7 @@
     movePlaylistTrack,
     recordTrackPlay,
     readTrackLyrics,
+    removeCachedTrackLyrics,
     removeTrackFromPlaylist,
     renamePlaylist,
     ripCdToFlac,
@@ -27,8 +28,10 @@
     scanLibrary,
     scanDvdTitles,
     scanVideoFolder,
+    saveTrackLyricsResult,
     setAlbumGenres,
     setArtistGenres,
+    setTrackLyricsOffset,
     toggleTrackFavorite,
     updateVideoInfo,
     updateVideoProgress,
@@ -77,6 +80,7 @@
     DvdTitle,
     DvdTitleScanResult,
     Genre,
+    LrclibLyricsResult,
     PlaybackStatus,
     Playlist,
     Track,
@@ -368,6 +372,11 @@
   let currentLyrics = $state<TrackLyrics | null>(null);
   let isLoadingLyrics = $state(false);
   let isAutoFindingLyrics = $state(false);
+  let isSavingLyricsSelection = $state(false);
+  let isSavingLyricsOffset = $state(false);
+  let lyricsPickerResults = $state<LrclibLyricsResult[]>([]);
+  let isLyricsPickerOpen = $state(false);
+  let lyricsPickerReplaceCached = $state(false);
   let lyricsLookupMessage = $state<string | null>(null);
   let lyricsLookupError = $state<string | null>(null);
   let shortcutModalElement: HTMLElement | undefined = $state();
@@ -512,8 +521,10 @@
   let currentTrackCoverArtSrc = $derived(localImageSource(currentTrack?.coverArtPath));
   let currentTrackDuration = $derived(durationSeconds ?? currentTrack?.durationSeconds ?? null);
   let syncedLyricLines = $derived(currentLyrics?.kind === "synced" ? parseLrcLyrics(currentLyrics.text) : []);
-  let activeLyricIndex = $derived(activeSyncedLyricIndex(syncedLyricLines, positionSeconds));
-  let lyricsBadgeLabel = $derived(currentLyrics ? lyricsKindLabel(currentLyrics) : null);
+  let lyricsOffsetSeconds = $derived(currentLyrics?.offsetSeconds ?? 0);
+  let adjustedLyricPositionSeconds = $derived(positionSeconds - lyricsOffsetSeconds);
+  let activeLyricIndex = $derived(activeSyncedLyricIndex(syncedLyricLines, adjustedLyricPositionSeconds));
+  let lyricsBadgeLabel = $derived(currentLyrics ? lyricsStatusText(currentLyrics) : null);
   let cachedLyricsLabel = $derived(currentLyrics?.source === "lrclib" ? cachedLyricsStatus(currentLyrics) : null);
   let canPlayPrevious = $derived(
     currentQueueIndex !== null
@@ -743,6 +754,8 @@
       isAutoFindingLyrics = false;
       lyricsLookupMessage = null;
       lyricsLookupError = null;
+      lyricsPickerResults = [];
+      isLyricsPickerOpen = false;
       return;
     }
 
@@ -750,6 +763,8 @@
     isAutoFindingLyrics = false;
     lyricsLookupMessage = null;
     lyricsLookupError = null;
+    lyricsPickerResults = [];
+    isLyricsPickerOpen = false;
 
     try {
       const lyrics = await readTrackLyrics(trackPath);
@@ -769,11 +784,14 @@
   }
 
   async function handleAutoFindLyrics(replaceCached = false) {
-    if (!currentTrack || isAutoFindingLyrics || (currentLyrics && !replaceCached)) {
+    if (!currentTrack || isAutoFindingLyrics) {
       return;
     }
 
     isAutoFindingLyrics = true;
+    lyricsPickerReplaceCached = replaceCached;
+    lyricsPickerResults = [];
+    isLyricsPickerOpen = false;
     lyricsLookupMessage = replaceCached ? "Searching LRCLIB for replacement lyrics..." : "Searching LRCLIB...";
     lyricsLookupError = null;
 
@@ -784,10 +802,10 @@
         currentLyrics = result.lyrics;
       }
 
-      if (result.status === "synced") {
-        lyricsLookupMessage = "Synced lyrics found.";
-      } else if (result.status === "plain") {
-        lyricsLookupMessage = "Plain lyrics found.";
+      if (result.status === "select" && result.results.length > 0) {
+        lyricsPickerResults = result.results;
+        isLyricsPickerOpen = true;
+        lyricsLookupMessage = "Select lyrics result.";
       } else if (result.status === "existing") {
         lyricsLookupMessage = "Lyrics are already available for this track.";
       } else {
@@ -798,6 +816,68 @@
       lyricsLookupError = error instanceof Error ? error.message : "Could not search LRCLIB. Check your connection.";
     } finally {
       isAutoFindingLyrics = false;
+    }
+  }
+
+  async function handleSelectLyricsResult(result: LrclibLyricsResult) {
+    if (!currentTrack || isSavingLyricsSelection) {
+      return;
+    }
+
+    isSavingLyricsSelection = true;
+    lyricsLookupError = null;
+    lyricsLookupMessage = "Saving selected lyrics...";
+
+    try {
+      const lyrics = await saveTrackLyricsResult(currentTrack.filePath, result, true);
+      currentLyrics = lyrics;
+      lyricsPickerResults = [];
+      isLyricsPickerOpen = false;
+      lyricsLookupMessage = lyrics.kind === "synced" ? "Synced lyrics found." : "Plain lyrics found.";
+    } catch (error) {
+      lyricsLookupMessage = null;
+      lyricsLookupError = error instanceof Error ? error.message : "Could not save selected lyrics.";
+    } finally {
+      isSavingLyricsSelection = false;
+    }
+  }
+
+  async function handleRemoveCachedLyrics() {
+    if (!currentTrack) {
+      return;
+    }
+
+    lyricsLookupError = null;
+    lyricsLookupMessage = "Removing cached lyrics...";
+
+    try {
+      await removeCachedTrackLyrics(currentTrack.filePath);
+      await loadCurrentTrackLyrics(currentTrack.filePath);
+      lyricsLookupMessage = "Cached lyrics removed.";
+    } catch (error) {
+      lyricsLookupMessage = null;
+      lyricsLookupError = error instanceof Error ? error.message : "Could not remove cached lyrics.";
+    }
+  }
+
+  async function handleLyricsOffsetChange(nextOffsetSeconds: number) {
+    if (!currentTrack || !currentLyrics || currentLyrics.kind !== "synced" || isSavingLyricsOffset) {
+      return;
+    }
+
+    const roundedOffset = Math.round(Math.max(-5, Math.min(5, nextOffsetSeconds)) * 10) / 10;
+    isSavingLyricsOffset = true;
+    lyricsLookupError = null;
+
+    try {
+      const savedOffset = await setTrackLyricsOffset(currentTrack.filePath, roundedOffset);
+      currentLyrics = { ...currentLyrics, offsetSeconds: savedOffset };
+      lyricsLookupMessage = Math.abs(savedOffset) > 0.01 ? `Lyrics offset saved (${formatSignedSeconds(savedOffset)}).` : "Lyrics offset saved.";
+    } catch (error) {
+      lyricsLookupMessage = null;
+      lyricsLookupError = error instanceof Error ? error.message : "Could not save lyrics offset.";
+    } finally {
+      isSavingLyricsOffset = false;
     }
   }
 
@@ -3322,7 +3402,7 @@
   }
 
   function handleLyricLineSeek(timeSeconds: number) {
-    void handleSeek(timeSeconds);
+    void handleSeek(Math.max(0, timeSeconds + lyricsOffsetSeconds));
   }
 
   async function handleVolumeChange(nextVolume: number) {
@@ -3598,16 +3678,78 @@
   }
 
   function lyricsKindLabel(lyrics: TrackLyrics) {
-    const kindLabel = lyrics.kind === "synced" ? "LRC" : "TXT";
-    return lyrics.source === "lrclib" ? `${kindLabel} · LRCLIB` : kindLabel;
+    if (lyrics.source === "lrclib") {
+      return lyrics.kind === "synced" ? "Cached LRCLIB synced" : "Cached LRCLIB plain";
+    }
+
+    return lyrics.kind === "synced" ? "Local LRC" : "Local TXT";
   }
 
   function cachedLyricsStatus(lyrics: TrackLyrics) {
+    const selected = [lyrics.selectedArtistName, lyrics.selectedTrackName]
+      .filter((value): value is string => Boolean(value))
+      .join(" - ");
+    const album = lyrics.selectedAlbumName ? ` · ${lyrics.selectedAlbumName}` : "";
+    const selectedLabel = selected ? ` · ${selected}${album}` : "";
+    const offsetLabel = Math.abs(lyrics.offsetSeconds) > 0.01 ? ` · Offset: ${formatSignedSeconds(lyrics.offsetSeconds)}` : "";
+
     if (lyrics.fetchedAt) {
-      return `Cached from LRCLIB · ${formatDateTime(lyrics.fetchedAt)}`;
+      return `Cached from LRCLIB · ${formatDateTime(lyrics.fetchedAt)}${selectedLabel}${offsetLabel}`;
     }
 
-    return "Cached from LRCLIB";
+    return `Cached from LRCLIB${selectedLabel}${offsetLabel}`;
+  }
+
+  function lyricsStatusText(lyrics: TrackLyrics) {
+    const offsetLabel = Math.abs(lyrics.offsetSeconds) > 0.01 ? ` · Offset: ${formatSignedSeconds(lyrics.offsetSeconds)}` : "";
+    return `${lyricsKindLabel(lyrics)}${offsetLabel}`;
+  }
+
+  function formatSignedSeconds(seconds: number) {
+    const roundedSeconds = Math.round(seconds * 10) / 10;
+    return `${roundedSeconds >= 0 ? "+" : ""}${roundedSeconds.toFixed(1)}s`;
+  }
+
+  function lyricsResultDurationLabel(result: LrclibLyricsResult) {
+    if (result.durationDifferenceSeconds === null) {
+      return result.durationSeconds === null ? null : `Duration: ${formatPlaybackTime(result.durationSeconds)}`;
+    }
+
+    return `Duration: ${formatSignedSeconds(result.durationDifferenceSeconds)}`;
+  }
+
+  function lyricsResultAvailabilityLabel(result: LrclibLyricsResult) {
+    if (result.hasSyncedLyrics) {
+      return "Synced lyrics available";
+    }
+
+    return result.hasPlainLyrics ? "Plain lyrics available" : "No lyrics text";
+  }
+
+  function lyricsMatchLabel(value: string, field: "title" | "artist") {
+    if (value === "Exact match") {
+      return `Exact ${field} match`;
+    }
+
+    if (value === "Close match") {
+      return `Close ${field} match`;
+    }
+
+    if (value === "Different") {
+      return `Different ${field}`;
+    }
+
+    return `${field[0].toUpperCase()}${field.slice(1)}: ${value}`;
+  }
+
+  function lyricsResultMatchLabels(result: LrclibLyricsResult) {
+    return [
+      lyricsMatchLabel(result.titleMatch, "title"),
+      lyricsMatchLabel(result.artistMatch, "artist"),
+      lyricsResultDurationLabel(result),
+      lyricsResultAvailabilityLabel(result),
+      result.source,
+    ].filter((label): label is string => Boolean(label));
   }
 
   function playCountLabel(track: Track) {
@@ -4834,13 +4976,18 @@
             <section class="lyrics-panel" aria-labelledby="lyrics-title">
               <div class="lyrics-header">
                 <div>
-                  <p class="eyebrow">Local Lyrics</p>
+                  <p class="eyebrow">Lyrics Source</p>
                   <h3 id="lyrics-title">Lyrics</h3>
                 </div>
                 <div class="lyrics-header-actions">
-                  {#if currentLyrics?.source === "lrclib"}
+                  {#if currentLyrics}
                     <button type="button" disabled={isAutoFindingLyrics} onclick={() => void handleAutoFindLyrics(true)}>
                       {isAutoFindingLyrics ? "Searching..." : "Find Again"}
+                    </button>
+                  {/if}
+                  {#if currentLyrics?.source === "lrclib"}
+                    <button type="button" onclick={() => void handleRemoveCachedLyrics()}>
+                      Remove Cached Lyrics
                     </button>
                   {/if}
                   {#if lyricsBadgeLabel}
@@ -4862,7 +5009,61 @@
                   <h3>Loading lyrics...</h3>
                   <p>Checking for local .lrc and .txt files next to this track.</p>
                 </div>
+              {:else if isLyricsPickerOpen}
+                <div class="lyrics-result-picker" role="list" aria-label="Select lyrics result">
+                  <div class="lyrics-result-picker-heading">
+                    <h4>Select lyrics result</h4>
+                    <p>Synced LRCLIB results are listed first. Choose the version that best matches this track.</p>
+                  </div>
+                  {#each lyricsPickerResults as result}
+                    <button
+                      type="button"
+                      class="lyrics-result-card"
+                      disabled={isSavingLyricsSelection}
+                      onclick={() => void handleSelectLyricsResult(result)}
+                    >
+                      <span class="lyrics-result-title">{result.trackName}</span>
+                      <span class="lyrics-result-artist">{result.artistName}</span>
+                      {#if result.albumName}
+                        <span class="lyrics-result-album">{result.albumName}</span>
+                      {/if}
+                      <span class="lyrics-result-tags">
+                        {#each lyricsResultMatchLabels(result) as label}
+                          <span>{label}</span>
+                        {/each}
+                      </span>
+                    </button>
+                  {/each}
+                </div>
               {:else if currentLyrics?.kind === "synced" && syncedLyricLines.length > 0}
+                <div class="lyrics-offset-controls" aria-label="Lyrics Offset">
+                  <span>Lyrics Offset</span>
+                  <button type="button" disabled={isSavingLyricsOffset} onclick={() => void handleLyricsOffsetChange(lyricsOffsetSeconds - 1)}>
+                    -1.0s
+                  </button>
+                  <button type="button" disabled={isSavingLyricsOffset} onclick={() => void handleLyricsOffsetChange(lyricsOffsetSeconds - 0.5)}>
+                    -0.5s
+                  </button>
+                  <button type="button" disabled={isSavingLyricsOffset} onclick={() => void handleLyricsOffsetChange(0)}>
+                    Reset
+                  </button>
+                  <button type="button" disabled={isSavingLyricsOffset} onclick={() => void handleLyricsOffsetChange(lyricsOffsetSeconds + 0.5)}>
+                    +0.5s
+                  </button>
+                  <button type="button" disabled={isSavingLyricsOffset} onclick={() => void handleLyricsOffsetChange(lyricsOffsetSeconds + 1)}>
+                    +1.0s
+                  </button>
+                  <input
+                    aria-label="Lyrics offset seconds"
+                    type="number"
+                    min="-5"
+                    max="5"
+                    step="0.1"
+                    value={lyricsOffsetSeconds.toFixed(1)}
+                    disabled={isSavingLyricsOffset}
+                    onchange={(event) => void handleLyricsOffsetChange(Number(event.currentTarget.value))}
+                  />
+                </div>
                 <div class="synced-lyrics" bind:this={lyricsPanelElement}>
                   {#each syncedLyricLines as line, index}
                     <button
@@ -8095,6 +8296,147 @@
   }
 
   .auto-lyrics-button:disabled {
+    border-color: #303844;
+    background: #151a21;
+    color: #626c79;
+  }
+
+  .lyrics-result-picker {
+    display: grid;
+    gap: 10px;
+  }
+
+  .lyrics-result-picker-heading {
+    display: grid;
+    gap: 4px;
+  }
+
+  .lyrics-result-picker-heading h4 {
+    margin: 0;
+    color: #f4f7fb;
+    font-size: 0.98rem;
+  }
+
+  .lyrics-result-picker-heading p {
+    margin: 0;
+    color: #8f9aa7;
+    font-size: 0.86rem;
+    line-height: 1.45;
+  }
+
+  .lyrics-result-card {
+    display: grid;
+    gap: 5px;
+    width: 100%;
+    border: 1px solid #27313d;
+    border-radius: 8px;
+    background: #151a21;
+    color: #d5dce5;
+    cursor: default;
+    font: inherit;
+    padding: 12px;
+    text-align: left;
+  }
+
+  .lyrics-result-card:hover,
+  .lyrics-result-card:focus-visible {
+    border-color: #4d766f;
+    background: #182027;
+    outline: none;
+  }
+
+  .lyrics-result-card:disabled {
+    border-color: #303844;
+    background: #151a21;
+    color: #626c79;
+  }
+
+  .lyrics-result-title {
+    color: #f4f7fb;
+    font-size: 0.96rem;
+    font-weight: 850;
+  }
+
+  .lyrics-result-artist,
+  .lyrics-result-album {
+    color: #aeb8c4;
+    font-size: 0.84rem;
+    font-weight: 700;
+  }
+
+  .lyrics-result-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 4px;
+  }
+
+  .lyrics-result-tags span {
+    display: inline-flex;
+    align-items: center;
+    min-height: 24px;
+    border: 1px solid #303844;
+    border-radius: 999px;
+    background: #11161d;
+    color: #b9c3cf;
+    font-size: 0.73rem;
+    font-weight: 800;
+    padding: 0 8px;
+  }
+
+  .lyrics-offset-controls {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    border: 1px solid #242b35;
+    border-radius: 8px;
+    background: #10141a;
+    padding: 10px;
+  }
+
+  .lyrics-offset-controls > span {
+    color: #d5dce5;
+    font-size: 0.82rem;
+    font-weight: 850;
+    margin-right: 4px;
+  }
+
+  .lyrics-offset-controls button {
+    min-height: 30px;
+    border: 1px solid #303844;
+    border-radius: 8px;
+    background: #161a20;
+    color: #d5dce5;
+    cursor: default;
+    font: inherit;
+    font-size: 0.78rem;
+    font-weight: 850;
+    padding: 0 10px;
+  }
+
+  .lyrics-offset-controls input {
+    width: 82px;
+    min-height: 30px;
+    border: 1px solid #303844;
+    border-radius: 8px;
+    background: #0d1117;
+    color: #f4f7fb;
+    font: inherit;
+    font-size: 0.82rem;
+    font-weight: 750;
+    padding: 0 8px;
+  }
+
+  .lyrics-offset-controls button:hover,
+  .lyrics-offset-controls button:focus-visible,
+  .lyrics-offset-controls input:focus-visible {
+    border-color: #4d766f;
+    outline: none;
+  }
+
+  .lyrics-offset-controls button:disabled,
+  .lyrics-offset-controls input:disabled {
     border-color: #303844;
     background: #151a21;
     color: #626c79;
