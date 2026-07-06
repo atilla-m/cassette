@@ -222,7 +222,7 @@ export type LrclibLyricsResult = {
 };
 
 export type AutoLyricsResult = {
-  status: "existing" | "select" | "not_found";
+  status: "existing" | "found" | "select" | "not_found";
   lyrics: TrackLyrics | null;
   results: LrclibLyricsResult[];
 };

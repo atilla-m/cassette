@@ -17,6 +17,7 @@
     isQueueOpen?: boolean;
     isShuffleEnabled?: boolean;
     repeatMode?: RepeatMode;
+    compact?: boolean;
     onTogglePlayback?: () => void;
     onPrevious?: () => void;
     onNext?: () => void;
@@ -27,6 +28,7 @@
     onToggleShuffle?: () => void;
     onToggleRepeat?: () => void;
     onOpenNowPlaying?: () => void;
+    onOpenLyrics?: () => void;
   };
 
   let {
@@ -41,6 +43,7 @@
     isQueueOpen = false,
     isShuffleEnabled = false,
     repeatMode = "off",
+    compact = false,
     onTogglePlayback,
     onPrevious,
     onNext,
@@ -51,6 +54,7 @@
     onToggleShuffle,
     onToggleRepeat,
     onOpenNowPlaying,
+    onOpenLyrics,
   }: Props = $props();
 
   let localVolume = $state(1);
@@ -303,19 +307,21 @@
   }
 </script>
 
-<footer class="player" aria-label="Now playing">
+<footer class:compact class="player" aria-label="Now playing">
   <div class="track">
-    <button class="track-open" type="button" aria-label="Open Now Playing" onclick={onOpenNowPlaying}>
-      <span class="cover" aria-hidden="true">
-        {#if coverArtSrc}
-          <img src={coverArtSrc} alt="" onload={showLoadedImage} onerror={hideBrokenImage} />
-        {/if}
-      </span>
-      <span class="track-copy">
-        <span>{track?.title ?? "No track selected"}</span>
-        <small>{displayArtist(track)}{displayAlbum(track)}</small>
-      </span>
-    </button>
+    {#if !compact}
+      <button class="track-open" type="button" aria-label="Open current track" disabled={!track} onclick={onOpenNowPlaying}>
+        <span class="cover" aria-hidden="true">
+          {#if coverArtSrc}
+            <img src={coverArtSrc} alt="" onload={showLoadedImage} onerror={hideBrokenImage} />
+          {/if}
+        </span>
+        <span class="track-copy">
+          <span>{track?.title ?? "No track selected"}</span>
+          <small>{displayArtist(track)}{displayAlbum(track)}</small>
+        </span>
+      </button>
+    {/if}
     <button
       class:active={track?.isFavorite}
       class="favorite"
@@ -385,6 +391,17 @@
   </div>
 
   <div class="volume" aria-label="Volume">
+    {#if !compact}
+      <button
+        class="lyrics-button"
+        type="button"
+        aria-label="Open lyrics"
+        disabled={!track}
+        onclick={onOpenLyrics}
+      >
+        Lyrics
+      </button>
+    {/if}
     <button
       class:active={isQueueOpen}
       class="queue-button"
@@ -423,11 +440,23 @@
     background: #12161c;
   }
 
+  .player.compact {
+    grid-template-columns: auto auto minmax(240px, 1fr) minmax(180px, auto);
+    gap: 16px;
+    min-height: 64px;
+    padding: 10px 22px;
+    background: rgba(13, 15, 19, 0.96);
+  }
+
   .track {
     display: flex;
     align-items: center;
     gap: 12px;
     min-width: 0;
+  }
+
+  .player.compact .track {
+    width: 34px;
   }
 
   .track-open {
@@ -510,6 +539,10 @@
     gap: 8px;
   }
 
+  .player.compact .transport {
+    gap: 6px;
+  }
+
   button.favorite {
     width: 34px;
     height: 34px;
@@ -518,6 +551,11 @@
     background: #171c23;
     color: #8f9aa8;
     font-size: 0.95rem;
+  }
+
+  .player.compact button.favorite {
+    width: 34px;
+    height: 34px;
   }
 
   button.favorite:hover,
@@ -534,13 +572,16 @@
     color: #626c79;
   }
 
-  button.queue-button {
+  button.queue-button,
+  button.lyrics-button {
     width: auto;
     min-width: 74px;
     padding: 0 10px;
     white-space: nowrap;
   }
 
+  button.lyrics-button:hover,
+  button.lyrics-button:focus-visible,
   button.queue-button.active,
   button.queue-button:hover,
   button.queue-button:focus-visible {
@@ -581,6 +622,11 @@
     cursor: default;
   }
 
+  .player.compact button {
+    height: 34px;
+    font-size: 0.74rem;
+  }
+
   button:disabled {
     color: #626c79;
     background: #151a21;
@@ -596,12 +642,22 @@
     padding: 0;
   }
 
+  button.track-open:disabled {
+    color: inherit;
+    background: transparent;
+  }
+
   button.play {
     width: 44px;
     height: 44px;
     border-color: #2f8f83;
     background: #2f8f83;
     color: #07110f;
+  }
+
+  .player.compact button.play {
+    width: 40px;
+    height: 40px;
   }
 
   button.play:disabled {
@@ -616,6 +672,14 @@
     align-items: center;
     gap: 10px;
     min-width: 0;
+  }
+
+  .player.compact .progress-area {
+    gap: 8px;
+  }
+
+  .player.compact .volume {
+    justify-content: flex-end;
   }
 
   .progress,
@@ -668,7 +732,8 @@
   }
 
   @media (max-width: 920px) {
-    .player {
+    .player,
+    .player.compact {
       grid-template-columns: minmax(170px, 1fr) auto;
     }
 
@@ -679,7 +744,8 @@
   }
 
   @media (max-width: 560px) {
-    .player {
+    .player,
+    .player.compact {
       grid-template-columns: 1fr;
       gap: 12px;
       padding: 14px 16px;

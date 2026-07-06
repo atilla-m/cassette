@@ -189,6 +189,10 @@ export async function autoFindTrackLyrics(trackPath: string, replaceCached = fal
   return invoke<AutoLyricsResult>("auto_find_track_lyrics", { trackPath, replaceCached });
 }
 
+export async function searchTrackLyricsResults(trackPath: string): Promise<LrclibLyricsResult[]> {
+  return invoke<LrclibLyricsResult[]>("search_track_lyrics_results", { trackPath });
+}
+
 export async function saveTrackLyricsResult(
   trackPath: string,
   result: LrclibLyricsResult,

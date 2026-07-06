@@ -468,6 +468,12 @@ struct VideoProgressSnapshot {
 }
 
 #[derive(Debug, Default)]
+struct TrackLyricsSettings {
+    offset_seconds: f64,
+    preferred_source: Option<String>,
+}
+
+#[derive(Debug, Default)]
 struct GenreAssignmentMaps {
     albums: HashMap<String, Vec<String>>,
     artists: HashMap<String, Vec<String>>,
@@ -801,7 +807,7 @@ async fn import_dvd_title(
 }
 
 #[tauri::command]
-fn scan_library(
+async fn scan_library(
     root: String,
     app: AppHandle,
     library: State<'_, Mutex<LibraryDatabase>>,
@@ -816,22 +822,18 @@ fn scan_library(
         return Err("Selected path is not a folder.".into());
     }
 
-    let mut tracks = Vec::new();
-    let mut album_art_paths = HashMap::<String, CachedCoverArt>::new();
     let cover_art_dir = app
         .path()
         .app_data_dir()
         .ok()
         .map(|path| path.join("cover-art"));
     let scanned_at = unix_timestamp();
-    scan_directory(
-        &root_path,
-        scanned_at,
-        cover_art_dir.as_deref(),
-        &mut album_art_paths,
-        &mut tracks,
-    )?;
-    tracks.sort_by(|left, right| left.file_path.cmp(&right.file_path));
+    let scan_root = root_path.clone();
+    let mut tracks = tauri::async_runtime::spawn_blocking(move || {
+        scan_audio_directory_root(&scan_root, scanned_at, cover_art_dir.as_deref())
+    })
+    .await
+    .map_err(|error| format!("Could not scan library: {error}"))??;
 
     let mut library = library
         .lock()
@@ -975,15 +977,15 @@ fn read_track_lyrics(
     app: AppHandle,
     library: State<'_, Mutex<LibraryDatabase>>,
 ) -> Result<Option<TrackLyrics>, String> {
-    let (track, offset_seconds) = library
+    let (track, settings) = library
         .lock()
         .ok()
         .map(|library| {
             let track = library.track_by_id(&track_path).ok().flatten();
-            let offset_seconds = library.lyrics_offset(&track_path).unwrap_or(0.0);
-            (track, offset_seconds)
+            let settings = library.lyrics_settings(&track_path).unwrap_or_default();
+            (track, settings)
         })
-        .unwrap_or((None, 0.0));
+        .unwrap_or_default();
     let track_path = track
         .as_ref()
         .map(|track| PathBuf::from(&track.file_path))
@@ -992,17 +994,24 @@ fn read_track_lyrics(
         .as_ref()
         .map(|track| track.title.clone())
         .unwrap_or_else(|| title_from_path(&track_path));
-    let lyrics_file = track
-        .as_ref()
-        .and_then(cached_lyrics_file)
-        .or_else(|| lyrics_file_for_track(&track_path, &track_title))
-        .or_else(|| {
-            track
-                .as_ref()
-                .and_then(|track| app_lyrics_file_for_track(&app, track))
-        });
+    let local_lyrics_file = || {
+        track
+            .as_ref()
+            .and_then(cached_lyrics_file)
+            .or_else(|| lyrics_file_for_track(&track_path, &track_title))
+    };
+    let cached_lrclib_file = || {
+        track
+            .as_ref()
+            .and_then(|track| app_lyrics_file_for_track(&app, track))
+    };
+    let lyrics_file = match settings.preferred_source.as_deref() {
+        Some("cached_lrclib") => cached_lrclib_file().or_else(local_lyrics_file),
+        Some("local") => local_lyrics_file().or_else(cached_lrclib_file),
+        _ => local_lyrics_file().or_else(cached_lrclib_file),
+    };
 
-    Ok(lyrics_file.and_then(|lyrics_file| read_lyrics_file(lyrics_file, offset_seconds)))
+    Ok(lyrics_file.and_then(|lyrics_file| read_lyrics_file(lyrics_file, settings.offset_seconds)))
 }
 
 #[tauri::command]
@@ -1020,7 +1029,10 @@ async fn auto_find_track_lyrics(
         let track = library
             .track_by_id(&track_path)?
             .ok_or_else(|| "Track is not in the library cache.".to_owned())?;
-        let offset_seconds = library.lyrics_offset(&track_path).unwrap_or(0.0);
+        let offset_seconds = library
+            .lyrics_settings(&track_path)
+            .unwrap_or_default()
+            .offset_seconds;
 
         (track, offset_seconds)
     };
@@ -1057,11 +1069,44 @@ async fn auto_find_track_lyrics(
         });
     }
 
+    let selected_result = results
+        .first()
+        .cloned()
+        .ok_or_else(|| "No usable LRCLIB lyrics were found.".to_owned())?;
+    let lyrics = found_lyrics_from_result(&selected_result)
+        .ok_or_else(|| "The best LRCLIB result does not include usable lyrics.".to_owned())?;
+    let saved_lyrics = save_app_lyrics(
+        &app,
+        &track,
+        lyrics,
+        Some(&selected_result),
+        true,
+        offset_seconds,
+    )?;
+
     Ok(AutoLyricsResult {
-        status: "select".to_owned(),
-        lyrics: None,
-        results,
+        status: "found".to_owned(),
+        lyrics: Some(saved_lyrics),
+        results: Vec::new(),
     })
+}
+
+#[tauri::command]
+async fn search_track_lyrics_results(
+    track_path: String,
+    library: State<'_, Mutex<LibraryDatabase>>,
+) -> Result<Vec<LrclibLyricsResult>, String> {
+    let track = {
+        let library = library
+            .lock()
+            .map_err(|_| "Library cache is unavailable.".to_owned())?;
+
+        library
+            .track_by_id(&track_path)?
+            .ok_or_else(|| "Track is not in the library cache.".to_owned())?
+    };
+
+    search_lrclib_lyrics_results(&track).await
 }
 
 #[tauri::command]
@@ -1080,18 +1125,38 @@ fn save_track_lyrics_result(
         let track = library
             .track_by_id(&track_path)?
             .ok_or_else(|| "Track is not in the library cache.".to_owned())?;
-        let offset_seconds = library.lyrics_offset(&track_path).unwrap_or(0.0);
+        let offset_seconds = library
+            .lyrics_settings(&track_path)
+            .unwrap_or_default()
+            .offset_seconds;
 
         (track, offset_seconds)
     };
     let lyrics = found_lyrics_from_result(&result)
         .ok_or_else(|| "The selected LRCLIB result does not include usable lyrics.".to_owned())?;
 
-    save_app_lyrics(&app, &track, lyrics, Some(&result), replace_cached, offset_seconds)
+    let saved_lyrics = save_app_lyrics(
+        &app,
+        &track,
+        lyrics,
+        Some(&result),
+        replace_cached,
+        offset_seconds,
+    )?;
+    let library = library
+        .lock()
+        .map_err(|_| "Library cache is unavailable.".to_owned())?;
+    library.set_lyrics_preferred_source(&track.file_path, Some("cached_lrclib"))?;
+
+    Ok(saved_lyrics)
 }
 
 #[tauri::command]
-fn remove_cached_track_lyrics(track_path: String, app: AppHandle) -> Result<(), String> {
+fn remove_cached_track_lyrics(
+    track_path: String,
+    app: AppHandle,
+    library: State<'_, Mutex<LibraryDatabase>>,
+) -> Result<(), String> {
     let lyrics_dir = app
         .path()
         .app_data_dir()
@@ -1110,6 +1175,11 @@ fn remove_cached_track_lyrics(track_path: String, app: AppHandle) -> Result<(), 
                 .map_err(|error| format!("Could not remove cached lyrics: {error}"))?;
         }
     }
+
+    let library = library
+        .lock()
+        .map_err(|_| "Library cache is unavailable.".to_owned())?;
+    library.set_lyrics_preferred_source(&track_path, None)?;
 
     Ok(())
 }
@@ -2683,6 +2753,7 @@ impl LibraryDatabase {
             CREATE TABLE IF NOT EXISTS track_lyrics_settings (
                 track_id TEXT PRIMARY KEY NOT NULL,
                 offset_seconds REAL NOT NULL DEFAULT 0,
+                preferred_source TEXT CHECK(preferred_source IN ('local', 'cached_lrclib') OR preferred_source IS NULL),
                 updated_at INTEGER NOT NULL
             );
 
@@ -2768,6 +2839,13 @@ impl LibraryDatabase {
         if !self.has_column("tracks", "last_played_at")? {
             self.connection
                 .execute("ALTER TABLE tracks ADD COLUMN last_played_at INTEGER", [])?;
+        }
+
+        if !self.has_column("track_lyrics_settings", "preferred_source")? {
+            self.connection.execute(
+                "ALTER TABLE track_lyrics_settings ADD COLUMN preferred_source TEXT",
+                [],
+            )?;
         }
 
         if !self.has_column("videos", "video_type")? {
@@ -3448,16 +3526,28 @@ impl LibraryDatabase {
         Ok(track)
     }
 
-    fn lyrics_offset(&self, track_id: &str) -> Result<f64, String> {
+    fn lyrics_settings(&self, track_id: &str) -> Result<TrackLyricsSettings, String> {
         self.connection
             .query_row(
-                "SELECT offset_seconds FROM track_lyrics_settings WHERE track_id = ?1",
+                "
+                SELECT offset_seconds, preferred_source
+                FROM track_lyrics_settings
+                WHERE track_id = ?1
+                ",
                 [track_id],
-                |row| row.get::<_, f64>(0),
+                |row| {
+                    let preferred_source = row
+                        .get::<_, Option<String>>(1)?
+                        .filter(|source| matches!(source.as_str(), "local" | "cached_lrclib"));
+                    Ok(TrackLyricsSettings {
+                        offset_seconds: row.get::<_, f64>(0)?,
+                        preferred_source,
+                    })
+                },
             )
             .optional()
-            .map(|offset| offset.unwrap_or(0.0))
-            .map_err(|error| format!("Could not read lyrics offset: {error}"))
+            .map(|settings| settings.unwrap_or_default())
+            .map_err(|error| format!("Could not read lyrics settings: {error}"))
     }
 
     fn set_lyrics_offset(&self, track_id: &str, offset_seconds: f64) -> Result<f64, String> {
@@ -3477,6 +3567,33 @@ impl LibraryDatabase {
             .map_err(|error| format!("Could not save lyrics offset: {error}"))?;
 
         Ok(clamped_offset)
+    }
+
+    fn set_lyrics_preferred_source(
+        &self,
+        track_id: &str,
+        preferred_source: Option<&str>,
+    ) -> Result<(), String> {
+        if let Some(source) = preferred_source {
+            if !matches!(source, "local" | "cached_lrclib") {
+                return Err("Unsupported lyrics source preference.".to_owned());
+            }
+        }
+
+        self.connection
+            .execute(
+                "
+                INSERT INTO track_lyrics_settings (track_id, preferred_source, updated_at)
+                VALUES (?1, ?2, ?3)
+                ON CONFLICT(track_id) DO UPDATE SET
+                    preferred_source = excluded.preferred_source,
+                    updated_at = excluded.updated_at
+                ",
+                params![track_id, preferred_source, unix_timestamp()],
+            )
+            .map_err(|error| format!("Could not save lyrics source preference: {error}"))?;
+
+        Ok(())
     }
 
     fn record_play(&self, id: &str) -> Result<Track, String> {
@@ -4169,6 +4286,17 @@ impl PlaybackState {
         Ok(self.status())
     }
 
+    fn shutdown(&mut self) {
+        if let Some(playbin) = self.playbin.take() {
+            let _ = set_gst_state(&playbin, gst::State::Null);
+            drain_playback_bus(&playbin);
+        }
+
+        self.current_path = None;
+        self.is_playing = false;
+        self.has_ended = false;
+    }
+
     fn playbin(&mut self) -> Result<&gst::Element, String> {
         if self.playbin.is_none() {
             gst::init().map_err(|error| format!("Could not initialize GStreamer: {error}"))?;
@@ -4646,6 +4774,30 @@ fn save_video_progress_snapshot_with_reset(
     library.update_video_progress(&snapshot.video_id, position, false)?;
 
     Ok(())
+}
+
+fn cleanup_playback_for_exit(app: &AppHandle) {
+    if let (Some(video_playback), Some(library)) = (
+        app.try_state::<Mutex<VideoPlaybackState>>(),
+        app.try_state::<Mutex<LibraryDatabase>>(),
+    ) {
+        let _ = save_active_video_progress(&video_playback, &library, false);
+    }
+
+    if let Some(video_playback) = app.try_state::<Mutex<VideoPlaybackState>>() {
+        let mut video_playback = video_playback
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        video_playback.stop_process();
+        video_playback.clear_active_video(false);
+    }
+
+    if let Some(playback) = app.try_state::<Mutex<PlaybackState>>() {
+        let mut playback = playback
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        playback.shutdown();
+    }
 }
 
 fn mpv_ipc_path() -> PathBuf {
@@ -5195,6 +5347,25 @@ fn scan_directory(
     }
 
     Ok(())
+}
+
+fn scan_audio_directory_root(
+    root_path: &Path,
+    scanned_at: i64,
+    cover_art_dir: Option<&Path>,
+) -> Result<Vec<Track>, String> {
+    let mut tracks = Vec::new();
+    let mut album_art_paths = HashMap::<String, CachedCoverArt>::new();
+    scan_directory(
+        root_path,
+        scanned_at,
+        cover_art_dir,
+        &mut album_art_paths,
+        &mut tracks,
+    )?;
+    tracks.sort_by(|left, right| left.file_path.cmp(&right.file_path));
+
+    Ok(tracks)
 }
 
 fn scan_video_directory_root(
@@ -6314,6 +6485,11 @@ pub fn run() {
 
             Ok(())
         })
+        .on_window_event(|window, event| {
+            if matches!(event, tauri::WindowEvent::CloseRequested { .. }) {
+                cleanup_playback_for_exit(window.app_handle());
+            }
+        })
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
@@ -6350,6 +6526,7 @@ pub fn run() {
             move_playlist_track,
             read_track_lyrics,
             auto_find_track_lyrics,
+            search_track_lyrics_results,
             save_track_lyrics_result,
             remove_cached_track_lyrics,
             set_track_lyrics_offset,

@@ -29,6 +29,7 @@
     scanDvdTitles,
     scanVideoFolder,
     saveTrackLyricsResult,
+    searchTrackLyricsResults,
     setAlbumGenres,
     setArtistGenres,
     setTrackLyricsOffset,
@@ -62,6 +63,7 @@
   import TrackList from "$lib/components/TrackList.svelte";
   import { buildAlbums, buildArtists, buildGenres } from "$lib/data/libraryViews";
   import { albums as mockAlbums, artists as mockArtists, genres as mockGenres, navItems } from "$lib/data/mockLibrary";
+  import { ENABLE_EXPERIMENTAL_VIDEOS } from "$lib/featureFlags";
   import type {
     Album,
     Artist,
@@ -198,6 +200,8 @@
   };
 
   const mixFormatOptions = ["All", "FLAC", "MP3", "OGG", "OPUS", "WAV", "M4A"];
+  const AUTO_LYRICS_COOLDOWN_MS = 7 * 24 * 60 * 60 * 1000;
+  const AUTO_LYRICS_SETTING_KEY = "cassette:auto-find-lyrics";
   const videoTypeOptions: Array<{ value: VideoType; label: string }> = [
     { value: "music_video", label: "Music Video / PV" },
     { value: "live_show", label: "Live Show" },
@@ -370,6 +374,7 @@
   let volume = $state(1);
   let contextMenu = $state<ContextMenuState | null>(null);
   let currentLyrics = $state<TrackLyrics | null>(null);
+  let autoFindLyricsEnabled = $state(true);
   let isLoadingLyrics = $state(false);
   let isAutoFindingLyrics = $state(false);
   let isSavingLyricsSelection = $state(false);
@@ -379,6 +384,10 @@
   let lyricsPickerReplaceCached = $state(false);
   let lyricsLookupMessage = $state<string | null>(null);
   let lyricsLookupError = $state<string | null>(null);
+  let isLyricsOptionsOpen = $state(false);
+  let lyricsReturnView = $state<string | null>(null);
+  let selectedArtistSongsExpanded = $state(false);
+  let selectedGenreSongsExpanded = $state(false);
   let shortcutModalElement: HTMLElement | undefined = $state();
   let deletePlaylistModalElement: HTMLElement | undefined = $state();
   let lyricsPanelElement: HTMLElement | undefined = $state();
@@ -386,6 +395,7 @@
   let displayAlbums = $derived(!hasLoadedCache ? mockAlbums : buildAlbums(tracks));
   let displayArtists = $derived(!hasLoadedCache ? mockArtists : buildArtists(tracks));
   let displayGenres = $derived(!hasLoadedCache ? mockGenres : buildGenres(tracks));
+  let visibleNavItems = $derived(navItems.filter((item) => ENABLE_EXPERIMENTAL_VIDEOS || item.label !== "Videos"));
   let favoriteTracks = $derived(tracks.filter((track) => track.isFavorite));
   let availableFormats = $derived(availableTrackFormats(tracks));
   let sortedSongTracks = $derived(sortTracks(tracks, songSort, songSortDirection));
@@ -464,6 +474,10 @@
   );
   let selectedArtistSearchTracks = $derived(searchFilterArtistTracks(selectedArtistTracks, normalizedSearchQuery));
   let selectedArtistSearchAlbums = $derived(searchFilterAlbums(selectedArtistAlbums, normalizedSearchQuery));
+  let selectedArtistOverviewTracks = $derived(overviewTracks(selectedArtistTracks));
+  let selectedArtistVisibleTracks = $derived(
+    selectedArtistSongsExpanded || normalizedSearchQuery ? selectedArtistSearchTracks : selectedArtistOverviewTracks,
+  );
   let selectedGenreTracks = $derived(
     selectedGenre ? tracks.filter((track) => trackGenres(track).includes(selectedGenre.name)) : [],
   );
@@ -472,6 +486,10 @@
   let selectedGenreSearchTracks = $derived(searchFilterGenreTracks(selectedGenreTracks, normalizedSearchQuery));
   let selectedGenreSearchAlbums = $derived(searchFilterGenreAlbums(selectedGenreAlbums, normalizedSearchQuery));
   let selectedGenreSearchArtists = $derived(searchFilterArtists(selectedGenreArtists, normalizedSearchQuery));
+  let selectedGenreOverviewTracks = $derived(overviewTracks(selectedGenreTracks));
+  let selectedGenreVisibleTracks = $derived(
+    selectedGenreSongsExpanded || normalizedSearchQuery ? selectedGenreSearchTracks : selectedGenreOverviewTracks,
+  );
   let visibleSongTracks = $derived(searchFilterTracks(filteredSongTracks, normalizedSearchQuery));
   let visibleAlbums = $derived(searchFilterAlbums(sortedAlbums, normalizedSearchQuery));
   let visibleArtists = $derived(searchFilterArtists(sortedArtists, normalizedSearchQuery));
@@ -574,6 +592,14 @@
   });
 
   $effect(() => {
+    if (!ENABLE_EXPERIMENTAL_VIDEOS && activeView === "Videos") {
+      activeView = "Home";
+      selectedVideoId = null;
+      isEditingVideo = false;
+    }
+  });
+
+  $effect(() => {
     if (activeLyricIndex < 0 || !lyricsPanelElement) {
       return;
     }
@@ -589,8 +615,11 @@
   });
 
   onMount(() => {
+    autoFindLyricsEnabled = window.localStorage.getItem(AUTO_LYRICS_SETTING_KEY) !== "off";
     void loadLibraryCache();
-    void loadVideoLibrary();
+    if (ENABLE_EXPERIMENTAL_VIDEOS) {
+      void loadVideoLibrary();
+    }
     const mprisUnlisteners = [
       listen("mpris-play-pause", () => void handleTogglePlayback()),
       listen("mpris-play", () => void handleMprisPlay()),
@@ -642,9 +671,11 @@
       }
     }, 250);
 
-    const videoProgressIntervalId = window.setInterval(() => {
-      void refreshNativeVideoStatus(false);
-    }, 1000);
+    const videoProgressIntervalId = ENABLE_EXPERIMENTAL_VIDEOS
+      ? window.setInterval(() => {
+          void refreshNativeVideoStatus(false);
+        }, 1000)
+      : null;
 
     function handleKeydown(event: KeyboardEvent) {
       if (playlistPendingDelete) {
@@ -701,7 +732,9 @@
     return () => {
       window.clearInterval(statusIntervalId);
       window.clearInterval(progressIntervalId);
-      window.clearInterval(videoProgressIntervalId);
+      if (videoProgressIntervalId !== null) {
+        window.clearInterval(videoProgressIntervalId);
+      }
       window.removeEventListener("keydown", handleKeydown, true);
       for (const unlisten of mprisUnlisteners) {
         void unlisten.then((cleanup) => cleanup());
@@ -756,6 +789,7 @@
       lyricsLookupError = null;
       lyricsPickerResults = [];
       isLyricsPickerOpen = false;
+      isLyricsOptionsOpen = false;
       return;
     }
 
@@ -765,12 +799,16 @@
     lyricsLookupError = null;
     lyricsPickerResults = [];
     isLyricsPickerOpen = false;
+    isLyricsOptionsOpen = false;
 
     try {
       const lyrics = await readTrackLyrics(trackPath);
 
       if (requestId === lyricsRequestId) {
         currentLyrics = lyrics;
+        if (!lyrics) {
+          void handleAutoFindLyrics({ mode: "auto", requestId });
+        }
       }
     } catch {
       if (requestId === lyricsRequestId) {
@@ -783,40 +821,158 @@
     }
   }
 
-  async function handleAutoFindLyrics(replaceCached = false) {
-    if (!currentTrack || isAutoFindingLyrics) {
+  async function handleAutoFindLyrics(options: {
+    mode: "auto" | "manual";
+    replaceCached?: boolean;
+    requestId?: number;
+  }) {
+    const track = currentTrack;
+    const isManual = options.mode === "manual";
+    const replaceCached = options.replaceCached ?? false;
+
+    if (!track || isAutoFindingLyrics) {
       return;
+    }
+
+    if (!canSearchLyricsForTrack(track)) {
+      if (isManual) {
+        lyricsLookupMessage = null;
+        lyricsLookupError = "Title and artist metadata are required before searching lyrics.";
+      }
+      return;
+    }
+
+    if (!isManual) {
+      if (
+        !autoFindLyricsEnabled
+        || currentLyrics
+        || isAutoLyricsCoolingDown(track)
+        || (options.requestId !== undefined && options.requestId !== lyricsRequestId)
+      ) {
+        return;
+      }
+    } else {
+      clearAutoLyricsCooldown(track);
     }
 
     isAutoFindingLyrics = true;
     lyricsPickerReplaceCached = replaceCached;
     lyricsPickerResults = [];
     isLyricsPickerOpen = false;
-    lyricsLookupMessage = replaceCached ? "Searching LRCLIB for replacement lyrics..." : "Searching LRCLIB...";
+    lyricsLookupMessage = "Searching lyrics...";
     lyricsLookupError = null;
 
     try {
-      const result = await autoFindTrackLyrics(currentTrack.filePath, replaceCached);
+      if (isManual) {
+        const results = await searchTrackLyricsResults(track.filePath);
+
+        if (track.filePath !== currentTrack?.filePath) {
+          return;
+        }
+
+        lyricsPickerResults = results;
+        isLyricsPickerOpen = results.length > 0;
+        isLyricsOptionsOpen = true;
+        lyricsLookupMessage = results.length > 0 ? "Select lyrics result." : "No lyrics found";
+        return;
+      }
+
+      const result = await autoFindTrackLyrics(track.filePath, replaceCached);
+
+      if (track.filePath !== currentTrack?.filePath || (options.requestId !== undefined && options.requestId !== lyricsRequestId)) {
+        return;
+      }
 
       if (result.lyrics) {
         currentLyrics = result.lyrics;
-      }
-
-      if (result.status === "select" && result.results.length > 0) {
-        lyricsPickerResults = result.results;
-        isLyricsPickerOpen = true;
-        lyricsLookupMessage = "Select lyrics result.";
-      } else if (result.status === "existing") {
-        lyricsLookupMessage = "Lyrics are already available for this track.";
+        lyricsLookupMessage = null;
+        clearAutoLyricsCooldown(track);
+      } else if (result.status === "not_found") {
+        lyricsLookupMessage = "No lyrics found";
+        setAutoLyricsCooldown(track, "not_found");
       } else {
-        lyricsLookupMessage = "No lyrics found on LRCLIB.";
+        lyricsLookupMessage = null;
       }
     } catch (error) {
-      lyricsLookupMessage = null;
-      lyricsLookupError = error instanceof Error ? error.message : "Could not search LRCLIB. Check your connection.";
+      const message = error instanceof Error ? error.message : "Could not search LRCLIB. Check your connection.";
+
+      if (isManual) {
+        lyricsLookupMessage = null;
+        lyricsLookupError = message;
+      } else if (track.filePath === currentTrack?.filePath) {
+        lyricsLookupMessage = "Offline / lookup failed";
+        lyricsLookupError = null;
+        setAutoLyricsCooldown(track, "failed", message);
+      }
     } finally {
       isAutoFindingLyrics = false;
     }
+  }
+
+  function canSearchLyricsForTrack(track: Track) {
+    const artist = track.artist ?? track.albumArtist;
+
+    return Boolean(
+      track.title.trim()
+      && artist?.trim()
+      && !textMissingOrUnknown(artist, "Unknown Artist"),
+    );
+  }
+
+  function autoLyricsCooldownKey(track: Track) {
+    return `cassette:auto-lyrics:${hashString(track.filePath)}`;
+  }
+
+  function isAutoLyricsCoolingDown(track: Track) {
+    const stored = window.localStorage.getItem(autoLyricsCooldownKey(track));
+
+    if (!stored) {
+      return false;
+    }
+
+    try {
+      const cooldown = JSON.parse(stored) as { attemptedAt?: number };
+      const attemptedAt = typeof cooldown.attemptedAt === "number" ? cooldown.attemptedAt : 0;
+
+      if (Date.now() - attemptedAt < AUTO_LYRICS_COOLDOWN_MS) {
+        return true;
+      }
+    } catch {
+      // Ignore unreadable cooldown entries and replace them on the next failed lookup.
+    }
+
+    window.localStorage.removeItem(autoLyricsCooldownKey(track));
+    return false;
+  }
+
+  function setAutoLyricsCooldown(track: Track, status: "not_found" | "failed", message: string | null = null) {
+    window.localStorage.setItem(autoLyricsCooldownKey(track), JSON.stringify({
+      status,
+      message,
+      attemptedAt: Date.now(),
+    }));
+  }
+
+  function clearAutoLyricsCooldown(track: Track) {
+    window.localStorage.removeItem(autoLyricsCooldownKey(track));
+  }
+
+  function hashString(value: string) {
+    let hash = 2166136261;
+
+    for (let index = 0; index < value.length; index += 1) {
+      hash ^= value.charCodeAt(index);
+      hash = Math.imul(hash, 16777619);
+    }
+
+    return (hash >>> 0).toString(16);
+  }
+
+  function handleAutoFindLyricsSettingChange(event: Event) {
+    autoFindLyricsEnabled = event.currentTarget instanceof HTMLInputElement
+      ? event.currentTarget.checked
+      : autoFindLyricsEnabled;
+    window.localStorage.setItem(AUTO_LYRICS_SETTING_KEY, autoFindLyricsEnabled ? "on" : "off");
   }
 
   async function handleSelectLyricsResult(result: LrclibLyricsResult) {
@@ -831,9 +987,11 @@
     try {
       const lyrics = await saveTrackLyricsResult(currentTrack.filePath, result, true);
       currentLyrics = lyrics;
+      clearAutoLyricsCooldown(currentTrack);
       lyricsPickerResults = [];
       isLyricsPickerOpen = false;
-      lyricsLookupMessage = lyrics.kind === "synced" ? "Synced lyrics found." : "Plain lyrics found.";
+      isLyricsOptionsOpen = false;
+      lyricsLookupMessage = lyrics.kind === "plain" ? "Plain lyrics" : null;
     } catch (error) {
       lyricsLookupMessage = null;
       lyricsLookupError = error instanceof Error ? error.message : "Could not save selected lyrics.";
@@ -894,7 +1052,6 @@
       await scanFolderIntoLibrary(folder);
     } catch (error) {
       scanError = error instanceof Error ? error.message : String(error);
-      scanCount = null;
     } finally {
       isScanning = false;
     }
@@ -902,9 +1059,13 @@
 
   async function scanFolderIntoLibrary(folder: string) {
     isScanning = true;
+    hasLoadedCache = true;
+
+    const scannedTracks = await scanLibrary(folder);
     scannedFolder = folder;
-    scanCount = null;
-    tracks = [];
+    tracks = scannedTracks;
+    scanCount = scannedTracks.length;
+    lastScannedAt = Math.floor(Date.now() / 1000);
     selectedAlbumId = null;
     selectedArtistName = null;
     selectedGenreName = null;
@@ -922,12 +1083,6 @@
     currentQueueIndex = null;
     shuffledQueueOrder = [];
     isQueueOpen = false;
-    hasLoadedCache = true;
-
-    const scannedTracks = await scanLibrary(folder);
-    tracks = scannedTracks;
-    scanCount = scannedTracks.length;
-    lastScannedAt = Math.floor(Date.now() / 1000);
   }
 
   async function handleScanRippedFolder() {
@@ -945,7 +1100,6 @@
     } catch (error) {
       cdRipMessage = null;
       cdRipError = error instanceof Error ? error.message : String(error);
-      scanCount = null;
     } finally {
       isScanning = false;
     }
@@ -2342,11 +2496,18 @@
   }
 
   function handleNavigate(label: string) {
+    if (!ENABLE_EXPERIMENTAL_VIDEOS && label === "Videos") {
+      activeView = "Home";
+      return;
+    }
+
     void saveActiveVideoProgress(true);
     activeView = label;
     selectedAlbumId = null;
     selectedArtistName = null;
     selectedGenreName = null;
+    selectedArtistSongsExpanded = false;
+    selectedGenreSongsExpanded = false;
     clearGenreEditState();
     isLikedSongsOpen = false;
     isMixBuilderOpen = false;
@@ -2359,7 +2520,29 @@
   }
 
   function handleNowPlayingSelect() {
-    handleNavigate("Now Playing");
+    handleLyricsSelect();
+  }
+
+  function handleLyricsSelect() {
+    if (activeView !== "Now Playing") {
+      lyricsReturnView = activeView;
+    }
+
+    activeView = "Now Playing";
+    isQueueOpen = false;
+    mainElement?.scrollTo({ top: 0 });
+  }
+
+  function handleCloseLyrics() {
+    activeView = lyricsReturnView && lyricsReturnView !== "Now Playing" ? lyricsReturnView : "Home";
+    lyricsReturnView = null;
+    isLyricsOptionsOpen = false;
+    isLyricsPickerOpen = false;
+    mainElement?.scrollTo({ top: 0 });
+  }
+
+  function toggleLyricsOptions() {
+    isLyricsOptionsOpen = !isLyricsOptionsOpen;
   }
 
   function handleHomeSongsViewAll(sortKey: SongSortKey, direction: SortDirection) {
@@ -2493,6 +2676,7 @@
     selectedArtistName = artistName;
     selectedAlbumId = null;
     selectedGenreName = null;
+    selectedArtistSongsExpanded = false;
     clearGenreEditState();
     artistGenreDraft = genreDraftForTracks(tracks.filter((track) => artistNameForTrack(track) === artistName));
     isLikedSongsOpen = false;
@@ -2508,6 +2692,7 @@
     selectedGenreName = genre.name;
     selectedAlbumId = null;
     selectedArtistName = null;
+    selectedGenreSongsExpanded = false;
     clearGenreEditState();
     isLikedSongsOpen = false;
     isMixBuilderOpen = false;
@@ -2810,6 +2995,7 @@
 
   function handleBackToArtists() {
     selectedArtistName = null;
+    selectedArtistSongsExpanded = false;
     clearGenreEditState();
     searchQuery = "";
     mainElement?.scrollTo({ top: 0 });
@@ -2817,6 +3003,7 @@
 
   function handleBackToGenres() {
     selectedGenreName = null;
+    selectedGenreSongsExpanded = false;
     searchQuery = "";
     mainElement?.scrollTo({ top: 0 });
   }
@@ -3782,6 +3969,14 @@
     return orderedContextTracks(tracks.filter((track) => trackGenres(track).includes(genre.name)));
   }
 
+  function overviewTracks(libraryTracks: Track[]) {
+    const recent = recentlyPlayed(libraryTracks);
+    const recentIds = new Set(recent.map((track) => track.id));
+    const fallback = orderedContextTracks(libraryTracks).filter((track) => !recentIds.has(track.id));
+
+    return [...recent, ...fallback].slice(0, 10);
+  }
+
   function tracksForPlaylist(playlist: Playlist) {
     const seenTrackIds = new Set<string>();
 
@@ -4671,12 +4866,20 @@
       return "Your music, on this machine.";
     }
 
+    if (activeView === "Now Playing") {
+      return currentTrack ? currentTrack.title : "Current Track";
+    }
+
     return activeView;
   }
 
   function viewEyebrow() {
     if (isHomeSearchActive) {
       return "Search";
+    }
+
+    if (activeView === "Now Playing") {
+      return "Lyrics";
     }
 
     return activeView;
@@ -4694,6 +4897,12 @@
 
     if (!hasLoadedCache) {
       return "Loading cached library...";
+    }
+
+    if (activeView === "Now Playing") {
+      return currentTrack
+        ? "Current song details and lyrics. Use the player bar for playback and queue controls."
+        : "Select a song to view lyrics.";
     }
 
     if (activeView === "Settings") {
@@ -4755,26 +4964,30 @@
 </svelte:head>
 
 <div class="app-shell">
-  <div class="workspace">
-    <Sidebar items={navItems} active={activeView} onNavigate={handleNavigate} />
+  <div class:lyrics-mode={activeView === "Now Playing"} class="workspace">
+    {#if activeView !== "Now Playing"}
+      <Sidebar items={visibleNavItems} active={activeView} onNavigate={handleNavigate} />
+    {/if}
 
-    <main class="home" bind:this={mainElement}>
-      <header class="home-header">
-        <div>
-          <p class="eyebrow">{viewEyebrow()}</p>
-          <h2>{viewTitle()}</h2>
-          <p class="scan-status">{viewStatus()}</p>
-        </div>
-        {#if activeView === "Videos"}
-          <button type="button" disabled={isScanningVideos} onclick={() => void (videoFolder ? handleRescanVideos() : handleAddVideoFolder())}>
-            {isScanningVideos ? "Scanning..." : videoFolder ? "Rescan Videos" : "Add Video Folder"}
-          </button>
-        {:else}
-          <button type="button" disabled={isScanning} onclick={handleScanLibrary}>
-            {isScanning ? "Scanning..." : "Scan Library"}
-          </button>
-        {/if}
-      </header>
+    <main class:lyrics-mode={activeView === "Now Playing"} class="home" bind:this={mainElement}>
+      {#if activeView !== "Now Playing"}
+        <header class="home-header">
+          <div>
+            <p class="eyebrow">{viewEyebrow()}</p>
+            <h2>{viewTitle()}</h2>
+            <p class="scan-status">{viewStatus()}</p>
+          </div>
+          {#if ENABLE_EXPERIMENTAL_VIDEOS && activeView === "Videos"}
+            <button type="button" disabled={isScanningVideos} onclick={() => void (videoFolder ? handleRescanVideos() : handleAddVideoFolder())}>
+              {isScanningVideos ? "Scanning..." : videoFolder ? "Rescan Videos" : "Add Video Folder"}
+            </button>
+          {:else}
+            <button type="button" disabled={isScanning} onclick={handleScanLibrary}>
+              {isScanning ? "Scanning..." : "Scan Library"}
+            </button>
+          {/if}
+        </header>
+      {/if}
 
       {#if isSearchAvailable()}
         <div class="search-bar">
@@ -4912,229 +5125,227 @@
           </div>
         {/if}
       {:else if activeView === "Now Playing"}
-        <section class="now-playing-page" aria-labelledby="now-playing-title">
+        <section class="lyrics-view" aria-labelledby="lyrics-view-title">
           {#if currentTrack}
-            <div class="now-playing-hero">
-              <div class="now-playing-cover" aria-hidden="true">
-                {#if currentTrackCoverArtSrc}
-                  <img
-                    src={currentTrackCoverArtSrc}
-                    alt=""
-                    onload={showLoadedImage}
-                    onerror={hideBrokenImage}
-                  />
-                {/if}
-                <span></span>
+            <header class="lyrics-view-top">
+              <button class="lyrics-close-button" type="button" onclick={handleCloseLyrics}>
+                ← Back
+              </button>
+              <div class="lyrics-title-block">
+                <h2 id="lyrics-view-title">Lyrics</h2>
               </div>
+              <button
+                class:active={isLyricsOptionsOpen}
+                class="lyrics-options-button"
+                type="button"
+                onclick={toggleLyricsOptions}
+              >
+                {isLyricsOptionsOpen ? "Hide Options" : "Lyrics Options"}
+                {#if Math.abs(lyricsOffsetSeconds) > 0.01}
+                  <span>{formatSignedSeconds(lyricsOffsetSeconds)}</span>
+                {/if}
+              </button>
+            </header>
 
-              <div class="now-playing-copy">
-                <p class="eyebrow">Now Playing</p>
-                <h3 id="now-playing-title">{currentTrack.title}</h3>
-                <div class="now-playing-links">
-                  <button type="button" onclick={handleNowPlayingArtistSelect}>
-                    {currentTrack.artist ?? currentTrack.albumArtist ?? "Unknown Artist"}
-                  </button>
-                  {#if currentTrack.album}
-                    <span aria-hidden="true">·</span>
-                    <button type="button" onclick={handleNowPlayingAlbumSelect}>{currentTrack.album}</button>
+            <div class="lyrics-experience">
+              <aside class="lyrics-sidecar" aria-label="Current song">
+                <div class="lyrics-cover" aria-hidden="true">
+                  {#if currentTrackCoverArtSrc}
+                    <img
+                      src={currentTrackCoverArtSrc}
+                      alt=""
+                      onload={showLoadedImage}
+                      onerror={hideBrokenImage}
+                    />
                   {/if}
-                  {#if currentTrack.year}
-                    <span aria-hidden="true">·</span>
-                    <span>{currentTrack.year}</span>
+                  <span></span>
+                </div>
+                <div class="lyrics-sidecar-copy">
+                  <h3>{currentTrack.title}</h3>
+                  <p>
+                    <button type="button" onclick={handleNowPlayingArtistSelect}>
+                      {currentTrack.artist ?? currentTrack.albumArtist ?? "Unknown Artist"}
+                    </button>
+                  </p>
+                  {#if currentTrack.album}
+                    <p>
+                      <button type="button" onclick={handleNowPlayingAlbumSelect}>{currentTrack.album}</button>
+                    </p>
+                  {/if}
+                  <div class="lyrics-sidecar-meta">
+                    {#if currentTrack.year}
+                      <span>{currentTrack.year}</span>
+                    {/if}
+                    <span>{currentTrack.extension.toUpperCase()}</span>
+                    {#if currentTrack.playCount > 0}
+                      <span>{playCountLabel(currentTrack)}</span>
+                    {/if}
+                  </div>
+                  {#if currentTrackGenres.length > 0}
+                    <div class="lyrics-genre-links" aria-label="Genres">
+                      {#each currentTrackGenres as genre}
+                        <button type="button" onclick={() => handleNowPlayingGenreSelect(genre)}>{genre}</button>
+                      {/each}
+                    </div>
                   {/if}
                 </div>
+              </aside>
 
-                {#if currentTrackGenres.length > 0}
-                  <div class="now-playing-genres" aria-label="Genres">
-                    {#each currentTrackGenres as genre}
-                      <button type="button" onclick={() => handleNowPlayingGenreSelect(genre)}>{genre}</button>
+              <section class="lyrics-focus" aria-labelledby="lyrics-view-title">
+                {#if lyricsLookupError || isAutoFindingLyrics || (!currentLyrics && lyricsLookupMessage) || currentLyrics?.kind === "plain"}
+                  <p class:error={lyricsLookupError} class="lyrics-status-line">
+                    {lyricsLookupError ?? (isAutoFindingLyrics ? "Searching lyrics..." : currentLyrics?.kind === "plain" ? "Plain lyrics" : lyricsLookupMessage)}
+                  </p>
+                {/if}
+
+                {#if isLoadingLyrics}
+                  <div class="lyrics-empty-state" role="status">
+                    <h3>Loading lyrics...</h3>
+                    <p>Checking local and cached lyrics.</p>
+                  </div>
+                {:else if currentLyrics?.kind === "synced" && syncedLyricLines.length > 0}
+                  <div class="synced-lyrics" bind:this={lyricsPanelElement}>
+                    {#each syncedLyricLines as line, index}
+                      <button
+                        class:active={index === activeLyricIndex}
+                        data-active={index === activeLyricIndex ? "true" : undefined}
+                        type="button"
+                        onclick={() => handleLyricLineSeek(line.timeSeconds)}
+                      >
+                        {line.text}
+                      </button>
                     {/each}
                   </div>
+                {:else if currentLyrics?.kind === "plain"}
+                  <pre class="plain-lyrics">{currentLyrics.text}</pre>
+                {:else if currentLyrics?.kind === "synced"}
+                  <div class="lyrics-empty-state">
+                    <h3>No lyric lines found</h3>
+                    <p>This .lrc file exists, but it does not contain timestamped lyric lines.</p>
+                  </div>
+                {:else}
+                  <div class="lyrics-empty-state">
+                    <h3>{isAutoFindingLyrics ? "Searching lyrics..." : "No lyrics found"}</h3>
+                    <p>{isAutoFindingLyrics ? "Cassette is checking LRCLIB in the background." : "Search LRCLIB manually or add a local .lrc/.txt file next to the song."}</p>
+                    <button class="auto-lyrics-button" type="button" disabled={isAutoFindingLyrics} onclick={() => void handleAutoFindLyrics({ mode: "manual" })}>
+                      {isAutoFindingLyrics ? "Searching..." : "Search Lyrics"}
+                    </button>
+                  </div>
                 {/if}
-
-                <div class="now-playing-stats">
-                  <span>{formatPlaybackTime(positionSeconds)} / {formatPlaybackTime(currentTrackDuration)}</span>
-                  {#if currentTrack.playCount > 0}
-                    <span>{playCountLabel(currentTrack)}</span>
-                  {/if}
-                  <span>{currentTrack.extension.toUpperCase()}</span>
-                </div>
-
-                <div class="now-playing-actions">
-                  <button
-                    class:active={currentTrack.isFavorite}
-                    type="button"
-                    aria-label={currentTrack.isFavorite ? "Remove from liked songs" : "Add to liked songs"}
-                    onclick={handleToggleCurrentTrackFavorite}
-                  >
-                    {currentTrack.isFavorite ? "★ Liked" : "☆ Like"}
-                  </button>
-                </div>
-              </div>
+              </section>
             </div>
 
-            <section class="lyrics-panel" aria-labelledby="lyrics-title">
-              <div class="lyrics-header">
-                <div>
-                  <p class="eyebrow">Lyrics Source</p>
-                  <h3 id="lyrics-title">Lyrics</h3>
+            {#if isLyricsOptionsOpen}
+              <section class="lyrics-options-drawer" aria-label="Lyrics options">
+                <div class="lyrics-options-header">
+                  <div>
+                    <p class="eyebrow">Lyrics Options</p>
+                    <h3>Source and timing</h3>
+                  </div>
+                  <button type="button" aria-label="Close lyrics options" onclick={toggleLyricsOptions}>Close</button>
                 </div>
-                <div class="lyrics-header-actions">
-                  {#if currentLyrics}
-                    <button type="button" disabled={isAutoFindingLyrics} onclick={() => void handleAutoFindLyrics(true)}>
-                      {isAutoFindingLyrics ? "Searching..." : "Find Again"}
-                    </button>
-                  {/if}
+
+                <div class="lyrics-option-actions">
+                  <button type="button" disabled={isAutoFindingLyrics} onclick={() => void handleAutoFindLyrics({ mode: "manual", replaceCached: true })}>
+                    {isAutoFindingLyrics ? "Searching..." : currentLyrics ? "Change Lyrics" : "Search Lyrics"}
+                  </button>
                   {#if currentLyrics?.source === "lrclib"}
                     <button type="button" onclick={() => void handleRemoveCachedLyrics()}>
                       Remove Cached Lyrics
                     </button>
                   {/if}
-                  {#if lyricsBadgeLabel}
-                    <span>{lyricsBadgeLabel}</span>
+                </div>
+
+                <div class="lyrics-source-summary">
+                  <div>
+                    <span>Source</span>
+                    <strong>{lyricsBadgeLabel ?? (isAutoFindingLyrics ? "Searching lyrics..." : "No lyrics loaded")}</strong>
+                  </div>
+                  {#if cachedLyricsLabel}
+                    <p>{cachedLyricsLabel}</p>
+                  {/if}
+                  {#if lyricsLookupMessage}
+                    <p>{lyricsLookupMessage}</p>
+                  {:else if lyricsLookupError}
+                    <p class="error">{lyricsLookupError}</p>
                   {/if}
                 </div>
-              </div>
 
-              {#if lyricsLookupMessage}
-                <p class="lyrics-lookup-message">{lyricsLookupMessage}</p>
-              {:else if lyricsLookupError}
-                <p class="lyrics-lookup-message error">{lyricsLookupError}</p>
-              {:else if cachedLyricsLabel}
-                <p class="lyrics-lookup-message cached">{cachedLyricsLabel}</p>
-              {/if}
-
-              {#if isLoadingLyrics}
-                <div class="group-empty compact" role="status">
-                  <h3>Loading lyrics...</h3>
-                  <p>Checking for local .lrc and .txt files next to this track.</p>
-                </div>
-              {:else if isLyricsPickerOpen}
-                <div class="lyrics-result-picker" role="list" aria-label="Select lyrics result">
-                  <div class="lyrics-result-picker-heading">
-                    <h4>Select lyrics result</h4>
-                    <p>Synced LRCLIB results are listed first. Choose the version that best matches this track.</p>
+                {#if currentLyrics?.kind === "synced"}
+                  <div class="lyrics-offset-controls" aria-label="Lyrics Offset">
+                    <span>Lyrics Offset</span>
+                    <button type="button" disabled={isSavingLyricsOffset} onclick={() => void handleLyricsOffsetChange(lyricsOffsetSeconds - 1)}>
+                      -1.0s
+                    </button>
+                    <button type="button" disabled={isSavingLyricsOffset} onclick={() => void handleLyricsOffsetChange(lyricsOffsetSeconds - 0.5)}>
+                      -0.5s
+                    </button>
+                    <button type="button" disabled={isSavingLyricsOffset} onclick={() => void handleLyricsOffsetChange(0)}>
+                      Reset
+                    </button>
+                    <button type="button" disabled={isSavingLyricsOffset} onclick={() => void handleLyricsOffsetChange(lyricsOffsetSeconds + 0.5)}>
+                      +0.5s
+                    </button>
+                    <button type="button" disabled={isSavingLyricsOffset} onclick={() => void handleLyricsOffsetChange(lyricsOffsetSeconds + 1)}>
+                      +1.0s
+                    </button>
+                    <input
+                      aria-label="Lyrics offset seconds"
+                      type="number"
+                      min="-5"
+                      max="5"
+                      step="0.1"
+                      value={lyricsOffsetSeconds.toFixed(1)}
+                      disabled={isSavingLyricsOffset}
+                      onchange={(event) => void handleLyricsOffsetChange(Number(event.currentTarget.value))}
+                    />
                   </div>
-                  {#each lyricsPickerResults as result}
-                    <button
-                      type="button"
-                      class="lyrics-result-card"
-                      disabled={isSavingLyricsSelection}
-                      onclick={() => void handleSelectLyricsResult(result)}
-                    >
-                      <span class="lyrics-result-title">{result.trackName}</span>
-                      <span class="lyrics-result-artist">{result.artistName}</span>
-                      {#if result.albumName}
-                        <span class="lyrics-result-album">{result.albumName}</span>
-                      {/if}
-                      <span class="lyrics-result-tags">
-                        {#each lyricsResultMatchLabels(result) as label}
-                          <span>{label}</span>
-                        {/each}
-                      </span>
-                    </button>
-                  {/each}
-                </div>
-              {:else if currentLyrics?.kind === "synced" && syncedLyricLines.length > 0}
-                <div class="lyrics-offset-controls" aria-label="Lyrics Offset">
-                  <span>Lyrics Offset</span>
-                  <button type="button" disabled={isSavingLyricsOffset} onclick={() => void handleLyricsOffsetChange(lyricsOffsetSeconds - 1)}>
-                    -1.0s
-                  </button>
-                  <button type="button" disabled={isSavingLyricsOffset} onclick={() => void handleLyricsOffsetChange(lyricsOffsetSeconds - 0.5)}>
-                    -0.5s
-                  </button>
-                  <button type="button" disabled={isSavingLyricsOffset} onclick={() => void handleLyricsOffsetChange(0)}>
-                    Reset
-                  </button>
-                  <button type="button" disabled={isSavingLyricsOffset} onclick={() => void handleLyricsOffsetChange(lyricsOffsetSeconds + 0.5)}>
-                    +0.5s
-                  </button>
-                  <button type="button" disabled={isSavingLyricsOffset} onclick={() => void handleLyricsOffsetChange(lyricsOffsetSeconds + 1)}>
-                    +1.0s
-                  </button>
-                  <input
-                    aria-label="Lyrics offset seconds"
-                    type="number"
-                    min="-5"
-                    max="5"
-                    step="0.1"
-                    value={lyricsOffsetSeconds.toFixed(1)}
-                    disabled={isSavingLyricsOffset}
-                    onchange={(event) => void handleLyricsOffsetChange(Number(event.currentTarget.value))}
-                  />
-                </div>
-                <div class="synced-lyrics" bind:this={lyricsPanelElement}>
-                  {#each syncedLyricLines as line, index}
-                    <button
-                      class:active={index === activeLyricIndex}
-                      data-active={index === activeLyricIndex ? "true" : undefined}
-                      type="button"
-                      onclick={() => handleLyricLineSeek(line.timeSeconds)}
-                    >
-                      {line.text}
-                    </button>
-                  {/each}
-                </div>
-              {:else if currentLyrics?.kind === "plain"}
-                <pre class="plain-lyrics">{currentLyrics.text}</pre>
-              {:else if currentLyrics?.kind === "synced"}
-                <div class="group-empty compact">
-                  <h3>No lyric lines found</h3>
-                  <p>This .lrc file was found, but it does not contain timestamped lyric lines.</p>
-                </div>
-              {:else}
-                <div class="group-empty compact">
-                  <h3>No local lyrics found</h3>
-                  <p>Add a matching .lrc or .txt file next to the song, such as the same filename or lyrics.txt.</p>
-                  <button class="auto-lyrics-button" type="button" disabled={isAutoFindingLyrics} onclick={() => void handleAutoFindLyrics()}>
-                    {isAutoFindingLyrics ? "Searching..." : "Auto Find Lyrics"}
-                  </button>
-                </div>
-              {/if}
-            </section>
+                {/if}
 
-            <section class="now-playing-info-panel" aria-label="Playback status">
-              <div>
-                <p class="eyebrow">Playback</p>
-                <h3>{isPlaying ? "Playing" : "Paused"}</h3>
-              </div>
-              <p>{formatPlaybackTime(positionSeconds)} elapsed of {formatPlaybackTime(currentTrackDuration)}. Use the player bar below for playback controls.</p>
-            </section>
-
-            <LibrarySection title="Up Next" viewAllLabel={`${queuePanelEntries.length} ${queuePanelEntries.length === 1 ? "track" : "tracks"}`}>
-              {#if queuePanelEntries.length === 0}
-                <div class="group-empty">
-                  <h3>No queued songs</h3>
-                  <p>Play a song from any list to build an Up Next queue.</p>
-                </div>
-              {:else}
-                <div class="now-playing-queue-list">
-                  {#each queuePanelEntries as entry (entry.track.id)}
-                    <button
-                      class:active={entry.queueIndex === currentQueueIndex}
-                      type="button"
-                      title={entry.track.filePath}
-                      onclick={() => void playQueuedTrackAtIndex(entry.queueIndex)}
-                    >
-                      <span>{queuePositionLabel(entry.offset)}</span>
-                      <div>
-                        <strong>{entry.track.title}</strong>
-                        <small>{entry.track.artist ?? "Unknown Artist"}{entry.track.album ? ` · ${entry.track.album}` : ""}</small>
-                      </div>
-                      <small>{formatPlaybackTime(entry.track.durationSeconds)}</small>
-                    </button>
-                  {/each}
-                </div>
-              {/if}
-            </LibrarySection>
+                {#if isLyricsPickerOpen}
+                  <div class="lyrics-result-picker" role="list" aria-label="Select lyrics result">
+                    <div class="lyrics-result-picker-heading">
+                      <h4>Select lyrics result</h4>
+                      <p>Synced LRCLIB results are listed first. Choose the version that best matches this track.</p>
+                    </div>
+                    {#each lyricsPickerResults as result}
+                      <button
+                        type="button"
+                        class="lyrics-result-card"
+                        disabled={isSavingLyricsSelection}
+                        onclick={() => void handleSelectLyricsResult(result)}
+                      >
+                        <span class="lyrics-result-title">{result.trackName}</span>
+                        <span class="lyrics-result-artist">{result.artistName}</span>
+                        {#if result.albumName}
+                          <span class="lyrics-result-album">{result.albumName}</span>
+                        {/if}
+                        <span class="lyrics-result-tags">
+                          {#each lyricsResultMatchLabels(result) as label}
+                            <span>{label}</span>
+                          {/each}
+                        </span>
+                      </button>
+                    {/each}
+                  </div>
+                {/if}
+              </section>
+            {/if}
           {:else}
-            <div class="now-playing-empty">
-              <div class="now-playing-empty-mark" aria-hidden="true">N</div>
+            <header class="lyrics-view-top">
+              <button class="lyrics-close-button" type="button" onclick={handleCloseLyrics}>
+                ← Back
+              </button>
+              <div class="lyrics-title-block">
+                <h2 id="lyrics-view-title">Lyrics</h2>
+              </div>
+            </header>
+            <div class="lyrics-empty-shell">
+              <div class="lyrics-empty-art" aria-hidden="true">L</div>
               <div>
-                <p class="eyebrow">Now Playing</p>
-                <h3 id="now-playing-title">No track playing</h3>
-                <p>Select a song from the library to start playback.</p>
+                <p class="eyebrow">Lyrics</p>
+                <h3>No current song</h3>
+                <p>Play a track, then open lyrics again from the bottom player.</p>
               </div>
             </div>
           {/if}
@@ -5665,15 +5876,27 @@
               {/if}
             </LibrarySection>
 
-            <LibrarySection title="Songs" viewAllLabel={normalizedSearchQuery ? `${selectedArtistSearchTracks.length} ${selectedArtistSearchTracks.length === 1 ? "match" : "matches"}` : `${selectedArtistTracks.length} total`}>
-              {#if selectedArtistSearchTracks.length === 0}
+            <LibrarySection
+              title="Songs"
+              viewAllLabel={normalizedSearchQuery
+                ? `${selectedArtistSearchTracks.length} ${selectedArtistSearchTracks.length === 1 ? "match" : "matches"}`
+                : selectedArtistSongsExpanded
+                  ? `${selectedArtistTracks.length} total`
+                  : selectedArtistTracks.length > selectedArtistVisibleTracks.length
+                    ? `View all ${selectedArtistTracks.length}`
+                    : `${selectedArtistTracks.length} total`}
+              onViewAll={!normalizedSearchQuery && !selectedArtistSongsExpanded && selectedArtistTracks.length > selectedArtistVisibleTracks.length
+                ? () => { selectedArtistSongsExpanded = true; }
+                : undefined}
+            >
+              {#if selectedArtistVisibleTracks.length === 0}
                 <div class="group-empty">
                   <h3>{normalizedSearchQuery ? "No songs matched" : "No songs found"}</h3>
                   <p>{normalizedSearchQuery ? "Search is limited to this artist's songs." : "No tracks were found for this artist."}</p>
                 </div>
               {:else}
                 <TrackList
-                  tracks={selectedArtistSearchTracks}
+                  tracks={selectedArtistVisibleTracks}
                   isScanning={false}
                   selectedTrackId={currentTrack?.id}
                   onTrackSelect={handleTrackSelect}
@@ -5805,15 +6028,27 @@
               {/if}
             </LibrarySection>
 
-            <LibrarySection title="Songs" viewAllLabel={normalizedSearchQuery ? `${selectedGenreSearchTracks.length} ${selectedGenreSearchTracks.length === 1 ? "match" : "matches"}` : `${selectedGenreTracks.length} total`}>
-              {#if selectedGenreSearchTracks.length === 0}
+            <LibrarySection
+              title="Songs"
+              viewAllLabel={normalizedSearchQuery
+                ? `${selectedGenreSearchTracks.length} ${selectedGenreSearchTracks.length === 1 ? "match" : "matches"}`
+                : selectedGenreSongsExpanded
+                  ? `${selectedGenreTracks.length} total`
+                  : selectedGenreTracks.length > selectedGenreVisibleTracks.length
+                    ? `View all ${selectedGenreTracks.length}`
+                    : `${selectedGenreTracks.length} total`}
+              onViewAll={!normalizedSearchQuery && !selectedGenreSongsExpanded && selectedGenreTracks.length > selectedGenreVisibleTracks.length
+                ? () => { selectedGenreSongsExpanded = true; }
+                : undefined}
+            >
+              {#if selectedGenreVisibleTracks.length === 0}
                 <div class="group-empty">
                   <h3>{normalizedSearchQuery ? "No songs matched" : "No songs found"}</h3>
                   <p>{normalizedSearchQuery ? "Search is limited to this genre's songs." : "No tracks were found for this genre."}</p>
                 </div>
               {:else}
                 <TrackList
-                  tracks={selectedGenreSearchTracks}
+                  tracks={selectedGenreVisibleTracks}
                   isScanning={false}
                   selectedTrackId={currentTrack?.id}
                   onTrackSelect={handleTrackSelect}
@@ -7177,6 +7412,28 @@
               </div>
             </section>
 
+            <section class="settings-section" aria-labelledby="settings-lyrics-title">
+              <div class="settings-section-header">
+                <div>
+                  <p class="eyebrow">Lyrics</p>
+                  <h4 id="settings-lyrics-title">Lookup</h4>
+                </div>
+                <span class="settings-pill">{autoFindLyricsEnabled ? "Auto" : "Manual"}</span>
+              </div>
+
+              <div class="settings-control-list">
+                <label class="settings-toggle-row">
+                  <span>Auto-find lyrics</span>
+                  <input
+                    type="checkbox"
+                    checked={autoFindLyricsEnabled}
+                    onchange={handleAutoFindLyricsSettingChange}
+                  />
+                  <strong>{autoFindLyricsEnabled ? "On" : "Off"}</strong>
+                </label>
+              </div>
+            </section>
+
             <section class="settings-section" aria-labelledby="settings-interface-title">
               <div class="settings-section-header">
                 <div>
@@ -7415,6 +7672,7 @@
       {isQueueOpen}
       {isShuffleEnabled}
       {repeatMode}
+      compact={activeView === "Now Playing"}
       onTogglePlayback={handleTogglePlayback}
       onPrevious={handlePreviousTrack}
       onNext={handleNextTrack}
@@ -7425,6 +7683,7 @@
       onToggleShuffle={handleToggleShuffle}
       onToggleRepeat={handleToggleRepeat}
       onOpenNowPlaying={handleNowPlayingSelect}
+      onOpenLyrics={handleLyricsSelect}
     />
   {/if}
 </div>
@@ -7477,11 +7736,19 @@
     overflow: hidden;
   }
 
+  .workspace.lyrics-mode {
+    display: block;
+  }
+
   .home {
     width: 100%;
     min-width: 0;
     overflow: auto;
     padding: 32px;
+  }
+
+  .home.lyrics-mode {
+    padding: clamp(22px, 3vw, 38px) clamp(22px, 4vw, 56px);
   }
 
   .home-header {
@@ -8036,32 +8303,131 @@
     gap: 22px;
   }
 
-  .now-playing-page {
+  .lyrics-view {
+    position: relative;
     display: grid;
-    gap: 22px;
+    grid-template-rows: auto minmax(0, 1fr);
+    gap: 10px;
+    min-height: calc(100vh - 178px);
   }
 
-  .now-playing-hero {
+  .lyrics-view-top {
     display: grid;
-    grid-template-columns: minmax(220px, 340px) minmax(0, 1fr);
-    gap: 26px;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: start;
+    gap: 18px;
+  }
+
+  .lyrics-title-block {
+    min-width: 0;
+    text-align: center;
+  }
+
+  .lyrics-title-block h2 {
+    margin: 0;
+    overflow-wrap: anywhere;
+    color: #f7f9fc;
+    font-size: 1.05rem;
+    font-weight: 850;
+    line-height: 1.08;
+  }
+
+  .lyrics-sidecar-copy button {
+    max-width: 100%;
+    overflow: hidden;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    cursor: default;
+    font: inherit;
+    font-weight: inherit;
+    padding: 0;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .lyrics-sidecar-copy button:hover,
+  .lyrics-sidecar-copy button:focus-visible {
+    color: #ffffff;
+    outline: none;
+    text-decoration: underline;
+    text-underline-offset: 3px;
+  }
+
+  .lyrics-close-button,
+  .lyrics-options-button,
+  .lyrics-options-header button,
+  .lyrics-option-actions button {
+    min-height: 34px;
+    border: 1px solid rgba(48, 56, 68, 0.7);
+    border-radius: 8px;
+    background: rgba(18, 22, 28, 0.54);
+    color: #d5dce5;
+    cursor: default;
+    font: inherit;
+    font-size: 0.84rem;
+    font-weight: 850;
+    padding: 0 12px;
+  }
+
+  .lyrics-close-button:hover,
+  .lyrics-close-button:focus-visible,
+  .lyrics-options-button:hover,
+  .lyrics-options-button:focus-visible,
+  .lyrics-options-button.active,
+  .lyrics-options-header button:hover,
+  .lyrics-options-header button:focus-visible,
+  .lyrics-option-actions button:hover,
+  .lyrics-option-actions button:focus-visible {
+    border-color: #35544f;
+    background: #1b2027;
+    color: #f4f7fb;
+    outline: none;
+  }
+
+  .lyrics-options-button {
+    display: inline-flex;
     align-items: center;
+    gap: 8px;
+    white-space: nowrap;
   }
 
-  .now-playing-cover {
+  .lyrics-options-button span {
+    color: #9ee3d9;
+  }
+
+  .lyrics-experience {
+    display: grid;
+    grid-template-columns: minmax(180px, 250px) minmax(0, 1fr) minmax(72px, 0.22fr);
+    align-items: center;
+    gap: clamp(24px, 4vw, 56px);
+    min-height: min(720px, calc(100vh - 244px));
+  }
+
+  .lyrics-sidecar {
+    align-self: center;
+    min-width: 0;
+    max-width: 250px;
+    padding: 2px;
+  }
+
+  .lyrics-cover {
     position: relative;
     display: grid;
     aspect-ratio: 1;
     overflow: hidden;
     place-items: center;
+    width: min(100%, 236px);
     border-radius: 8px;
     background:
       linear-gradient(135deg, rgba(255, 255, 255, 0.18), transparent 46%),
       #2f8f83;
-    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.14);
+    box-shadow:
+      0 26px 78px rgba(0, 0, 0, 0.42),
+      inset 0 0 0 1px rgba(255, 255, 255, 0.14);
   }
 
-  .now-playing-cover img {
+  .lyrics-cover img {
     position: absolute;
     inset: 0;
     z-index: 1;
@@ -8070,211 +8436,182 @@
     object-fit: cover;
   }
 
-  .now-playing-cover span {
+  .lyrics-cover span {
     display: block;
     width: 34%;
     aspect-ratio: 1;
-    border: 14px solid rgba(13, 15, 19, 0.55);
+    border: 10px solid rgba(13, 15, 19, 0.55);
     border-radius: 999px;
     background: rgba(255, 255, 255, 0.6);
   }
 
-  .now-playing-copy {
-    min-width: 0;
-  }
-
-  .now-playing-copy h3 {
-    margin: 0 0 12px;
-    overflow-wrap: anywhere;
-    color: #f7f9fc;
-    font-size: clamp(2.1rem, 5vw, 4.8rem);
-    line-height: 1.02;
-  }
-
-  .now-playing-links,
-  .now-playing-genres,
-  .now-playing-stats,
-  .now-playing-actions {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 10px;
-  }
-
-  .now-playing-links {
-    color: #9aa4b1;
-    font-size: 1rem;
-    font-weight: 750;
-  }
-
-  .now-playing-links button,
-  .now-playing-genres button {
-    border: 0;
-    background: transparent;
-    color: #d5dce5;
-    cursor: default;
-    font: inherit;
-    font-weight: 800;
-    padding: 0;
-  }
-
-  .now-playing-links button:hover,
-  .now-playing-links button:focus-visible,
-  .now-playing-genres button:hover,
-  .now-playing-genres button:focus-visible {
-    color: #ffffff;
-    outline: none;
-    text-decoration: underline;
-    text-underline-offset: 3px;
-  }
-
-  .now-playing-genres {
-    margin-top: 16px;
-  }
-
-  .now-playing-genres button {
-    min-height: 30px;
-    border: 1px solid #35544f;
-    border-radius: 8px;
-    background: #17332f;
-    color: #d8fffa;
-    font-size: 0.82rem;
-    padding: 0 10px;
-  }
-
-  .now-playing-stats {
-    margin-top: 16px;
-    color: #9aa4b1;
-    font-size: 0.9rem;
-    font-weight: 750;
-  }
-
-  .now-playing-stats span {
-    min-height: 28px;
-    border: 1px solid #242b35;
-    border-radius: 8px;
-    background: #12161c;
-    padding: 4px 9px;
-  }
-
-  .now-playing-actions {
+  .lyrics-sidecar-copy {
     margin-top: 18px;
   }
 
-  .now-playing-actions button,
-  .now-playing-info-panel {
-    min-height: 38px;
-    border: 1px solid #303844;
-    border-radius: 8px;
-    background: #161a20;
-    color: #d5dce5;
-    cursor: default;
-    font: inherit;
-    font-size: 0.86rem;
-    font-weight: 850;
-    padding: 0 13px;
-  }
-
-  .now-playing-actions button:hover,
-  .now-playing-actions button:focus-visible,
-  .now-playing-actions button.active {
-    border-color: #35544f;
-    background: #17332f;
-    color: #d8fffa;
-    outline: none;
-  }
-
-  .now-playing-actions button:disabled {
-    border-color: #303844;
-    background: #151a21;
-    color: #626c79;
-  }
-
-  .lyrics-panel {
-    display: grid;
-    gap: 14px;
-    border: 1px solid #242b35;
-    border-radius: 8px;
-    background: #12161c;
-    padding: 16px;
-  }
-
-  .lyrics-header {
-    display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: 16px;
-  }
-
-  .lyrics-header h3 {
+  .lyrics-sidecar-copy h3,
+  .lyrics-sidecar-copy p {
+    overflow: hidden;
     margin: 0;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .lyrics-sidecar-copy h3 {
     color: #f4f7fb;
     font-size: 1.05rem;
   }
 
-  .lyrics-header-actions {
+  .lyrics-sidecar-copy p {
+    color: #9aa4b1;
+    font-size: 0.9rem;
+    font-weight: 700;
+  }
+
+  .lyrics-sidecar-meta,
+  .lyrics-genre-links {
     display: flex;
     flex-wrap: wrap;
-    justify-content: flex-end;
-    gap: 8px;
+    gap: 7px;
+    margin-top: 10px;
   }
 
-  .lyrics-header-actions > span {
+  .lyrics-sidecar-meta span,
+  .lyrics-genre-links button {
     display: inline-flex;
     align-items: center;
-    min-height: 28px;
-    border: 1px solid #303844;
-    border-radius: 999px;
-    background: #11161d;
-    color: #b9c3cf;
-    font-size: 0.76rem;
-    font-weight: 850;
-    padding: 0 10px;
-  }
-
-  .lyrics-header-actions button {
-    min-height: 28px;
-    border: 1px solid #303844;
+    min-height: 26px;
+    border: 1px solid rgba(48, 56, 68, 0.58);
     border-radius: 8px;
-    background: #161a20;
-    color: #d5dce5;
-    cursor: default;
+    background: rgba(18, 22, 28, 0.44);
+    color: #aeb8c4;
     font: inherit;
-    font-size: 0.78rem;
-    font-weight: 850;
-    padding: 0 10px;
+    font-size: 0.75rem;
+    font-weight: 820;
+    padding: 0 8px;
   }
 
-  .lyrics-header-actions button:hover,
-  .lyrics-header-actions button:focus-visible {
-    border-color: #35544f;
-    background: #1b2027;
+  .lyrics-genre-links button {
+    border-color: rgba(53, 84, 79, 0.74);
+    background: rgba(23, 51, 47, 0.54);
+    color: #d8fffa;
+    cursor: default;
+  }
+
+  .lyrics-genre-links button:hover,
+  .lyrics-genre-links button:focus-visible {
+    border-color: #4d766f;
+    background: #1b403b;
     outline: none;
   }
 
-  .lyrics-header-actions button:disabled {
-    border-color: #303844;
-    background: #151a21;
-    color: #626c79;
+  .lyrics-focus {
+    display: grid;
+    grid-column: 2;
+    min-width: 0;
+    min-height: min(640px, calc(100vh - 260px));
+    align-content: center;
   }
 
-  .lyrics-lookup-message {
-    margin: 0;
+  .lyrics-status-line {
+    justify-self: center;
+    max-width: min(100%, 720px);
+    margin: 0 0 12px;
     color: #9ee3d9;
-    font-size: 0.9rem;
-    font-weight: 750;
+    font-size: 0.86rem;
+    font-weight: 780;
+    text-align: center;
   }
 
-  .lyrics-lookup-message.error {
+  .lyrics-status-line.error {
     color: #ffcbc8;
   }
 
-  .lyrics-lookup-message.cached {
+  .synced-lyrics {
+    display: grid;
+    justify-items: center;
+    gap: 4px;
+    max-height: min(66vh, 650px);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding: 104px 0;
+    scrollbar-width: thin;
+  }
+
+  .synced-lyrics button {
+    width: auto;
+    max-width: min(100%, 940px);
+    border: 0;
+    margin: 0;
+    border-radius: 8px;
+    background: transparent;
+    color: #78828f;
+    cursor: default;
+    font: inherit;
+    font-size: clamp(1.22rem, 1.9vw, 1.92rem);
+    font-weight: 760;
+    line-height: 1.72;
+    padding: 3px 14px;
+    text-align: center;
+    text-wrap: balance;
+    transition:
+      background 150ms ease,
+      color 150ms ease,
+      text-shadow 150ms ease,
+      transform 150ms ease;
+  }
+
+  .synced-lyrics button:hover,
+  .synced-lyrics button:focus-visible {
+    background: rgba(23, 29, 36, 0.18);
+    color: #d5dce5;
+    outline: none;
+  }
+
+  .synced-lyrics button.active {
+    background: transparent;
+    color: #f4fffd;
+    font-weight: 900;
+    text-shadow:
+      0 0 16px rgba(158, 227, 217, 0.26),
+      0 0 38px rgba(47, 143, 131, 0.16);
+    transform: scale(1.025);
+  }
+
+  .plain-lyrics {
+    max-height: min(66vh, 650px);
+    overflow: auto;
+    margin: 0 auto;
+    width: min(100%, 760px);
+    color: #d5dce5;
+    font: inherit;
+    font-size: clamp(1.05rem, 1.45vw, 1.35rem);
+    font-weight: 680;
+    line-height: 1.85;
+    white-space: pre-wrap;
+  }
+
+  .lyrics-empty-state {
+    display: grid;
+    justify-items: center;
+    gap: 8px;
+    width: min(100%, 620px);
+    margin: 0 auto;
     color: #9aa4b1;
+    text-align: center;
+  }
+
+  .lyrics-empty-state h3 {
+    color: #f4f7fb;
+    font-size: 1.35rem;
+  }
+
+  .lyrics-empty-state p {
+    margin: 0;
+    font-weight: 680;
   }
 
   .auto-lyrics-button {
-    justify-self: center;
     min-height: 38px;
     margin-top: 12px;
     border: 1px solid #35544f;
@@ -8295,10 +8632,76 @@
     outline: none;
   }
 
-  .auto-lyrics-button:disabled {
+  .auto-lyrics-button:disabled,
+  .lyrics-option-actions button:disabled {
     border-color: #303844;
     background: #151a21;
     color: #626c79;
+  }
+
+  .lyrics-options-drawer {
+    position: absolute;
+    top: 46px;
+    right: 0;
+    z-index: 5;
+    display: grid;
+    gap: 12px;
+    width: min(100%, 420px);
+    max-height: min(70vh, 620px);
+    overflow: auto;
+    border: 1px solid rgba(80, 96, 112, 0.54);
+    border-radius: 8px;
+    background: rgba(18, 22, 28, 0.92);
+    box-shadow: 0 20px 58px rgba(0, 0, 0, 0.36);
+    padding: 14px;
+  }
+
+  .lyrics-options-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 14px;
+  }
+
+  .lyrics-options-header h3 {
+    margin: 0;
+    font-size: 1rem;
+  }
+
+  .lyrics-option-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .lyrics-source-summary {
+    display: grid;
+    gap: 8px;
+    color: #9aa4b1;
+    font-size: 0.86rem;
+    font-weight: 700;
+  }
+
+  .lyrics-source-summary > div {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .lyrics-source-summary span {
+    color: #8f9aa8;
+  }
+
+  .lyrics-source-summary strong {
+    color: #f4f7fb;
+  }
+
+  .lyrics-source-summary p {
+    margin: 0;
+  }
+
+  .lyrics-source-summary .error {
+    color: #ffcbc8;
   }
 
   .lyrics-result-picker {
@@ -8391,7 +8794,7 @@
     gap: 8px;
     border: 1px solid #242b35;
     border-radius: 8px;
-    background: #10141a;
+    background: rgba(13, 17, 23, 0.68);
     padding: 10px;
   }
 
@@ -8442,167 +8845,18 @@
     color: #626c79;
   }
 
-  .synced-lyrics {
-    display: grid;
-    gap: 4px;
-    max-height: 320px;
-    overflow-y: auto;
-    overscroll-behavior: contain;
-    padding: 24px 6px;
-  }
-
-  .synced-lyrics button {
-    width: 100%;
-    border: 0;
-    margin: 0;
-    border-radius: 8px;
-    background: transparent;
-    color: #7f8996;
-    cursor: default;
-    font: inherit;
-    font-size: 1rem;
-    font-weight: 750;
-    line-height: 1.5;
-    padding: 7px 10px;
-    text-align: left;
-    transition:
-      background 150ms ease,
-      color 150ms ease;
-  }
-
-  .synced-lyrics button:hover,
-  .synced-lyrics button:focus-visible {
-    background: #171d24;
-    color: #d5dce5;
-    outline: none;
-  }
-
-  .synced-lyrics button.active {
-    background: #17332f;
-    color: #d8fffa;
-  }
-
-  .plain-lyrics {
-    max-height: 360px;
-    overflow: auto;
-    margin: 0;
-    color: #d5dce5;
-    font: inherit;
-    font-size: 0.98rem;
-    font-weight: 650;
-    line-height: 1.65;
-    white-space: pre-wrap;
-  }
-
-  .now-playing-info-panel {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 18px;
-    border: 1px solid #242b35;
-    background: #12161c;
-    padding: 16px;
-  }
-
-  .now-playing-info-panel h3,
-  .now-playing-info-panel p {
-    margin: 0;
-  }
-
-  .now-playing-info-panel h3 {
-    color: #f4f7fb;
-    font-size: 1.05rem;
-  }
-
-  .now-playing-info-panel > p {
-    max-width: 620px;
-    color: #9aa4b1;
-    font-size: 0.92rem;
-    font-weight: 700;
-    text-align: right;
-  }
-
-  .now-playing-queue-list {
-    display: grid;
-    gap: 8px;
-  }
-
-  .now-playing-queue-list button {
-    display: grid;
-    grid-template-columns: 54px minmax(0, 1fr) auto;
-    align-items: center;
-    gap: 12px;
-    min-height: 56px;
-    border: 1px solid #242b35;
-    border-radius: 8px;
-    background: #151a21;
-    color: inherit;
-    cursor: default;
-    font: inherit;
-    padding: 9px 12px;
-    text-align: left;
-  }
-
-  .now-playing-queue-list button:hover,
-  .now-playing-queue-list button:focus-visible,
-  .now-playing-queue-list button.active {
-    border-color: #35544f;
-    background: #1b2027;
-    outline: none;
-  }
-
-  .now-playing-queue-list button > span {
-    display: grid;
-    min-height: 32px;
-    place-items: center;
-    border-radius: 7px;
-    background: #1d252e;
-    color: #8f9aa8;
-    font-size: 0.76rem;
-    font-weight: 900;
-  }
-
-  .now-playing-queue-list button.active > span {
-    background: #17332f;
-    color: #d8fffa;
-  }
-
-  .now-playing-queue-list div {
-    min-width: 0;
-  }
-
-  .now-playing-queue-list strong,
-  .now-playing-queue-list small {
-    display: block;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .now-playing-queue-list strong {
-    color: #f4f7fb;
-    font-size: 0.94rem;
-    line-height: 1.25;
-  }
-
-  .now-playing-queue-list small {
-    color: #8f9aa8;
-    font-size: 0.82rem;
-    font-weight: 700;
-  }
-
-  .now-playing-empty {
+  .lyrics-empty-shell {
     display: flex;
     align-items: center;
     gap: 18px;
-    min-height: 220px;
+    min-height: 260px;
     border: 1px dashed #303844;
     border-radius: 8px;
-    background: rgba(18, 22, 28, 0.74);
+    background: rgba(18, 22, 28, 0.54);
     padding: 24px;
   }
 
-  .now-playing-empty-mark {
+  .lyrics-empty-art {
     display: grid;
     width: 76px;
     height: 76px;
@@ -8615,13 +8869,13 @@
     font-weight: 900;
   }
 
-  .now-playing-empty h3 {
+  .lyrics-empty-shell h3 {
     margin: 0 0 6px;
     color: #f4f7fb;
     font-size: 1.35rem;
   }
 
-  .now-playing-empty p:not(.eyebrow) {
+  .lyrics-empty-shell p:not(.eyebrow) {
     margin: 0;
     color: #98a3b0;
     font-weight: 650;
@@ -10199,6 +10453,7 @@
   .cd-status-grid > div,
   .settings-status-list > div,
   .settings-control-list > div,
+  .settings-control-list > label,
   .about-grid > div {
     min-width: 0;
     border: 1px solid #2a313c;
@@ -10238,6 +10493,19 @@
     color: #8f9aa8;
     font-size: 0.8rem;
     font-weight: 760;
+  }
+
+  .settings-toggle-row {
+    display: grid;
+    grid-template-columns: 1fr auto auto;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .settings-toggle-row input {
+    width: 18px;
+    height: 18px;
+    accent-color: #2f8f83;
   }
 
   .accent-swatch {
@@ -11238,16 +11506,48 @@
       align-self: flex-start;
     }
 
-    .now-playing-hero {
+    .lyrics-view-top,
+    .lyrics-experience {
       grid-template-columns: 1fr;
     }
 
-    .now-playing-cover {
-      width: min(100%, 320px);
+    .lyrics-view-top {
+      gap: 12px;
     }
 
-    .now-playing-copy h3 {
-      font-size: 2.3rem;
+    .lyrics-options-button {
+      justify-self: start;
+    }
+
+    .lyrics-experience {
+      min-height: auto;
+    }
+
+    .lyrics-sidecar {
+      display: grid;
+      grid-template-columns: 128px minmax(0, 1fr);
+      align-items: end;
+      gap: 14px;
+      order: 2;
+    }
+
+    .lyrics-cover {
+      width: 128px;
+    }
+
+    .lyrics-sidecar-copy {
+      margin-top: 0;
+    }
+
+    .lyrics-focus {
+      grid-column: auto;
+      min-height: 420px;
+      order: 1;
+    }
+
+    .synced-lyrics,
+    .plain-lyrics {
+      max-height: min(54vh, 480px);
     }
 
     .album-detail-header,
@@ -11408,15 +11708,7 @@
       flex-direction: column;
     }
 
-    .now-playing-queue-list button {
-      grid-template-columns: 42px minmax(0, 1fr);
-    }
-
-    .now-playing-queue-list button > small {
-      display: none;
-    }
-
-    .now-playing-empty {
+    .lyrics-empty-shell {
       align-items: flex-start;
       flex-direction: column;
     }
