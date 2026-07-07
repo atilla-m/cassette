@@ -5149,6 +5149,16 @@
 
             <div class="lyrics-experience">
               <aside class="lyrics-sidecar" aria-label="Current song">
+                {#if currentTrackCoverArtSrc}
+                  <img
+                    class="lyrics-cover-ambient"
+                    src={currentTrackCoverArtSrc}
+                    alt=""
+                    aria-hidden="true"
+                    onload={showLoadedImage}
+                    onerror={hideBrokenImage}
+                  />
+                {/if}
                 <div class="lyrics-cover" aria-hidden="true">
                   {#if currentTrackCoverArtSrc}
                     <img
@@ -8359,15 +8369,25 @@
   .lyrics-options-header button,
   .lyrics-option-actions button {
     min-height: 34px;
-    border: 1px solid rgba(48, 56, 68, 0.7);
+    border: 1px solid rgba(66, 76, 91, 0.48);
     border-radius: 8px;
-    background: rgba(18, 22, 28, 0.54);
+    background: rgba(18, 22, 28, 0.38);
     color: #d5dce5;
     cursor: default;
     font: inherit;
     font-size: 0.84rem;
-    font-weight: 850;
+    font-weight: 780;
     padding: 0 12px;
+  }
+
+  .lyrics-close-button {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    border-color: rgba(78, 90, 106, 0.56);
+    background: rgba(22, 27, 34, 0.5);
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.12);
+    color: #e3e8ef;
   }
 
   .lyrics-close-button:hover,
@@ -8397,34 +8417,82 @@
   }
 
   .lyrics-experience {
+    --lyrics-cover-size: clamp(320px, min(30vw, 48vh), 360px);
+
     display: grid;
-    grid-template-columns: minmax(180px, 250px) minmax(0, 1fr) minmax(72px, 0.22fr);
+    grid-template-columns: minmax(var(--lyrics-cover-size), 400px) minmax(0, 1fr) minmax(96px, 0.18fr);
     align-items: center;
-    gap: clamp(24px, 4vw, 56px);
+    gap: clamp(22px, 2.4vw, 36px);
+    width: min(100%, 1380px);
     min-height: min(720px, calc(100vh - 244px));
+    margin-inline: auto;
   }
 
   .lyrics-sidecar {
+    position: relative;
     align-self: center;
+    justify-self: end;
+    width: var(--lyrics-cover-size);
     min-width: 0;
-    max-width: 250px;
+    max-width: none;
     padding: 2px;
+  }
+
+  .lyrics-sidecar::before {
+    position: absolute;
+    inset: -34px -42px auto -42px;
+    z-index: 0;
+    height: calc(var(--lyrics-cover-size) + 72px);
+    border-radius: 28px;
+    background: radial-gradient(circle at 50% 44%, rgba(47, 143, 131, 0.14), rgba(47, 143, 131, 0.04) 42%, transparent 72%);
+    content: "";
+    filter: blur(24px);
+    opacity: 0.72;
+    pointer-events: none;
+  }
+
+  .lyrics-cover-ambient {
+    position: absolute;
+    inset: -44px -54px auto -54px;
+    z-index: 0;
+    width: calc(var(--lyrics-cover-size) + 108px);
+    height: calc(var(--lyrics-cover-size) + 108px);
+    border-radius: 30px;
+    filter: blur(34px) saturate(0.72);
+    opacity: 0.16;
+    object-fit: cover;
+    pointer-events: none;
+    transform: scale(1.02);
   }
 
   .lyrics-cover {
     position: relative;
+    z-index: 1;
     display: grid;
     aspect-ratio: 1;
+    width: var(--lyrics-cover-size);
+    height: var(--lyrics-cover-size);
     overflow: hidden;
     place-items: center;
-    width: min(100%, 236px);
     border-radius: 8px;
     background:
       linear-gradient(135deg, rgba(255, 255, 255, 0.18), transparent 46%),
       #2f8f83;
     box-shadow:
-      0 26px 78px rgba(0, 0, 0, 0.42),
-      inset 0 0 0 1px rgba(255, 255, 255, 0.14);
+      0 34px 96px rgba(0, 0, 0, 0.48),
+      0 0 54px rgba(47, 143, 131, 0.1),
+      inset 0 0 0 1px rgba(255, 255, 255, 0.12);
+  }
+
+  .lyrics-cover::before {
+    position: absolute;
+    inset: -1px;
+    z-index: 2;
+    background:
+      linear-gradient(135deg, rgba(255, 255, 255, 0.12), transparent 34%),
+      linear-gradient(180deg, transparent 62%, rgba(0, 0, 0, 0.18));
+    content: "";
+    pointer-events: none;
   }
 
   .lyrics-cover img {
@@ -8446,7 +8514,9 @@
   }
 
   .lyrics-sidecar-copy {
-    margin-top: 18px;
+    position: relative;
+    z-index: 1;
+    margin-top: 14px;
   }
 
   .lyrics-sidecar-copy h3,
@@ -8459,12 +8529,13 @@
 
   .lyrics-sidecar-copy h3 {
     color: #f4f7fb;
-    font-size: 1.05rem;
+    font-size: 1rem;
+    line-height: 1.25;
   }
 
   .lyrics-sidecar-copy p {
     color: #9aa4b1;
-    font-size: 0.9rem;
+    font-size: 0.86rem;
     font-weight: 700;
   }
 
@@ -8473,7 +8544,7 @@
     display: flex;
     flex-wrap: wrap;
     gap: 7px;
-    margin-top: 10px;
+    margin-top: 8px;
   }
 
   .lyrics-sidecar-meta span,
@@ -8535,7 +8606,47 @@
     overflow-y: auto;
     overscroll-behavior: contain;
     padding: 104px 0;
+    scrollbar-color: transparent transparent;
     scrollbar-width: thin;
+    transition: scrollbar-color 180ms ease;
+  }
+
+  .plain-lyrics {
+    scrollbar-color: transparent transparent;
+    scrollbar-width: thin;
+    transition: scrollbar-color 180ms ease;
+  }
+
+  .synced-lyrics:hover,
+  .synced-lyrics:focus-within,
+  .plain-lyrics:hover,
+  .plain-lyrics:focus {
+    scrollbar-color: rgba(124, 139, 156, 0.24) transparent;
+  }
+
+  .synced-lyrics::-webkit-scrollbar,
+  .plain-lyrics::-webkit-scrollbar {
+    width: 8px;
+  }
+
+  .synced-lyrics::-webkit-scrollbar-track,
+  .plain-lyrics::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .synced-lyrics::-webkit-scrollbar-thumb,
+  .plain-lyrics::-webkit-scrollbar-thumb {
+    border: 3px solid transparent;
+    border-radius: 999px;
+    background: rgba(124, 139, 156, 0);
+    background-clip: content-box;
+  }
+
+  .synced-lyrics:hover::-webkit-scrollbar-thumb,
+  .synced-lyrics:focus-within::-webkit-scrollbar-thumb,
+  .plain-lyrics:hover::-webkit-scrollbar-thumb,
+  .plain-lyrics:focus::-webkit-scrollbar-thumb {
+    background-color: rgba(124, 139, 156, 0.28);
   }
 
   .synced-lyrics button {
@@ -8549,7 +8660,7 @@
     cursor: default;
     font: inherit;
     font-size: clamp(1.22rem, 1.9vw, 1.92rem);
-    font-weight: 760;
+    font-weight: 620;
     line-height: 1.72;
     padding: 3px 14px;
     text-align: center;
@@ -8573,8 +8684,9 @@
     color: #f4fffd;
     font-weight: 900;
     text-shadow:
-      0 0 16px rgba(158, 227, 217, 0.26),
-      0 0 38px rgba(47, 143, 131, 0.16);
+      0 0 14px rgba(236, 255, 251, 0.2),
+      0 0 28px rgba(158, 227, 217, 0.18),
+      0 0 52px rgba(47, 143, 131, 0.12);
     transform: scale(1.025);
   }
 
@@ -11525,14 +11637,17 @@
 
     .lyrics-sidecar {
       display: grid;
-      grid-template-columns: 128px minmax(0, 1fr);
+      width: 100%;
+      grid-template-columns: clamp(156px, 32vw, 204px) minmax(0, 1fr);
       align-items: end;
       gap: 14px;
+      justify-self: stretch;
       order: 2;
     }
 
     .lyrics-cover {
-      width: 128px;
+      width: clamp(156px, 32vw, 204px);
+      height: clamp(156px, 32vw, 204px);
     }
 
     .lyrics-sidecar-copy {

@@ -267,7 +267,7 @@
   }
 
   function queueLabel() {
-    return queueCount > 0 ? `Queue ${queueCount}` : "Queue";
+    return queueCount > 0 ? `Queue · ${queueCount}` : "Queue";
   }
 
   function repeatLabel() {
@@ -441,11 +441,13 @@
   }
 
   .player.compact {
-    grid-template-columns: auto auto minmax(240px, 1fr) minmax(180px, auto);
-    gap: 16px;
+    grid-template-columns: auto auto minmax(260px, min(42vw, 620px)) auto;
+    justify-content: center;
+    gap: 14px;
     min-height: 64px;
     padding: 10px 22px;
-    background: rgba(13, 15, 19, 0.96);
+    border-top-color: rgba(255, 255, 255, 0.06);
+    background: rgba(13, 15, 19, 0.9);
   }
 
   .track {
@@ -540,7 +542,7 @@
   }
 
   .player.compact .transport {
-    gap: 6px;
+    gap: 7px;
   }
 
   button.favorite {
@@ -624,6 +626,8 @@
 
   .player.compact button {
     height: 34px;
+    border-color: rgba(58, 68, 82, 0.76);
+    background: rgba(26, 32, 40, 0.78);
     font-size: 0.74rem;
   }
 
@@ -658,6 +662,7 @@
   .player.compact button.play {
     width: 40px;
     height: 40px;
+    box-shadow: 0 0 24px rgba(47, 143, 131, 0.16);
   }
 
   button.play:disabled {
@@ -676,10 +681,25 @@
 
   .player.compact .progress-area {
     gap: 8px;
+    width: min(40vw, 560px);
   }
 
   .player.compact .volume {
     justify-content: flex-end;
+    width: min(24vw, 240px);
+  }
+
+  .player.compact .progress,
+  .player.compact .volume-bar {
+    height: 6px;
+    background:
+      linear-gradient(
+        to right,
+        #2f8f83 0%,
+        #2f8f83 var(--range-fill, 0%),
+        rgba(63, 73, 87, 0.72) var(--range-fill, 0%),
+        rgba(63, 73, 87, 0.72) 100%
+      );
   }
 
   .progress,
