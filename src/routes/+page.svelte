@@ -127,6 +127,10 @@
     y: number;
     items: ContextMenuItem[];
   };
+  type AlbumNavigationOrigin =
+    | { view: "Albums" }
+    | { view: "Artists"; artistName: string }
+    | { view: "Genres"; genreName: string };
   type MixCategory = "genre" | "artist" | "album";
   type DuplicateAlbumGroup = {
     title: string;
@@ -332,6 +336,7 @@
   let mainElement: HTMLElement | undefined = $state();
   let activeView = $state("Albums");
   let selectedAlbumId = $state<string | null>(null);
+  let albumNavigationOrigin = $state<AlbumNavigationOrigin>({ view: "Albums" });
   let selectedArtistName = $state<string | null>(null);
   let selectedGenreName = $state<string | null>(null);
   let isLikedSongsOpen = $state(false);
@@ -386,7 +391,6 @@
   let lyricsLookupError = $state<string | null>(null);
   let isLyricsOptionsOpen = $state(false);
   let lyricsReturnView = $state<string | null>(null);
-  let selectedArtistSongsExpanded = $state(false);
   let selectedGenreSongsExpanded = $state(false);
   let shortcutModalElement: HTMLElement | undefined = $state();
   let deletePlaylistModalElement: HTMLElement | undefined = $state();
@@ -414,6 +418,8 @@
   let selectedAlbum = $derived(displayAlbums.find((album) => album.id === selectedAlbumId) ?? null);
   let selectedArtist = $derived(displayArtists.find((artist) => artist.name === selectedArtistName) ?? null);
   let selectedGenre = $derived(displayGenres.find((genre) => genre.name === selectedGenreName) ?? null);
+  let isAlbumDetailView = $derived(activeView === "Albums" && Boolean(selectedAlbum));
+  let isArtistDetailView = $derived(activeView === "Artists" && Boolean(selectedArtist));
   let selectedPlaylist = $derived(playlists.find((playlist) => playlist.id === selectedPlaylistId) ?? null);
   let selectedVideo = $derived(videos.find((video) => video.id === selectedVideoId) ?? null);
   let selectedVideoThumbnailSrc = $derived(localImageSource(selectedVideo?.thumbnailPath));
@@ -444,18 +450,11 @@
   let selectedAlbumIsMultiDisc = $derived(albumHasMultipleDiscs(selectedAlbumSearchTracks));
   let selectedAlbumDurationLabel = $derived(albumTotalDurationLabel(selectedAlbumTracks));
   let selectedAlbumFormatSummary = $derived(albumFormatSummary(selectedAlbumTracks));
-  let selectedArtistTracks = $derived(
-    selectedArtist ? tracks.filter((track) => artistNameForTrack(track) === selectedArtist.name) : [],
-  );
+  let selectedArtistTracks = $derived(selectedArtist ? tracksForArtist(selectedArtist) : []);
   let selectedArtistAlbums = $derived(
     selectedArtist ? sortedAlbums.filter((album) => album.artist === selectedArtist.name) : [],
   );
-  let selectedArtistSearchTracks = $derived(searchFilterArtistTracks(selectedArtistTracks, normalizedSearchQuery));
   let selectedArtistSearchAlbums = $derived(searchFilterAlbums(selectedArtistAlbums, normalizedSearchQuery));
-  let selectedArtistOverviewTracks = $derived(overviewTracks(selectedArtistTracks));
-  let selectedArtistVisibleTracks = $derived(
-    selectedArtistSongsExpanded || normalizedSearchQuery ? selectedArtistSearchTracks : selectedArtistOverviewTracks,
-  );
   let selectedGenreTracks = $derived(
     selectedGenre ? tracks.filter((track) => trackGenres(track).includes(selectedGenre.name)) : [],
   );
@@ -484,7 +483,7 @@
     { label: "Last scan", value: lastVideoScannedAt ? formatDateTime(lastVideoScannedAt) : "Not available" },
   ]);
   let selectedAlbumGenres = $derived(uniqueGenresForTracks(selectedAlbumTracks));
-  let selectedArtistGenreText = $derived(genreDisplayForTracks(selectedArtistTracks));
+  let selectedArtistGenres = $derived(uniqueGenresForTracks(selectedArtistTracks));
   let selectedPlaylistMissingTrackCount = $derived(selectedPlaylist ? missingTrackCountForPlaylist(selectedPlaylist) : 0);
   let canCreatePlaylist = $derived(normalizePlaylistName(playlistNameDraft).length > 0);
   let libraryDiagnostics = $derived(buildLibraryDiagnostics(tracks, displayAlbums, displayArtists));
@@ -2481,9 +2480,9 @@
     void saveActiveVideoProgress(true);
     activeView = targetView;
     selectedAlbumId = null;
+    albumNavigationOrigin = { view: "Albums" };
     selectedArtistName = null;
     selectedGenreName = null;
-    selectedArtistSongsExpanded = false;
     selectedGenreSongsExpanded = false;
     clearGenreEditState();
     isLikedSongsOpen = false;
@@ -2525,7 +2524,7 @@
   }
 
   function handleAlbumSelect(album: Album) {
-    selectAlbumId(album.id);
+    selectAlbumId(album.id, albumOriginForCurrentView());
   }
 
   async function handleShuffleLibrary() {
@@ -2572,6 +2571,26 @@
     appendTracksToQueue(selectedAlbumTracks);
   }
 
+  async function handlePlaySelectedArtist() {
+    if (selectedArtistTracks.length === 0) {
+      return;
+    }
+
+    await playTrackSet(selectedArtistTracks);
+  }
+
+  async function handleShuffleSelectedArtist() {
+    if (selectedArtistTracks.length === 0) {
+      return;
+    }
+
+    await playTrackSet(selectedArtistTracks, true);
+  }
+
+  function handleAddSelectedArtistToQueue() {
+    appendTracksToQueue(selectedArtistTracks);
+  }
+
   function handleAlbumTrackSelect(track: Track) {
     void handleTrackSelect(track, selectedAlbumTracks);
   }
@@ -2595,7 +2614,7 @@
   }
 
   function handleTrackAlbumSelect(track: Track) {
-    selectAlbumId(albumIdForTrack(track));
+    selectAlbumId(albumIdForTrack(track), albumOriginForCurrentView());
   }
 
   function handleNowPlayingArtistSelect() {
@@ -2622,10 +2641,23 @@
     }
   }
 
-  function selectAlbumId(albumId: string) {
+  function albumOriginForCurrentView(): AlbumNavigationOrigin {
+    if (activeView === "Artists" && selectedArtistName) {
+      return { view: "Artists", artistName: selectedArtistName };
+    }
+
+    if (activeView === "Genres" && selectedGenreName) {
+      return { view: "Genres", genreName: selectedGenreName };
+    }
+
+    return { view: "Albums" };
+  }
+
+  function selectAlbumId(albumId: string, origin: AlbumNavigationOrigin = { view: "Albums" }) {
     searchQuery = "";
     activeView = "Albums";
     selectedAlbumId = albumId;
+    albumNavigationOrigin = origin;
     selectedArtistName = null;
     selectedGenreName = null;
     clearGenreEditState();
@@ -2650,8 +2682,8 @@
     activeView = "Artists";
     selectedArtistName = artistName;
     selectedAlbumId = null;
+    albumNavigationOrigin = { view: "Albums" };
     selectedGenreName = null;
-    selectedArtistSongsExpanded = false;
     clearGenreEditState();
     artistGenreDraft = genreDraftForTracks(tracks.filter((track) => artistNameForTrack(track) === artistName));
     isLikedSongsOpen = false;
@@ -2666,6 +2698,7 @@
     activeView = "Genres";
     selectedGenreName = genre.name;
     selectedAlbumId = null;
+    albumNavigationOrigin = { view: "Albums" };
     selectedArtistName = null;
     selectedGenreSongsExpanded = false;
     clearGenreEditState();
@@ -2961,16 +2994,46 @@
     mainElement?.scrollTo({ top: 0 });
   }
 
-  function handleBackToAlbums() {
+  function handleAlbumDetailBack() {
+    const origin = albumNavigationOrigin;
+
     selectedAlbumId = null;
     clearGenreEditState();
     searchQuery = "";
+
+    if (origin.view === "Artists") {
+      activeView = "Artists";
+      selectedArtistName = origin.artistName;
+      selectedGenreName = null;
+    } else if (origin.view === "Genres") {
+      activeView = "Genres";
+      selectedGenreName = origin.genreName;
+      selectedArtistName = null;
+    } else {
+      activeView = "Albums";
+      selectedArtistName = null;
+      selectedGenreName = null;
+    }
+
+    albumNavigationOrigin = { view: "Albums" };
     mainElement?.scrollTo({ top: 0 });
+  }
+
+  function albumBackLabel() {
+    if (albumNavigationOrigin.view === "Artists") {
+      return `← ${albumNavigationOrigin.artistName}`;
+    }
+
+    if (albumNavigationOrigin.view === "Genres") {
+      return `← ${albumNavigationOrigin.genreName}`;
+    }
+
+    return "← Albums";
   }
 
   function handleBackToArtists() {
     selectedArtistName = null;
-    selectedArtistSongsExpanded = false;
+    albumNavigationOrigin = { view: "Albums" };
     clearGenreEditState();
     searchQuery = "";
     mainElement?.scrollTo({ top: 0 });
@@ -2979,6 +3042,7 @@
   function handleBackToGenres() {
     selectedGenreName = null;
     selectedGenreSongsExpanded = false;
+    albumNavigationOrigin = { view: "Albums" };
     searchQuery = "";
     mainElement?.scrollTo({ top: 0 });
   }
@@ -4708,16 +4772,6 @@
     ]);
   }
 
-  function artistTrackMatchesSearch(track: Track, query: string) {
-    return matchesSearch(query, [
-      track.title,
-      track.album,
-      track.fileName,
-      track.trackNumber?.toString(),
-      track.discNumber?.toString(),
-    ]);
-  }
-
   function genreTrackMatchesSearch(track: Track, query: string) {
     return matchesSearch(query, [
       track.title,
@@ -4779,10 +4833,6 @@
 
   function searchFilterAlbumTracks(libraryTracks: Track[], query: string) {
     return query ? libraryTracks.filter((track) => albumTrackMatchesSearch(track, query)) : libraryTracks;
-  }
-
-  function searchFilterArtistTracks(libraryTracks: Track[], query: string) {
-    return query ? libraryTracks.filter((track) => artistTrackMatchesSearch(track, query)) : libraryTracks;
   }
 
   function searchFilterGenreTracks(libraryTracks: Track[], query: string) {
@@ -4947,13 +4997,14 @@
     {/if}
 
     <main
-      class:album-detail-view={activeView === "Albums" && selectedAlbum}
+      class:album-detail-view={isAlbumDetailView}
       class:albums-landing-view={activeView === "Albums" && !selectedAlbum}
+      class:artist-detail-view={isArtistDetailView}
       class:lyrics-mode={activeView === "Now Playing"}
       class="home"
       bind:this={mainElement}
     >
-      {#if activeView !== "Now Playing" && !(activeView === "Albums" && selectedAlbum)}
+      {#if activeView !== "Now Playing" && !isAlbumDetailView && !isArtistDetailView}
         <header class="home-header">
           <div>
             <p class="eyebrow">{viewEyebrow()}</p>
@@ -4982,7 +5033,7 @@
         </header>
       {/if}
 
-      {#if isSearchAvailable() && !(activeView === "Albums" && selectedAlbum)}
+      {#if isSearchAvailable() && !isAlbumDetailView && !isArtistDetailView}
         <div class="search-bar">
           <input
             type="search"
@@ -5436,7 +5487,7 @@
       {:else if activeView === "Albums"}
         {#if selectedAlbum}
           <section class="detail-view" aria-labelledby="album-detail-title">
-            <button class="back-button album-detail-back" type="button" onclick={handleBackToAlbums}>Back to Albums</button>
+            <button class="back-button album-detail-back" type="button" onclick={handleAlbumDetailBack}>{albumBackLabel()}</button>
             <div class="album-detail-header" style={`--item-color: ${selectedAlbum.color}`}>
               {#if selectedAlbum.coverArtPath}
                 <img
@@ -5647,40 +5698,35 @@
       {:else if activeView === "Artists"}
         {#if selectedArtist}
           <section class="detail-view" aria-labelledby="artist-detail-title">
-            <button class="back-button" type="button" onclick={handleBackToArtists}>Back to Artists</button>
-            <div class="artist-detail-header">
+            <button class="back-button album-detail-back" type="button" onclick={handleBackToArtists}>← Artists</button>
+            <div class="artist-detail-header" style={`--item-color: ${selectedArtist.color}`}>
               <div class="artist-avatar detail-avatar" style={`--item-color: ${selectedArtist.color}`} aria-hidden="true">
                 {selectedArtist.name.slice(0, 1)}
               </div>
               <div class="detail-copy">
                 <p class="eyebrow">Artist</p>
                 <h3 id="artist-detail-title">{selectedArtist.name}</h3>
-                <p>{artistSongCount(selectedArtist)} · {selectedArtistAlbums.length} {selectedArtistAlbums.length === 1 ? "album" : "albums"}</p>
+                <div class="album-detail-meta" aria-label={`${selectedArtist.name} summary`}>
+                  <span>{artistSongCount(selectedArtist)}</span>
+                  <span>{selectedArtistAlbums.length} {selectedArtistAlbums.length === 1 ? "album" : "albums"}</span>
+                </div>
+                <div class="album-genre-chip-list" aria-label="Artist genres">
+                  {#each selectedArtistGenres as genre}
+                    <span class:muted={genre === "Unknown Genre"}>{genre}</span>
+                  {/each}
+                </div>
+                <div class="album-detail-actions artist-detail-actions">
+                  <button type="button" disabled={selectedArtistTracks.length === 0} onclick={() => void handlePlaySelectedArtist()}>
+                    Play Artist
+                  </button>
+                  <button type="button" disabled={selectedArtistTracks.length === 0} onclick={() => void handleShuffleSelectedArtist()}>
+                    Shuffle Artist
+                  </button>
+                  <button type="button" disabled={selectedArtistTracks.length === 0} onclick={handleAddSelectedArtistToQueue}>
+                    Add to Queue
+                  </button>
+                </div>
               </div>
-            </div>
-
-            <div class="genre-editor" aria-label="Artist genre editor">
-              <div class="genre-editor-copy">
-                <p class="eyebrow">Genres</p>
-                <p>{selectedArtistGenreText}</p>
-              </div>
-              <form onsubmit={(event) => { event.preventDefault(); void handleSaveArtistGenres(); }}>
-                <input
-                  type="text"
-                  bind:value={artistGenreDraft}
-                  placeholder="Technical Death Metal, Jazz"
-                  aria-label="Artist genres"
-                  disabled={isSavingGenreAssignment}
-                />
-                <button type="submit" disabled={isSavingGenreAssignment}>
-                  {isSavingGenreAssignment ? "Saving..." : "Save"}
-                </button>
-              </form>
-              {#if genreEditError}
-                <p class="genre-editor-error" role="alert">{genreEditError}</p>
-              {:else if genreEditMessage}
-                <p class="genre-editor-message">{genreEditMessage}</p>
-              {/if}
             </div>
 
             <LibrarySection title="Albums" viewAllLabel={normalizedSearchQuery ? `${selectedArtistSearchAlbums.length} ${selectedArtistSearchAlbums.length === 1 ? "match" : "matches"}` : `${selectedArtistAlbums.length} total`}>
@@ -5731,38 +5777,6 @@
                     </article>
                   {/each}
                 </div>
-              {/if}
-            </LibrarySection>
-
-            <LibrarySection
-              title="Songs"
-              viewAllLabel={normalizedSearchQuery
-                ? `${selectedArtistSearchTracks.length} ${selectedArtistSearchTracks.length === 1 ? "match" : "matches"}`
-                : selectedArtistSongsExpanded
-                  ? `${selectedArtistTracks.length} total`
-                  : selectedArtistTracks.length > selectedArtistVisibleTracks.length
-                    ? `View all ${selectedArtistTracks.length}`
-                    : `${selectedArtistTracks.length} total`}
-              onViewAll={!normalizedSearchQuery && !selectedArtistSongsExpanded && selectedArtistTracks.length > selectedArtistVisibleTracks.length
-                ? () => { selectedArtistSongsExpanded = true; }
-                : undefined}
-            >
-              {#if selectedArtistVisibleTracks.length === 0}
-                <div class="group-empty">
-                  <h3>{normalizedSearchQuery ? "No songs matched" : "No songs found"}</h3>
-                  <p>{normalizedSearchQuery ? "Search is limited to this artist's songs." : "No tracks were found for this artist."}</p>
-                </div>
-              {:else}
-                <TrackList
-                  tracks={selectedArtistVisibleTracks}
-                  isScanning={false}
-                  selectedTrackId={currentTrack?.id}
-                  onTrackSelect={handleTrackSelect}
-                  onTrackContextMenu={openTrackContextMenu}
-                  onArtistSelect={handleTrackArtistSelect}
-                  onAlbumSelect={handleTrackAlbumSelect}
-                  onToggleFavorite={handleToggleFavorite}
-                />
               {/if}
             </LibrarySection>
           </section>
@@ -7638,6 +7652,10 @@
     --content-bottom-padding: 24px;
   }
 
+  .home.artist-detail-view {
+    --content-bottom-padding: 28px;
+  }
+
   .home.lyrics-mode {
     padding: clamp(22px, 3vw, 38px) clamp(22px, 4vw, 56px);
   }
@@ -9198,6 +9216,48 @@
     padding: 18px;
   }
 
+  .artist-detail-header {
+    position: relative;
+    isolation: isolate;
+    overflow: hidden;
+    align-items: center;
+    border-color: rgba(50, 61, 75, 0.72);
+    background:
+      linear-gradient(115deg, rgba(22, 27, 35, 0.96), rgba(12, 15, 20, 0.96) 62%, rgba(16, 22, 28, 0.98)),
+      #12161c;
+    box-shadow:
+      0 22px 58px rgba(0, 0, 0, 0.18),
+      inset 0 1px 0 rgba(255, 255, 255, 0.04);
+    padding: clamp(20px, 2.6vw, 28px);
+  }
+
+  .artist-detail-header::before {
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    background:
+      radial-gradient(circle at 12% 48%, color-mix(in srgb, var(--item-color) 46%, transparent), transparent 30%),
+      linear-gradient(90deg, rgba(255, 255, 255, 0.04), transparent 44%);
+    opacity: 0.82;
+    pointer-events: none;
+    content: "";
+  }
+
+  .artist-detail-header .detail-copy {
+    display: grid;
+    gap: 12px;
+  }
+
+  .artist-detail-header .detail-copy h3 {
+    max-width: 980px;
+    margin-bottom: 0;
+    font-size: clamp(2rem, 4.6vw, 3.8rem);
+  }
+
+  .artist-detail-actions {
+    margin-top: 2px;
+  }
+
   .album-detail-back {
     border-color: rgba(64, 77, 93, 0.72);
     background: rgba(18, 22, 28, 0.78);
@@ -9543,92 +9603,6 @@
     background: #262214;
     color: #f0c85a;
     outline: none;
-  }
-
-  .genre-editor {
-    display: grid;
-    grid-template-columns: minmax(160px, 0.45fr) minmax(220px, 1fr);
-    gap: 12px;
-    align-items: center;
-    border: 1px solid #242b35;
-    border-radius: 8px;
-    background: #12161c;
-    padding: 14px;
-  }
-
-  .genre-editor-copy {
-    min-width: 0;
-  }
-
-  .genre-editor-copy p:not(.eyebrow) {
-    overflow: hidden;
-    margin: 0;
-    color: #d5dce5;
-    font-weight: 750;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .genre-editor form {
-    display: flex;
-    min-width: 0;
-    gap: 10px;
-  }
-
-  .genre-editor input {
-    width: 100%;
-    min-width: 0;
-    min-height: 40px;
-    border: 1px solid #303844;
-    border-radius: 8px;
-    background: #0f1318;
-    color: #f4f7fb;
-    font: inherit;
-    font-size: 0.92rem;
-    font-weight: 650;
-    outline: none;
-    padding: 0 12px;
-  }
-
-  .genre-editor input:focus {
-    border-color: #2f8f83;
-    box-shadow: 0 0 0 2px rgba(47, 143, 131, 0.18);
-  }
-
-  .genre-editor button {
-    min-width: 76px;
-    min-height: 40px;
-    border: 1px solid #35544f;
-    border-radius: 8px;
-    background: #17332f;
-    color: #d8fffa;
-    cursor: default;
-    font: inherit;
-    font-size: 0.88rem;
-    font-weight: 850;
-    padding: 0 13px;
-  }
-
-  .genre-editor button:disabled {
-    border-color: #303844;
-    background: #151a21;
-    color: #626c79;
-  }
-
-  .genre-editor-error,
-  .genre-editor-message {
-    grid-column: 1 / -1;
-    margin: 0;
-    font-size: 0.86rem;
-    font-weight: 700;
-  }
-
-  .genre-editor-error {
-    color: #ffcbc8;
-  }
-
-  .genre-editor-message {
-    color: #9ee3d9;
   }
 
   .mix-builder-panel {
@@ -11884,6 +11858,10 @@
       --content-bottom-padding: 22px;
     }
 
+    .home.artist-detail-view {
+      --content-bottom-padding: 24px;
+    }
+
     .home-header {
       align-items: stretch;
       flex-direction: column;
@@ -12005,10 +11983,6 @@
       display: none;
     }
 
-    .genre-editor {
-      grid-template-columns: 1fr;
-    }
-
     .mix-builder-panel {
       grid-template-columns: 1fr;
     }
@@ -12095,6 +12069,11 @@
       --content-bottom-padding: 22px;
     }
 
+    .home.artist-detail-view {
+      --player-height: 146px;
+      --content-bottom-padding: 22px;
+    }
+
     .home.albums-landing-view .home-header-actions {
       width: 100%;
     }
@@ -12151,10 +12130,6 @@
 
     .settings-stat-tile.wide {
       grid-column: auto;
-    }
-
-    .genre-editor form {
-      flex-direction: column;
     }
 
     .album-detail-header {
