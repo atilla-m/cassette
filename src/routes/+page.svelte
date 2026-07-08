@@ -2422,14 +2422,15 @@
     event.preventDefault();
     event.stopPropagation();
 
-    const albumTracks = tracksForAlbum(album);
+    const hasTracks = albumHasTracks(album);
     const hasArtist = album.artist.trim().length > 0 && album.artist !== "Unknown Artist";
 
     openContextMenu(event.clientX, event.clientY, [
-      { label: "Play album", disabled: albumTracks.length === 0, action: () => playTrackSet(albumTracks) },
-      { label: "Shuffle album", disabled: albumTracks.length === 0, action: () => playTrackSet(albumTracks, true) },
-      { label: "Add album to queue", disabled: albumTracks.length === 0, action: () => appendTracksToQueue(albumTracks) },
+      { label: "Play album", disabled: !hasTracks, action: () => playTrackSet(tracksForAlbum(album)) },
+      { label: "Shuffle album", disabled: !hasTracks, action: () => playTrackSet(tracksForAlbum(album), true) },
+      { label: "Add album to queue", disabled: !hasTracks, action: () => appendTracksToQueue(tracksForAlbum(album)) },
       { label: "Go to artist", disabled: !hasArtist, action: () => selectArtistName(album.artist) },
+      { label: "Edit genres", action: () => handleEditAlbumGenresFromMenu(album) },
     ]);
   }
 
@@ -2527,6 +2528,37 @@
 
   function handleAlbumSelect(album: Album) {
     selectAlbumId(album.id);
+  }
+
+  async function handleShuffleLibrary() {
+    await playTrackSet(tracks, true);
+  }
+
+  function handleRandomAlbum() {
+    const albumsWithTracks = displayAlbums.filter(albumHasTracks);
+
+    if (albumsWithTracks.length === 0) {
+      return;
+    }
+
+    handleAlbumSelect(albumsWithTracks[Math.floor(Math.random() * albumsWithTracks.length)]);
+  }
+
+  async function handleAlbumCardPlay(event: MouseEvent, album: Album, shouldShuffle = false) {
+    event.stopPropagation();
+    await playTrackSet(tracksForAlbum(album), shouldShuffle);
+  }
+
+  function handleAlbumCardAddToQueue(event: MouseEvent, album: Album) {
+    event.stopPropagation();
+    appendTracksToQueue(tracksForAlbum(album));
+  }
+
+  function handleEditAlbumGenresFromMenu(album: Album) {
+    handleAlbumSelect(album);
+    window.requestAnimationFrame(() => {
+      focusAlbumGenreEditor();
+    });
   }
 
   async function handlePlaySelectedAlbum() {
@@ -3595,6 +3627,17 @@
     return `${album.artist}${year} · ${trackCount}`;
   }
 
+  function albumInitials(album: Album) {
+    const source = album.title.trim() || album.artist.trim() || "Album";
+    const words = source.split(/\s+/).filter(Boolean);
+
+    if (words.length === 1) {
+      return words[0].slice(0, 2).toUpperCase();
+    }
+
+    return words.slice(0, 2).map((word) => word.slice(0, 1).toUpperCase()).join("");
+  }
+
   function albumHeroDetails(album: Album, albumTracks: Track[]) {
     const details = [album.artist];
 
@@ -3686,6 +3729,10 @@
 
   function tracksForAlbum(album: Album) {
     return orderedAlbumTracks(tracks.filter((track) => albumIdForTrack(track) === album.id));
+  }
+
+  function albumHasTracks(album: Album) {
+    return album.trackCount > 0;
   }
 
   function albumHasMultipleDiscs(albumTracks: Track[]) {
@@ -4840,6 +4887,14 @@
         : "Select a song to view lyrics.";
     }
 
+    if (activeView === "Albums") {
+      return [
+        songCountLabel(tracks.length),
+        `${hasLoadedCache ? displayAlbums.length : 0} ${(hasLoadedCache ? displayAlbums.length : 0) === 1 ? "album" : "albums"}`,
+        scannedFolder,
+      ].filter(Boolean).join(" · ");
+    }
+
     if (activeView === "Settings") {
       return scannedFolder
         ? `Library folder: ${scannedFolder}`
@@ -4912,15 +4967,25 @@
             <h2>{viewTitle()}</h2>
             <p class="scan-status">{viewStatus()}</p>
           </div>
-          {#if ENABLE_EXPERIMENTAL_VIDEOS && activeView === "Videos"}
-            <button type="button" disabled={isScanningVideos} onclick={() => void (videoFolder ? handleRescanVideos() : handleAddVideoFolder())}>
-              {isScanningVideos ? "Scanning..." : videoFolder ? "Rescan Videos" : "Add Video Folder"}
-            </button>
-          {:else}
-            <button type="button" disabled={isScanning} onclick={handleScanLibrary}>
-              {isScanning ? "Scanning..." : "Scan Library"}
-            </button>
-          {/if}
+          <div class="home-header-actions">
+            {#if activeView === "Albums" && !selectedAlbum}
+              <button type="button" disabled={tracks.length === 0} onclick={() => void handleShuffleLibrary()}>
+                Shuffle Library
+              </button>
+              <button type="button" disabled={tracks.length === 0 || displayAlbums.length === 0} onclick={handleRandomAlbum}>
+                Random Album
+              </button>
+            {/if}
+            {#if ENABLE_EXPERIMENTAL_VIDEOS && activeView === "Videos"}
+              <button type="button" disabled={isScanningVideos} onclick={() => void (videoFolder ? handleRescanVideos() : handleAddVideoFolder())}>
+                {isScanningVideos ? "Scanning..." : videoFolder ? "Rescan Videos" : "Add Video Folder"}
+              </button>
+            {:else}
+              <button type="button" disabled={isScanning} onclick={handleScanLibrary}>
+                {isScanning ? "Scanning..." : "Scan Library"}
+              </button>
+            {/if}
+          </div>
         </header>
       {/if}
 
@@ -5295,7 +5360,7 @@
                             onerror={hideBrokenImage}
                           />
                         {/if}
-                        <span></span>
+                        <span class="album-art-disc"></span>
                       </span>
                       <span class="stats-rank-copy">
                         <strong>{stat.album.title}</strong>
@@ -5389,7 +5454,7 @@
                     onerror={hideBrokenImage}
                   />
                 {/if}
-                <span></span>
+                <span class="album-art-disc"></span>
               </div>
               <div class="detail-copy">
                 <p class="eyebrow">Album</p>
@@ -5522,22 +5587,43 @@
             {:else}
               <div class="album-grid">
                 {#each visibleAlbums as album}
-                  <button class="album-card" type="button" onclick={() => handleAlbumSelect(album)} oncontextmenu={(event) => openAlbumContextMenu(event, album)}>
-                    <div class="album-art" style={`--item-color: ${album.color}`} aria-hidden="true">
-                      {#if album.coverArtPath}
-                        <img
-                          src={localImageSource(album.coverArtPath) ?? ""}
-                          alt=""
-                          loading="lazy"
-                          onload={showLoadedImage}
-                          onerror={hideBrokenImage}
-                        />
-                      {/if}
-                      <span></span>
+                  <article class="album-card" oncontextmenu={(event) => openAlbumContextMenu(event, album)}>
+                    <div class="album-card-main">
+                      <div class="album-art" style={`--item-color: ${album.color}`}>
+                        {#if album.coverArtPath}
+                          <img
+                            src={localImageSource(album.coverArtPath) ?? ""}
+                            alt=""
+                            loading="lazy"
+                            onload={showLoadedImage}
+                            onerror={hideBrokenImage}
+                          />
+                          <span class="album-art-disc"></span>
+                        {:else}
+                          <span class="album-art-placeholder">
+                            <strong>{albumInitials(album)}</strong>
+                            <small>{album.artist}</small>
+                          </span>
+                        {/if}
+                        <button class="album-art-open" type="button" aria-label={`Open ${album.title}`} onclick={() => handleAlbumSelect(album)}></button>
+                        <div class="album-card-actions" role="group" aria-label={`${album.title} actions`}>
+                          <button type="button" disabled={!albumHasTracks(album)} onclick={(event) => void handleAlbumCardPlay(event, album)}>
+                            Play
+                          </button>
+                          <button type="button" disabled={!albumHasTracks(album)} onclick={(event) => void handleAlbumCardPlay(event, album, true)}>
+                            Shuffle
+                          </button>
+                          <button type="button" disabled={!albumHasTracks(album)} onclick={(event) => handleAlbumCardAddToQueue(event, album)}>
+                            Queue
+                          </button>
+                        </div>
+                      </div>
+                      <button class="album-card-copy" type="button" onclick={() => handleAlbumSelect(album)}>
+                        <strong>{album.title}</strong>
+                        <small>{albumDetail(album)}</small>
+                      </button>
                     </div>
-                    <h3>{album.title}</h3>
-                    <p>{albumDetail(album)}</p>
-                  </button>
+                  </article>
                 {/each}
               </div>
             {/if}
@@ -5591,22 +5677,43 @@
               {:else}
                 <div class="album-grid">
                   {#each selectedArtistSearchAlbums as album}
-                    <button class="album-card" type="button" onclick={() => handleAlbumSelect(album)} oncontextmenu={(event) => openAlbumContextMenu(event, album)}>
-                      <div class="album-art" style={`--item-color: ${album.color}`} aria-hidden="true">
-                        {#if album.coverArtPath}
-                          <img
-                            src={localImageSource(album.coverArtPath) ?? ""}
-                            alt=""
-                            loading="lazy"
-                            onload={showLoadedImage}
-                            onerror={hideBrokenImage}
-                          />
-                        {/if}
-                        <span></span>
+                    <article class="album-card" oncontextmenu={(event) => openAlbumContextMenu(event, album)}>
+                      <div class="album-card-main">
+                        <div class="album-art" style={`--item-color: ${album.color}`}>
+                          {#if album.coverArtPath}
+                            <img
+                              src={localImageSource(album.coverArtPath) ?? ""}
+                              alt=""
+                              loading="lazy"
+                              onload={showLoadedImage}
+                              onerror={hideBrokenImage}
+                            />
+                            <span class="album-art-disc"></span>
+                          {:else}
+                            <span class="album-art-placeholder">
+                              <strong>{albumInitials(album)}</strong>
+                              <small>{album.artist}</small>
+                            </span>
+                          {/if}
+                          <button class="album-art-open" type="button" aria-label={`Open ${album.title}`} onclick={() => handleAlbumSelect(album)}></button>
+                          <div class="album-card-actions" role="group" aria-label={`${album.title} actions`}>
+                            <button type="button" disabled={!albumHasTracks(album)} onclick={(event) => void handleAlbumCardPlay(event, album)}>
+                              Play
+                            </button>
+                            <button type="button" disabled={!albumHasTracks(album)} onclick={(event) => void handleAlbumCardPlay(event, album, true)}>
+                              Shuffle
+                            </button>
+                            <button type="button" disabled={!albumHasTracks(album)} onclick={(event) => handleAlbumCardAddToQueue(event, album)}>
+                              Queue
+                            </button>
+                          </div>
+                        </div>
+                        <button class="album-card-copy" type="button" onclick={() => handleAlbumSelect(album)}>
+                          <strong>{album.title}</strong>
+                          <small>{albumDetail(album)}</small>
+                        </button>
                       </div>
-                      <h3>{album.title}</h3>
-                      <p>{albumDetail(album)}</p>
-                    </button>
+                    </article>
                   {/each}
                 </div>
               {/if}
@@ -5720,22 +5827,43 @@
               {:else}
                 <div class="album-grid">
                   {#each selectedGenreSearchAlbums as album}
-                    <button class="album-card" type="button" onclick={() => handleAlbumSelect(album)} oncontextmenu={(event) => openAlbumContextMenu(event, album)}>
-                      <div class="album-art" style={`--item-color: ${album.color}`} aria-hidden="true">
-                        {#if album.coverArtPath}
-                          <img
-                            src={localImageSource(album.coverArtPath) ?? ""}
-                            alt=""
-                            loading="lazy"
-                            onload={showLoadedImage}
-                            onerror={hideBrokenImage}
-                          />
-                        {/if}
-                        <span></span>
+                    <article class="album-card" oncontextmenu={(event) => openAlbumContextMenu(event, album)}>
+                      <div class="album-card-main">
+                        <div class="album-art" style={`--item-color: ${album.color}`}>
+                          {#if album.coverArtPath}
+                            <img
+                              src={localImageSource(album.coverArtPath) ?? ""}
+                              alt=""
+                              loading="lazy"
+                              onload={showLoadedImage}
+                              onerror={hideBrokenImage}
+                            />
+                            <span class="album-art-disc"></span>
+                          {:else}
+                            <span class="album-art-placeholder">
+                              <strong>{albumInitials(album)}</strong>
+                              <small>{album.artist}</small>
+                            </span>
+                          {/if}
+                          <button class="album-art-open" type="button" aria-label={`Open ${album.title}`} onclick={() => handleAlbumSelect(album)}></button>
+                          <div class="album-card-actions" role="group" aria-label={`${album.title} actions`}>
+                            <button type="button" disabled={!albumHasTracks(album)} onclick={(event) => void handleAlbumCardPlay(event, album)}>
+                              Play
+                            </button>
+                            <button type="button" disabled={!albumHasTracks(album)} onclick={(event) => void handleAlbumCardPlay(event, album, true)}>
+                              Shuffle
+                            </button>
+                            <button type="button" disabled={!albumHasTracks(album)} onclick={(event) => handleAlbumCardAddToQueue(event, album)}>
+                              Queue
+                            </button>
+                          </div>
+                        </div>
+                        <button class="album-card-copy" type="button" onclick={() => handleAlbumSelect(album)}>
+                          <strong>{album.title}</strong>
+                          <small>{albumDetail(album)}</small>
+                        </button>
                       </div>
-                      <h3>{album.title}</h3>
-                      <p>{albumDetail(album)}</p>
-                    </button>
+                    </article>
                   {/each}
                 </div>
               {/if}
@@ -7530,6 +7658,13 @@
     color: #8d96a3;
   }
 
+  .home-header-actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 10px;
+  }
+
   .search-bar {
     display: flex;
     align-items: center;
@@ -7753,7 +7888,7 @@
     font-weight: 650;
   }
 
-  .album-card p,
+  .album-card-copy small,
   .artist-card p,
   .genre-card p {
     margin: 0;
@@ -7770,8 +7905,6 @@
     min-width: 0;
   }
 
-  .album-card h3,
-  .album-card p,
   .artist-card h3,
   .artist-card p,
   .genre-card h3,
@@ -7790,7 +7923,14 @@
     line-height: 1.25;
   }
 
-  .album-grid,
+  .album-grid {
+    display: grid;
+    width: 100%;
+    max-width: 1460px;
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 260px), 1fr));
+    gap: 24px;
+  }
+
   .artist-grid,
   .genre-grid,
   .playlist-grid {
@@ -7799,7 +7939,6 @@
     gap: 14px;
   }
 
-  .album-card,
   .artist-card,
   .genre-card {
     width: 100%;
@@ -7812,45 +7951,97 @@
     text-align: left;
   }
 
+  .album-card {
+    position: relative;
+    display: grid;
+    min-width: 0;
+    border: 1px solid rgba(50, 61, 75, 0.72);
+    border-radius: 8px;
+    background:
+      linear-gradient(180deg, rgba(25, 31, 39, 0.88), rgba(18, 22, 28, 0.92)),
+      #151a21;
+    box-shadow: 0 18px 42px rgba(0, 0, 0, 0.12);
+    transition:
+      border-color 160ms ease,
+      background 160ms ease,
+      box-shadow 160ms ease;
+  }
+
+  .album-card-main {
+    display: grid;
+    width: 100%;
+    min-width: 0;
+    color: inherit;
+    font: inherit;
+    padding: 16px;
+    text-align: left;
+  }
+
   .album-card:hover,
-  .album-card:focus-visible,
+  .album-card:focus-within,
   .artist-card:hover,
   .artist-card:focus-visible,
   .genre-card:hover,
   .genre-card:focus-visible {
     border-color: #35544f;
-    background: #1b2027;
+    background:
+      linear-gradient(180deg, rgba(29, 37, 46, 0.94), rgba(19, 24, 31, 0.96)),
+      #1b2027;
+    box-shadow:
+      0 24px 60px rgba(0, 0, 0, 0.2),
+      0 0 0 1px rgba(47, 143, 131, 0.04);
     outline: none;
-  }
-
-  .album-card {
-    padding: 14px;
   }
 
   .album-art {
     position: relative;
     display: grid;
+    width: 100%;
     aspect-ratio: 1;
     overflow: hidden;
     place-items: center;
-    margin-bottom: 12px;
+    margin-bottom: 14px;
     border-radius: 8px;
     background:
+      radial-gradient(circle at 28% 18%, rgba(255, 255, 255, 0.28), transparent 28%),
       linear-gradient(135deg, rgba(255, 255, 255, 0.18), transparent 42%),
       var(--item-color);
-    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.14);
+    box-shadow:
+      0 14px 30px rgba(0, 0, 0, 0.22),
+      inset 0 0 0 1px rgba(255, 255, 255, 0.14);
   }
 
   .album-art img {
     position: absolute;
     inset: 0;
     z-index: 1;
+    display: block;
     width: 100%;
     height: 100%;
+    aspect-ratio: 1 / 1;
+    filter: none;
     object-fit: cover;
+    opacity: 1;
+    transform: none;
   }
 
-  .album-art span {
+  .album-art-open {
+    position: absolute;
+    inset: 0;
+    z-index: 2;
+    border: 0;
+    border-radius: inherit;
+    background: transparent;
+    cursor: default;
+    padding: 0;
+  }
+
+  .album-art-open:focus-visible {
+    outline: 2px solid rgba(216, 255, 250, 0.82);
+    outline-offset: -4px;
+  }
+
+  .album-art .album-art-disc {
     display: block;
     width: 34%;
     aspect-ratio: 1;
@@ -7859,8 +8050,145 @@
     background: rgba(255, 255, 255, 0.6);
   }
 
-  .album-card p {
-    margin-top: 5px;
+  .album-art .album-art-placeholder {
+    box-sizing: border-box;
+    display: grid;
+    width: 100%;
+    height: 100%;
+    min-width: 0;
+    place-content: center;
+    gap: 8px;
+    border: 0;
+    border-radius: 0;
+    background:
+      radial-gradient(circle at 50% 42%, var(--item-color), transparent 58%),
+      linear-gradient(145deg, rgba(33, 39, 49, 0.98), rgba(10, 13, 18, 0.98));
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+    padding: 18px;
+    text-align: center;
+  }
+
+  .album-art-placeholder strong {
+    color: #f4f7fb;
+    font-size: clamp(1.7rem, 4vw, 2.4rem);
+    font-weight: 950;
+    line-height: 1;
+  }
+
+  .album-art-placeholder small {
+    max-width: 86%;
+    justify-self: center;
+    overflow: hidden;
+    color: rgba(222, 230, 238, 0.74);
+    font-size: 0.72rem;
+    font-weight: 850;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .album-card-copy {
+    display: grid;
+    width: 100%;
+    gap: 6px;
+    min-width: 0;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    cursor: default;
+    font: inherit;
+    padding: 0 2px 0 0;
+    text-align: left;
+  }
+
+  .album-card-copy:focus-visible {
+    border-radius: 6px;
+    outline: 2px solid rgba(216, 255, 250, 0.72);
+    outline-offset: 4px;
+  }
+
+  .album-card-copy strong {
+    display: -webkit-box;
+    overflow: hidden;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    color: #f4f7fb;
+    font-size: 1.04rem;
+    font-weight: 850;
+    line-height: 1.24;
+    white-space: normal;
+  }
+
+  .album-card-copy small {
+    display: -webkit-box;
+    overflow: hidden;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    color: #8f9aa8;
+    font-size: 0.88rem;
+    font-weight: 650;
+    line-height: 1.35;
+    white-space: normal;
+  }
+
+  .album-card-actions {
+    position: absolute;
+    left: 50%;
+    bottom: 14px;
+    z-index: 3;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    max-width: calc(100% - 28px);
+    opacity: 0;
+    pointer-events: none;
+    transform: translate(-50%, 6px);
+    transition:
+      opacity 140ms ease,
+      transform 140ms ease;
+    white-space: nowrap;
+  }
+
+  .album-card:hover .album-card-actions,
+  .album-card:focus-within .album-card-actions {
+    opacity: 1;
+    pointer-events: auto;
+    transform: translate(-50%, 0);
+  }
+
+  .album-card-actions button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 30px;
+    border: 1px solid rgba(70, 82, 98, 0.74);
+    border-radius: 999px;
+    background: rgba(10, 13, 18, 0.76);
+    box-shadow: 0 10px 24px rgba(0, 0, 0, 0.24);
+    color: #eef3f8;
+    cursor: default;
+    font: inherit;
+    font-size: 0.74rem;
+    font-weight: 850;
+    padding: 0 9px;
+    backdrop-filter: blur(10px);
+    white-space: nowrap;
+  }
+
+  .album-card-actions button:hover,
+  .album-card-actions button:focus-visible {
+    border-color: #2f8f83;
+    background: rgba(23, 51, 47, 0.92);
+    color: #d8fffa;
+    outline: none;
+  }
+
+  .album-card-actions button:disabled {
+    border-color: rgba(48, 56, 68, 0.72);
+    background: rgba(18, 22, 28, 0.72);
+    color: #6f7a87;
   }
 
   .artist-card,
@@ -10071,7 +10399,7 @@
     flex: 0 0 auto;
   }
 
-  .stats-cover span {
+  .stats-cover .album-art-disc {
     border-width: 7px;
   }
 
@@ -11259,7 +11587,6 @@
   }
 
   @media (max-width: 1020px) {
-    .album-grid,
     .artist-grid,
     .genre-grid,
     .playlist-grid,
@@ -11342,6 +11669,10 @@
 
     .home-header button {
       align-self: flex-start;
+    }
+
+    .home-header-actions {
+      justify-content: flex-start;
     }
 
     .lyrics-view-top,
