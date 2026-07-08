@@ -391,7 +391,6 @@
   let shortcutModalElement: HTMLElement | undefined = $state();
   let deletePlaylistModalElement: HTMLElement | undefined = $state();
   let lyricsPanelElement: HTMLElement | undefined = $state();
-  let albumGenreInput: HTMLInputElement | undefined = $state();
   let displayAlbums = $derived(!hasLoadedCache ? mockAlbums : buildAlbums(tracks));
   let displayArtists = $derived(!hasLoadedCache ? mockArtists : buildArtists(tracks));
   let displayGenres = $derived(!hasLoadedCache ? mockGenres : buildGenres(tracks));
@@ -484,7 +483,7 @@
     { label: "Played", value: String(videos.filter((video) => video.playCount > 0).length) },
     { label: "Last scan", value: lastVideoScannedAt ? formatDateTime(lastVideoScannedAt) : "Not available" },
   ]);
-  let selectedAlbumGenreText = $derived(genreDisplayForTracks(selectedAlbumTracks));
+  let selectedAlbumGenres = $derived(uniqueGenresForTracks(selectedAlbumTracks));
   let selectedArtistGenreText = $derived(genreDisplayForTracks(selectedArtistTracks));
   let selectedPlaylistMissingTrackCount = $derived(selectedPlaylist ? missingTrackCountForPlaylist(selectedPlaylist) : 0);
   let canCreatePlaylist = $derived(normalizePlaylistName(playlistNameDraft).length > 0);
@@ -2430,7 +2429,6 @@
       { label: "Shuffle album", disabled: !hasTracks, action: () => playTrackSet(tracksForAlbum(album), true) },
       { label: "Add album to queue", disabled: !hasTracks, action: () => appendTracksToQueue(tracksForAlbum(album)) },
       { label: "Go to artist", disabled: !hasArtist, action: () => selectArtistName(album.artist) },
-      { label: "Edit genres", action: () => handleEditAlbumGenresFromMenu(album) },
     ]);
   }
 
@@ -2554,13 +2552,6 @@
     appendTracksToQueue(tracksForAlbum(album));
   }
 
-  function handleEditAlbumGenresFromMenu(album: Album) {
-    handleAlbumSelect(album);
-    window.requestAnimationFrame(() => {
-      focusAlbumGenreEditor();
-    });
-  }
-
   async function handlePlaySelectedAlbum() {
     if (selectedAlbumTracks.length === 0) {
       return;
@@ -2579,10 +2570,6 @@
 
   function handleAddSelectedAlbumToQueue() {
     appendTracksToQueue(selectedAlbumTracks);
-  }
-
-  function focusAlbumGenreEditor() {
-    albumGenreInput?.focus();
   }
 
   function handleAlbumTrackSelect(track: Track) {
@@ -4959,8 +4946,14 @@
       <Sidebar items={visibleNavItems} active={activeView} onNavigate={handleNavigate} />
     {/if}
 
-    <main class:lyrics-mode={activeView === "Now Playing"} class="home" bind:this={mainElement}>
-      {#if activeView !== "Now Playing"}
+    <main
+      class:album-detail-view={activeView === "Albums" && selectedAlbum}
+      class:albums-landing-view={activeView === "Albums" && !selectedAlbum}
+      class:lyrics-mode={activeView === "Now Playing"}
+      class="home"
+      bind:this={mainElement}
+    >
+      {#if activeView !== "Now Playing" && !(activeView === "Albums" && selectedAlbum)}
         <header class="home-header">
           <div>
             <p class="eyebrow">{viewEyebrow()}</p>
@@ -4989,7 +4982,7 @@
         </header>
       {/if}
 
-      {#if isSearchAvailable()}
+      {#if isSearchAvailable() && !(activeView === "Albums" && selectedAlbum)}
         <div class="search-bar">
           <input
             type="search"
@@ -5443,24 +5436,57 @@
       {:else if activeView === "Albums"}
         {#if selectedAlbum}
           <section class="detail-view" aria-labelledby="album-detail-title">
-            <button class="back-button" type="button" onclick={handleBackToAlbums}>Back to Albums</button>
-            <div class="album-detail-header">
-              <div class="album-art detail-cover" style={`--item-color: ${selectedAlbum.color}`} aria-hidden="true">
-                {#if selectedAlbum.coverArtPath}
-                  <img
-                    src={localImageSource(selectedAlbum.coverArtPath) ?? ""}
-                    alt=""
-                    onload={showLoadedImage}
-                    onerror={hideBrokenImage}
-                  />
-                {/if}
-                <span class="album-art-disc"></span>
+            <button class="back-button album-detail-back" type="button" onclick={handleBackToAlbums}>Back to Albums</button>
+            <div class="album-detail-header" style={`--item-color: ${selectedAlbum.color}`}>
+              {#if selectedAlbum.coverArtPath}
+                <img
+                  class="album-detail-ambient"
+                  src={localImageSource(selectedAlbum.coverArtPath) ?? ""}
+                  alt=""
+                  aria-hidden="true"
+                  onload={showLoadedImage}
+                  onerror={hideBrokenImage}
+                />
+              {/if}
+              <div class="album-detail-cover-shell">
+                <div class="album-art detail-cover" style={`--item-color: ${selectedAlbum.color}`} aria-hidden="true">
+                  {#if selectedAlbum.coverArtPath}
+                    <img
+                      src={localImageSource(selectedAlbum.coverArtPath) ?? ""}
+                      alt=""
+                      onload={showLoadedImage}
+                      onerror={hideBrokenImage}
+                    />
+                    <span class="album-art-disc"></span>
+                  {:else}
+                    <span class="album-art-placeholder">
+                      <strong>{albumInitials(selectedAlbum)}</strong>
+                      <small>{selectedAlbum.artist}</small>
+                    </span>
+                  {/if}
+                </div>
               </div>
-              <div class="detail-copy">
+              <div class="detail-copy album-detail-copy">
                 <p class="eyebrow">Album</p>
                 <h3 id="album-detail-title">{selectedAlbum.title}</h3>
-                <p>{albumHeroDetails(selectedAlbum, selectedAlbumTracks)}</p>
-                <p class="album-genre-line">{selectedAlbumGenreText}</p>
+                <p class="album-detail-artist">{selectedAlbum.artist}</p>
+                <div class="album-detail-meta" aria-label={albumHeroDetails(selectedAlbum, selectedAlbumTracks)}>
+                  {#if selectedAlbum.year}
+                    <span>{selectedAlbum.year}</span>
+                  {/if}
+                  <span>{songCountLabel(selectedAlbumTracks.length)}</span>
+                  {#if selectedAlbumDurationLabel}
+                    <span>{selectedAlbumDurationLabel}</span>
+                  {/if}
+                  {#if selectedAlbumFormatSummary}
+                    <span>{selectedAlbumFormatSummary}</span>
+                  {/if}
+                </div>
+                <div class="album-genre-chip-list" aria-label="Album genres">
+                  {#each selectedAlbumGenres as genre}
+                    <span class:muted={genre === "Unknown Genre"}>{genre}</span>
+                  {/each}
+                </div>
                 <div class="album-detail-actions">
                   <button type="button" disabled={selectedAlbumTracks.length === 0} onclick={() => void handlePlaySelectedAlbum()}>
                     Play Album
@@ -5471,37 +5497,24 @@
                   <button type="button" disabled={selectedAlbumTracks.length === 0} onclick={handleAddSelectedAlbumToQueue}>
                     Add to Queue
                   </button>
-                  <button type="button" onclick={focusAlbumGenreEditor}>
-                    Edit Genres
-                  </button>
                 </div>
               </div>
             </div>
 
-            <div class="genre-editor" aria-label="Album genre editor">
-              <div class="genre-editor-copy">
-                <p class="eyebrow">Genres</p>
-                <p>{selectedAlbumGenreText}</p>
-              </div>
-              <form onsubmit={(event) => { event.preventDefault(); void handleSaveAlbumGenres(); }}>
+            {#if selectedAlbumTracks.length > 10}
+              <div class="search-bar album-track-search">
                 <input
-                  bind:this={albumGenreInput}
-                  type="text"
-                  bind:value={albumGenreDraft}
-                  placeholder="Technical Death Metal, Jazz"
-                  aria-label="Album genres"
-                  disabled={isSavingGenreAssignment}
+                  type="search"
+                  bind:value={searchQuery}
+                  placeholder="Search this album..."
+                  aria-label="Search this album"
+                  onkeydown={handleSearchKeydown}
                 />
-                <button type="submit" disabled={isSavingGenreAssignment}>
-                  {isSavingGenreAssignment ? "Saving..." : "Save"}
-                </button>
-              </form>
-              {#if genreEditError}
-                <p class="genre-editor-error" role="alert">{genreEditError}</p>
-              {:else if genreEditMessage}
-                <p class="genre-editor-message">{genreEditMessage}</p>
-              {/if}
-            </div>
+                {#if searchQuery}
+                  <button type="button" aria-label="Clear album search" onclick={clearSearch}>Clear</button>
+                {/if}
+              </div>
+            {/if}
 
             <LibrarySection title="Album Songs" viewAllLabel={normalizedSearchQuery ? `${selectedAlbumSearchTracks.length} ${selectedAlbumSearchTracks.length === 1 ? "match" : "matches"}` : `${selectedAlbumTracks.length} total`}>
               {#if selectedAlbumTracks.length === 0}
@@ -5559,7 +5572,8 @@
             </LibrarySection>
           </section>
         {:else}
-          <LibrarySection title="All Albums" viewAllLabel={`${visibleAlbums.length} total`}>
+          <div class="albums-landing">
+            <LibrarySection title="All Albums" viewAllLabel={`${visibleAlbums.length} total`}>
             <div class="control-bar">
               <label>
                 <span>Sort</span>
@@ -5627,7 +5641,8 @@
                 {/each}
               </div>
             {/if}
-          </LibrarySection>
+            </LibrarySection>
+          </div>
         {/if}
       {:else if activeView === "Artists"}
         {#if selectedArtist}
@@ -7605,10 +7620,22 @@
   }
 
   .home {
+    --player-height: 86px;
+    --content-bottom-padding: 56px;
     width: 100%;
     min-width: 0;
     overflow: auto;
-    padding: 32px;
+    padding: 32px 32px var(--content-bottom-padding);
+    scroll-padding-bottom: var(--content-bottom-padding);
+  }
+
+  .home.albums-landing-view {
+    --content-bottom-padding: 28px;
+    padding-top: 26px;
+  }
+
+  .home.album-detail-view {
+    --content-bottom-padding: 24px;
   }
 
   .home.lyrics-mode {
@@ -7663,6 +7690,28 @@
     flex-wrap: wrap;
     justify-content: flex-end;
     gap: 10px;
+    padding-top: 6px;
+  }
+
+  .home.albums-landing-view .home-header {
+    align-items: flex-start;
+    gap: 18px;
+    margin-bottom: 20px;
+  }
+
+  .home.albums-landing-view .home-header h2 {
+    font-size: clamp(2.35rem, 3.5vw, 3.35rem);
+  }
+
+  .home.albums-landing-view .home-header-actions {
+    align-items: center;
+    padding-top: 7px;
+  }
+
+  .home.albums-landing-view .home-header button {
+    min-width: 116px;
+    min-height: 38px;
+    padding: 0 13px;
   }
 
   .search-bar {
@@ -7671,6 +7720,11 @@
     gap: 10px;
     max-width: 720px;
     margin: -12px 0 24px;
+  }
+
+  .home.albums-landing-view > .search-bar {
+    max-width: min(720px, 64vw);
+    margin: -4px 0 18px;
   }
 
   .search-bar input {
@@ -7694,6 +7748,11 @@
   .search-bar input:focus {
     border-color: #2f8f83;
     box-shadow: 0 0 0 2px rgba(47, 143, 131, 0.18);
+  }
+
+  .album-track-search {
+    max-width: 720px;
+    margin-top: 18px;
   }
 
   .search-bar button {
@@ -7831,6 +7890,11 @@
     font-weight: 650;
   }
 
+  .home.albums-landing-view .scan-status {
+    margin-top: 8px;
+    font-size: 0.9rem;
+  }
+
   .scan-error {
     border: 1px solid #6e3333;
     border-radius: 8px;
@@ -7931,6 +7995,29 @@
     gap: 24px;
   }
 
+  .albums-landing {
+    width: 100%;
+  }
+
+  .albums-landing :global(.library-section) {
+    gap: 16px;
+  }
+
+  .albums-landing :global(.section-header) {
+    align-items: center;
+    margin-bottom: -2px;
+  }
+
+  .albums-landing .control-bar {
+    margin-bottom: 4px;
+  }
+
+  .albums-landing .album-grid {
+    max-width: none;
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, max(220px, calc((100% - 72px) / 5))), 1fr));
+    gap: 18px;
+  }
+
   .artist-grid,
   .genre-grid,
   .playlist-grid {
@@ -7973,7 +8060,7 @@
     min-width: 0;
     color: inherit;
     font: inherit;
-    padding: 16px;
+    padding: 13px;
     text-align: left;
   }
 
@@ -8000,7 +8087,7 @@
     aspect-ratio: 1;
     overflow: hidden;
     place-items: center;
-    margin-bottom: 14px;
+    margin-bottom: 10px;
     border-radius: 8px;
     background:
       radial-gradient(circle at 28% 18%, rgba(255, 255, 255, 0.28), transparent 28%),
@@ -8089,7 +8176,7 @@
   .album-card-copy {
     display: grid;
     width: 100%;
-    gap: 6px;
+    gap: 5px;
     min-width: 0;
     border: 0;
     background: transparent;
@@ -8113,7 +8200,7 @@
     -webkit-line-clamp: 2;
     line-clamp: 2;
     color: #f4f7fb;
-    font-size: 1.04rem;
+    font-size: 1rem;
     font-weight: 850;
     line-height: 1.24;
     white-space: normal;
@@ -8126,7 +8213,7 @@
     -webkit-line-clamp: 2;
     line-clamp: 2;
     color: #8f9aa8;
-    font-size: 0.88rem;
+    font-size: 0.84rem;
     font-weight: 650;
     line-height: 1.35;
     white-space: normal;
@@ -9098,7 +9185,6 @@
     gap: 10px;
   }
 
-  .album-detail-header,
   .artist-detail-header,
   .genre-detail-header,
   .playlist-detail-header {
@@ -9112,6 +9198,72 @@
     padding: 18px;
   }
 
+  .album-detail-back {
+    border-color: rgba(64, 77, 93, 0.72);
+    background: rgba(18, 22, 28, 0.78);
+  }
+
+  .album-detail-header {
+    position: relative;
+    isolation: isolate;
+    display: grid;
+    grid-template-columns: minmax(210px, 300px) minmax(0, 1fr);
+    gap: clamp(22px, 3vw, 34px);
+    align-items: center;
+    min-width: 0;
+    overflow: hidden;
+    border: 1px solid rgba(50, 61, 75, 0.72);
+    border-radius: 8px;
+    background:
+      linear-gradient(115deg, rgba(22, 27, 35, 0.96), rgba(12, 15, 20, 0.96) 58%, rgba(16, 22, 28, 0.98)),
+      #12161c;
+    box-shadow:
+      0 24px 70px rgba(0, 0, 0, 0.22),
+      inset 0 1px 0 rgba(255, 255, 255, 0.04);
+    padding: clamp(20px, 2.6vw, 30px);
+  }
+
+  .album-detail-header::before,
+  .album-detail-header::after {
+    position: absolute;
+    pointer-events: none;
+    content: "";
+  }
+
+  .album-detail-header::before {
+    inset: 0;
+    z-index: -1;
+    background:
+      radial-gradient(circle at 24% 32%, color-mix(in srgb, var(--item-color) 42%, transparent), transparent 34%),
+      linear-gradient(90deg, rgba(255, 255, 255, 0.04), transparent 42%);
+    opacity: 0.85;
+  }
+
+  .album-detail-header::after {
+    inset: auto 0 0;
+    z-index: -1;
+    height: 42%;
+    background: linear-gradient(0deg, rgba(6, 8, 11, 0.36), transparent);
+  }
+
+  .album-detail-ambient {
+    position: absolute;
+    inset: -24%;
+    z-index: -2;
+    width: 72%;
+    height: 148%;
+    filter: blur(34px) saturate(1.18);
+    object-fit: cover;
+    opacity: 0.18;
+    pointer-events: none;
+    transform: translateX(-8%) scale(1.08);
+  }
+
+  .album-detail-cover-shell {
+    position: relative;
+    min-width: 0;
+  }
+
   .detail-cover {
     width: min(28vw, 190px);
     min-width: 136px;
@@ -9119,8 +9271,12 @@
   }
 
   .album-detail-header .detail-cover {
-    width: min(34vw, 260px);
-    min-width: 176px;
+    width: 100%;
+    max-width: 300px;
+    min-width: 0;
+    box-shadow:
+      0 28px 70px rgba(0, 0, 0, 0.34),
+      inset 0 0 0 1px rgba(255, 255, 255, 0.16);
   }
 
   .detail-avatar {
@@ -9131,6 +9287,13 @@
 
   .detail-copy {
     min-width: 0;
+  }
+
+  .album-detail-copy {
+    position: relative;
+    display: grid;
+    align-content: center;
+    gap: 12px;
   }
 
   .detail-copy h3 {
@@ -9148,29 +9311,69 @@
     font-weight: 700;
   }
 
-  .album-genre-line {
-    margin-top: 8px !important;
-    color: #d5dce5 !important;
+  .album-detail-copy h3 {
+    max-width: 980px;
+    margin-bottom: 0;
+    font-size: clamp(2rem, 4.8vw, 4rem);
+    letter-spacing: 0;
+  }
+
+  .album-detail-artist {
+    color: #dfe6ee !important;
+    font-size: 1rem;
+  }
+
+  .album-detail-meta,
+  .album-genre-chip-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .album-detail-meta span,
+  .album-genre-chip-list span {
+    min-height: 28px;
+    border: 1px solid rgba(61, 74, 91, 0.72);
+    border-radius: 999px;
+    background: rgba(12, 15, 20, 0.44);
+    color: #b9c3d0;
+    font-size: 0.78rem;
+    font-weight: 800;
+    line-height: 1;
+    padding: 7px 10px;
+  }
+
+  .album-genre-chip-list span {
+    border-color: rgba(47, 143, 131, 0.34);
+    background: rgba(23, 51, 47, 0.34);
+    color: #d8fffa;
+  }
+
+  .album-genre-chip-list span.muted {
+    border-color: rgba(61, 74, 91, 0.56);
+    background: rgba(12, 15, 20, 0.36);
+    color: #8f9aa8;
   }
 
   .album-detail-actions {
     display: flex;
     flex-wrap: wrap;
     gap: 10px;
-    margin-top: 18px;
+    margin-top: 4px;
   }
 
   .album-detail-actions button {
-    min-height: 38px;
-    border: 1px solid #303844;
-    border-radius: 8px;
-    background: #161a20;
-    color: #d5dce5;
+    min-height: 40px;
+    border: 1px solid rgba(64, 77, 93, 0.78);
+    border-radius: 999px;
+    background: rgba(15, 19, 25, 0.72);
+    color: #e5ebf2;
     cursor: default;
     font: inherit;
     font-size: 0.86rem;
     font-weight: 850;
-    padding: 0 13px;
+    padding: 0 15px;
+    backdrop-filter: blur(10px);
   }
 
   .album-detail-actions button:first-child {
@@ -9182,7 +9385,7 @@
   .album-detail-actions button:hover,
   .album-detail-actions button:focus-visible {
     border-color: #35544f;
-    background: #1b2027;
+    background: rgba(27, 32, 39, 0.9);
     outline: none;
   }
 
@@ -9193,50 +9396,60 @@
   }
 
   .album-detail-actions button:disabled {
-    border-color: #303844;
-    background: #151a21;
+    border-color: rgba(48, 56, 68, 0.72);
+    background: rgba(21, 26, 33, 0.7);
     color: #626c79;
   }
 
   .album-track-list {
     display: grid;
-    gap: 8px;
+    gap: 4px;
   }
 
   .album-track-list h4 {
-    margin: 12px 0 2px;
+    margin: 16px 0 4px;
     color: #aeb9c6;
     font-size: 0.82rem;
     font-weight: 900;
+    letter-spacing: 0.04em;
     text-transform: uppercase;
   }
 
   .album-track-row {
     display: grid;
-    grid-template-columns: 44px minmax(180px, 1fr) auto auto auto;
+    grid-template-columns: 42px minmax(180px, 1fr) minmax(56px, auto) auto auto;
     align-items: center;
-    gap: 14px;
-    min-height: 58px;
-    border: 1px solid #242b35;
+    gap: 12px;
+    min-height: 54px;
+    border: 1px solid rgba(36, 43, 53, 0.72);
     border-radius: 8px;
-    background: rgba(22, 26, 32, 0.86);
+    background: rgba(17, 21, 27, 0.58);
     color: inherit;
     cursor: default;
     font: inherit;
-    padding: 9px 14px;
+    padding: 8px 12px;
     outline: none;
+    transition:
+      border-color 140ms ease,
+      background 140ms ease,
+      box-shadow 140ms ease;
   }
 
   .album-track-row:hover,
-  .album-track-row.active,
   .album-track-row:focus-visible {
     border-color: #35544f;
-    background: #1b2027;
+    background: rgba(27, 32, 39, 0.86);
+  }
+
+  .album-track-row.active {
+    border-color: rgba(47, 143, 131, 0.56);
+    background: linear-gradient(90deg, rgba(23, 51, 47, 0.54), rgba(27, 32, 39, 0.7));
+    box-shadow: inset 3px 0 0 #2f8f83;
   }
 
   .album-track-number {
-    color: #d5dce5;
-    font-size: 0.95rem;
+    color: #8f9aa8;
+    font-size: 0.86rem;
     font-variant-numeric: tabular-nums;
     font-weight: 850;
     text-align: right;
@@ -9293,13 +9506,17 @@
   .album-track-duration,
   .album-track-format {
     color: #8f9aa8;
-    font-size: 0.86rem;
+    font-size: 0.82rem;
     font-variant-numeric: tabular-nums;
     font-weight: 700;
   }
 
   .album-track-format {
     min-width: 42px;
+    border: 1px solid rgba(48, 56, 68, 0.72);
+    border-radius: 999px;
+    background: rgba(12, 15, 20, 0.36);
+    padding: 4px 7px;
     text-align: right;
   }
 
@@ -11654,7 +11871,17 @@
     }
 
     .home {
-      padding: 22px 16px;
+      --content-bottom-padding: 58px;
+      padding: 22px 16px var(--content-bottom-padding);
+    }
+
+    .home.albums-landing-view {
+      --content-bottom-padding: 24px;
+      padding-top: 22px;
+    }
+
+    .home.album-detail-view {
+      --content-bottom-padding: 22px;
     }
 
     .home-header {
@@ -11673,6 +11900,29 @@
 
     .home-header-actions {
       justify-content: flex-start;
+      padding-top: 0;
+    }
+
+    .home.albums-landing-view .home-header {
+      gap: 14px;
+      margin-bottom: 20px;
+    }
+
+    .home.albums-landing-view .home-header h2 {
+      font-size: 2.4rem;
+    }
+
+    .home.albums-landing-view > .search-bar {
+      max-width: none;
+      margin: -2px 0 16px;
+    }
+
+    .albums-landing .control-bar {
+      justify-content: flex-start;
+    }
+
+    .albums-landing .album-grid {
+      gap: 16px;
     }
 
     .lyrics-view-top,
@@ -11722,7 +11972,6 @@
       max-height: min(54vh, 480px);
     }
 
-    .album-detail-header,
     .artist-detail-header,
     .genre-detail-header,
     .playlist-detail-header {
@@ -11730,12 +11979,22 @@
       flex-direction: column;
     }
 
+    .album-detail-header {
+      grid-template-columns: 1fr;
+      align-items: start;
+    }
+
+    .album-detail-cover-shell {
+      width: min(100%, 280px);
+    }
+
     .detail-cover {
       width: min(100%, 220px);
     }
 
     .album-detail-header .detail-cover {
-      width: min(100%, 260px);
+      width: 100%;
+      max-width: 280px;
     }
 
     .album-track-row {
@@ -11826,6 +12085,24 @@
       grid-template-columns: 1fr;
     }
 
+    .home.albums-landing-view {
+      --player-height: 146px;
+      --content-bottom-padding: 24px;
+    }
+
+    .home.album-detail-view {
+      --player-height: 146px;
+      --content-bottom-padding: 22px;
+    }
+
+    .home.albums-landing-view .home-header-actions {
+      width: 100%;
+    }
+
+    .home.albums-landing-view .home-header button {
+      flex: 1 1 136px;
+    }
+
     .video-session-card,
     .video-session-status {
       grid-template-columns: 1fr;
@@ -11878,6 +12155,14 @@
 
     .genre-editor form {
       flex-direction: column;
+    }
+
+    .album-detail-header {
+      padding: 16px;
+    }
+
+    .album-detail-actions button {
+      flex: 1 1 auto;
     }
 
     .lyrics-empty-shell {
