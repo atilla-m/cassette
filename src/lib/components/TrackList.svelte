@@ -5,6 +5,7 @@
   type Props = {
     tracks: Track[];
     isScanning: boolean;
+    variant?: "default" | "library";
     selectedTrackId?: string | null;
     onTrackSelect?: (track: Track, queue: Track[]) => void;
     onTrackContextMenu?: (track: Track, queue: Track[], x: number, y: number) => void;
@@ -21,6 +22,7 @@
   let {
     tracks,
     isScanning,
+    variant = "default",
     selectedTrackId = null,
     onTrackSelect,
     onTrackContextMenu,
@@ -35,6 +37,7 @@
   }: Props = $props();
 
   let hasMoveControls = $derived(Boolean(onMoveTrackUp || onMoveTrackDown));
+  let isLibraryVariant = $derived(variant === "library");
 
   function displayArtist(track: Track) {
     return track.artist ?? "Unknown Artist";
@@ -111,6 +114,18 @@
   function playCountLabel(track: Track) {
     return `${track.playCount} ${track.playCount === 1 ? "play" : "plays"}`;
   }
+
+  function formatDuration(seconds: number | null | undefined) {
+    if (!seconds) {
+      return "--:--";
+    }
+
+    const wholeSeconds = Math.floor(seconds);
+    const minutes = Math.floor(wholeSeconds / 60);
+    const remainingSeconds = wholeSeconds % 60;
+
+    return `${minutes}:${remainingSeconds.toString().padStart(2, "0")}`;
+  }
 </script>
 
 {#if isScanning}
@@ -124,10 +139,11 @@
     <p>Choose a folder to build the local library.</p>
   </div>
 {:else}
-  <div class="track-list">
+  <div class:library-list={isLibraryVariant} class="track-list">
     {#each tracks as track (track.id)}
       <div
         class:active={track.id === selectedTrackId}
+        class:library={isLibraryVariant}
         class:withMove={hasMoveControls}
         class:withRemove={Boolean(onRemoveTrack)}
         class="track-row"
@@ -159,6 +175,9 @@
         <button class="track-link album-link" type="button" onclick={(event) => selectAlbum(event, track)}>
           {displayAlbum(track)}
         </button>
+        {#if isLibraryVariant}
+          <span class="track-duration">{formatDuration(track.durationSeconds)}</span>
+        {/if}
         {#if track.playCount > 0}
           <span class="play-count">{playCountLabel(track)}</span>
         {:else}
@@ -203,7 +222,7 @@
             Remove
           </button>
         {/if}
-        <span>{track.extension.toUpperCase()}</span>
+        <span class="format-badge">{track.extension.toUpperCase()}</span>
       </div>
     {/each}
   </div>
@@ -240,6 +259,10 @@
     gap: 8px;
   }
 
+  .track-list.library-list {
+    gap: 5px;
+  }
+
   .track-row {
     display: grid;
     grid-template-columns: auto minmax(160px, 1.2fr) minmax(140px, 0.9fr) auto auto auto;
@@ -255,6 +278,19 @@
     padding: 10px 14px;
     cursor: default;
     outline: none;
+    transition:
+      border-color 140ms ease,
+      background 140ms ease,
+      box-shadow 140ms ease;
+  }
+
+  .track-row.library {
+    grid-template-columns: 46px minmax(190px, 1.35fr) minmax(150px, 0.85fr) minmax(54px, auto) minmax(66px, auto) 34px minmax(48px, auto);
+    gap: 12px;
+    min-height: 58px;
+    border-color: color-mix(in srgb, var(--border) 82%, transparent);
+    background: color-mix(in srgb, var(--panel-soft) 72%, transparent);
+    padding: 7px 10px;
   }
 
   .track-row.withRemove {
@@ -276,6 +312,11 @@
     background: var(--panel-hover);
   }
 
+  .track-row.library:hover,
+  .track-row.library:focus-visible {
+    background: color-mix(in srgb, var(--panel-hover) 88%, transparent);
+  }
+
   .track-row.active {
     background: linear-gradient(
       90deg,
@@ -285,11 +326,24 @@
     box-shadow: inset 3px 0 0 var(--accent);
   }
 
+  .track-row.library.active {
+    border-color: color-mix(in srgb, var(--accent) 56%, transparent);
+    background: linear-gradient(
+      90deg,
+      color-mix(in srgb, var(--accent-soft) 58%, transparent),
+      color-mix(in srgb, var(--panel-hover) 72%, transparent)
+    );
+  }
+
   .track-row > span {
     margin: 0;
     color: var(--text-soft);
     font-size: 0.9rem;
     font-weight: 620;
+  }
+
+  .track-row.library > span {
+    justify-self: end;
   }
 
   .favorite-button {
@@ -306,6 +360,12 @@
     font-size: 0.95rem;
     font-weight: 900;
     line-height: 1;
+  }
+
+  .track-row.library .favorite-button {
+    justify-self: end;
+    border-color: color-mix(in srgb, var(--border-strong) 82%, transparent);
+    background: color-mix(in srgb, var(--panel-strong) 80%, transparent);
   }
 
   .remove-button {
@@ -396,6 +456,15 @@
     font-weight: 900;
   }
 
+  .track-row.library .mini-cover {
+    width: 46px;
+    height: 46px;
+    border-radius: 8px;
+    background:
+      radial-gradient(circle at 30% 18%, rgba(255, 255, 255, 0.24), transparent 30%),
+      linear-gradient(145deg, color-mix(in srgb, var(--accent) 82%, var(--panel)), var(--panel-strong));
+  }
+
   .mini-cover img {
     position: absolute;
     inset: 0;
@@ -411,6 +480,10 @@
     font-size: 0.98rem;
     font-weight: 700;
     line-height: 1.25;
+  }
+
+  .track-row.library .track-name {
+    font-weight: 760;
   }
 
   .track-link {
@@ -438,6 +511,10 @@
     font-weight: 620;
   }
 
+  .track-row.library .album-link {
+    justify-self: stretch;
+  }
+
   .track-link:hover,
   .track-link:focus-visible {
     color: var(--accent-text);
@@ -461,13 +538,78 @@
     white-space: nowrap;
   }
 
+  .track-row.library .play-count {
+    min-width: 66px;
+    border-color: color-mix(in srgb, var(--border-strong) 74%, transparent);
+    background: color-mix(in srgb, var(--panel-strong) 70%, transparent);
+    color: var(--text-soft);
+  }
+
   .play-count.empty {
     visibility: hidden;
+  }
+
+  .track-duration {
+    min-width: 54px;
+    color: var(--text-muted);
+    font-size: 0.84rem;
+    font-variant-numeric: tabular-nums;
+    font-weight: 760;
+    text-align: right;
+    white-space: nowrap;
+  }
+
+  .format-badge {
+    min-width: 48px;
+    border: 1px solid color-mix(in srgb, var(--border-strong) 74%, transparent);
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--bg-soft) 64%, transparent);
+    color: var(--text-soft) !important;
+    font-size: 0.72rem !important;
+    font-weight: 860 !important;
+    line-height: 1;
+    padding: 6px 8px;
+    text-align: center;
+    white-space: nowrap;
+  }
+
+  .track-row:not(.library) .format-badge {
+    min-width: 0;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    color: var(--text-soft) !important;
+    font-size: 0.9rem !important;
+    font-weight: 620 !important;
+    line-height: normal;
+    padding: 0;
+    text-align: left;
+  }
+
+  .track-row.library.active .track-duration,
+  .track-row.library.active .album-link,
+  .track-row.library.active .track-link,
+  .track-row.library.active .play-count,
+  .track-row.library.active .format-badge {
+    color: var(--accent-text) !important;
+  }
+
+  .track-row.library.active .format-badge,
+  .track-row.library.active .play-count {
+    border-color: var(--accent-strong);
+    background: color-mix(in srgb, var(--accent-soft) 72%, transparent);
   }
 
   @media (max-width: 760px) {
     .track-row {
       grid-template-columns: auto minmax(0, 1fr) auto auto;
+    }
+
+    .track-row.library {
+      grid-template-columns: 44px minmax(0, 1fr) minmax(48px, auto) 34px minmax(48px, auto);
+      gap: 10px;
+      min-height: 58px;
+      padding: 7px 8px;
     }
 
     .track-row.withRemove {
@@ -482,6 +624,22 @@
 
     .album-link,
     .play-count {
+      display: none;
+    }
+
+    .track-row.library .track-duration,
+    .track-row.library .favorite-button,
+    .track-row.library .format-badge {
+      display: grid;
+    }
+  }
+
+  @media (max-width: 520px) {
+    .track-row.library {
+      grid-template-columns: 42px minmax(0, 1fr) 34px minmax(46px, auto);
+    }
+
+    .track-row.library .track-duration {
       display: none;
     }
   }

@@ -56,6 +56,7 @@
     setVideoVolume,
     stopVideo,
   } from "$lib/api/playback";
+  import CompactDropdown, { type DropdownOption } from "$lib/components/CompactDropdown.svelte";
   import ContextMenu from "$lib/components/ContextMenu.svelte";
   import LibrarySection from "$lib/components/LibrarySection.svelte";
   import NowPlayingBar from "$lib/components/NowPlayingBar.svelte";
@@ -248,6 +249,15 @@
       description: "OLED black, graphite panels, and cool silver accents.",
       swatches: ["#000000", "#111216", "#9aa6b2"],
     },
+  ];
+  const songSortOptions: DropdownOption[] = [
+    { value: "title", label: "Title" },
+    { value: "artist", label: "Artist" },
+    { value: "album", label: "Album" },
+    { value: "duration", label: "Duration" },
+    { value: "recentlyAdded", label: "Recently added" },
+    { value: "recentlyPlayed", label: "Recently played" },
+    { value: "playCount", label: "Most played" },
   ];
   const videoTypeOptions: Array<{ value: VideoType; label: string }> = [
     { value: "music_video", label: "Music Video / PV" },
@@ -457,6 +467,7 @@
   let statsTopGenres = $derived(buildTopGenreStats(tracks, displayGenres).slice(0, 8));
   let statsTotalPlays = $derived(tracks.reduce((total, track) => total + track.playCount, 0));
   let statsRecentlyPlayedCount = $derived(tracks.filter((track) => track.lastPlayedAt !== null).length);
+  let songFormatOptions = $derived<DropdownOption[]>(availableFormats.map((format) => ({ value: format, label: format })));
   let normalizedSearchQuery = $derived(normalizeSearch(searchQuery));
   let libraryTracksById = $derived(new Map(tracks.map((track) => [track.id, track])));
   let selectedAlbum = $derived(displayAlbums.find((album) => album.id === selectedAlbumId) ?? null);
@@ -4481,14 +4492,18 @@
     return direction === "asc" ? "Asc" : "Desc";
   }
 
-  function handleSongSortChange(event: Event) {
-    const nextSort = event.currentTarget instanceof HTMLSelectElement
-      ? event.currentTarget.value as SongSortKey
-      : songSort;
+  function handleSongSortChange(value: string) {
+    const nextSort = value as SongSortKey;
+
+    songSort = nextSort;
 
     if ((nextSort === "recentlyAdded" || nextSort === "recentlyPlayed" || nextSort === "playCount") && songSortDirection === "asc") {
       songSortDirection = "desc";
     }
+  }
+
+  function handleSongFormatFilterChange(value: string) {
+    songFormatFilter = value;
   }
 
   function nextRepeatMode(mode: RepeatMode): RepeatMode {
@@ -5107,6 +5122,7 @@
       class:artist-detail-view={isArtistDetailView}
       class:genre-detail-view={isGenreDetailView}
       class:lyrics-mode={activeView === "Now Playing"}
+      class:songs-library-view={activeView === "Songs"}
       class="home"
       bind:this={mainElement}
     >
@@ -6077,20 +6093,14 @@
           </LibrarySection>
         {/if}
       {:else if activeView === "Songs"}
-        <LibrarySection title="All Songs" viewAllLabel={`${visibleSongTracks.length} shown`}>
-          <div class="control-bar">
-            <label>
-              <span>Sort</span>
-              <select bind:value={songSort} onchange={handleSongSortChange}>
-                <option value="title">Title</option>
-                <option value="artist">Artist</option>
-                <option value="album">Album</option>
-                <option value="duration">Duration</option>
-                <option value="recentlyAdded">Recently added</option>
-                <option value="recentlyPlayed">Recently played</option>
-                <option value="playCount">Most played</option>
-              </select>
-            </label>
+        <LibrarySection title="All Songs" viewAllLabel={`${visibleSongTracks.length} ${visibleSongTracks.length === 1 ? "song" : "songs"}`}>
+          <div class="control-bar song-browser-controls">
+            <CompactDropdown
+              label="Sort"
+              value={songSort}
+              options={songSortOptions}
+              onChange={handleSongSortChange}
+            />
             <button
               class="direction-toggle"
               type="button"
@@ -6099,24 +6109,48 @@
             >
               {sortDirectionLabel(songSortDirection)}
             </button>
-            <label>
-              <span>Format</span>
-              <select bind:value={songFormatFilter}>
-                {#each availableFormats as format}
-                  <option value={format}>{format}</option>
-                {/each}
-              </select>
-            </label>
+            <CompactDropdown
+              label="Format"
+              value={songFormatFilter}
+              options={songFormatOptions}
+              onChange={handleSongFormatFilterChange}
+            />
           </div>
-          {#if normalizedSearchQuery && visibleSongTracks.length === 0}
-            <div class="group-empty">
-              <h3>No songs matched</h3>
-              <p>Search is limited to the Songs view.</p>
+          {#if isScanning}
+            <TrackList
+              tracks={visibleSongTracks}
+              {isScanning}
+              variant="library"
+              selectedTrackId={currentTrack?.id}
+              onTrackSelect={handleTrackSelect}
+              onTrackContextMenu={openTrackContextMenu}
+              onArtistSelect={handleTrackArtistSelect}
+              onAlbumSelect={handleTrackAlbumSelect}
+              onToggleFavorite={handleToggleFavorite}
+            />
+          {:else if tracks.length === 0}
+            <div class="group-empty songs-empty-state">
+              <h3>No songs in your library</h3>
+              <p>Scan a music folder to build a full-library track browser.</p>
+            </div>
+          {:else if visibleSongTracks.length === 0}
+            <div class="group-empty songs-empty-state">
+              {#if normalizedSearchQuery}
+                <h3>No songs matched</h3>
+                <p>Try another title, artist, album, or file name.</p>
+              {:else if songFormatFilter !== "All"}
+                <h3>No {songFormatFilter} songs found</h3>
+                <p>Choose another format or scan folders that contain {songFormatFilter} files.</p>
+              {:else}
+                <h3>No songs found</h3>
+                <p>Scan a music folder to build your local track library.</p>
+              {/if}
             </div>
           {:else}
             <TrackList
               tracks={visibleSongTracks}
               {isScanning}
+              variant="library"
               selectedTrackId={currentTrack?.id}
               onTrackSelect={handleTrackSelect}
               onTrackContextMenu={openTrackContextMenu}
@@ -7869,6 +7903,11 @@
     --content-bottom-padding: 28px;
   }
 
+  .home.songs-library-view {
+    --content-bottom-padding: 34px;
+    padding-top: 26px;
+  }
+
   .home.lyrics-mode {
     padding: clamp(22px, 3vw, 38px) clamp(22px, 4vw, 56px);
   }
@@ -7945,6 +7984,20 @@
     padding: 0 13px;
   }
 
+  .home.songs-library-view .home-header {
+    align-items: flex-start;
+    gap: 18px;
+    margin-bottom: 18px;
+  }
+
+  .home.songs-library-view .home-header h2 {
+    font-size: clamp(2.35rem, 3.4vw, 3.35rem);
+  }
+
+  .home.songs-library-view .scan-status {
+    margin-top: 10px;
+  }
+
   .search-bar {
     display: flex;
     align-items: center;
@@ -7956,6 +8009,11 @@
   .home.albums-landing-view > .search-bar {
     max-width: min(720px, 64vw);
     margin: -4px 0 18px;
+  }
+
+  .home.songs-library-view > .search-bar {
+    max-width: min(860px, 100%);
+    margin: -2px 0 16px;
   }
 
   .search-bar input {
@@ -8110,6 +8168,39 @@
     border-color: var(--accent);
     background: var(--accent-soft);
     outline: none;
+  }
+
+  .song-browser-controls {
+    gap: 8px;
+    align-items: center;
+    width: 100%;
+    padding: 2px 0 0;
+  }
+
+  .song-browser-controls :global(.compact-dropdown) {
+    flex: 0 1 auto;
+  }
+
+  .home.songs-library-view :global(.library-section) {
+    gap: 12px;
+  }
+
+  .home.songs-library-view :global(.section-header) {
+    align-items: center;
+  }
+
+  .home.songs-library-view :global(.section-label) {
+    border-color: var(--accent-strong);
+    background: var(--accent-soft);
+    color: var(--accent-text);
+    font-weight: 850;
+  }
+
+  .songs-empty-state {
+    min-height: 190px;
+    background:
+      radial-gradient(circle at 50% 0%, color-mix(in srgb, var(--accent) 10%, transparent), transparent 52%),
+      color-mix(in srgb, var(--panel) 74%, transparent);
   }
 
   .scan-status {
@@ -12140,6 +12231,11 @@
       --content-bottom-padding: 24px;
     }
 
+    .home.songs-library-view {
+      --content-bottom-padding: 34px;
+      padding-top: 22px;
+    }
+
     .home-header {
       align-items: stretch;
       flex-direction: column;
@@ -12171,6 +12267,28 @@
     .home.albums-landing-view > .search-bar {
       max-width: none;
       margin: -2px 0 16px;
+    }
+
+    .home.songs-library-view .home-header {
+      gap: 14px;
+      margin-bottom: 18px;
+    }
+
+    .home.songs-library-view .home-header h2 {
+      font-size: 2.4rem;
+    }
+
+    .home.songs-library-view > .search-bar {
+      max-width: none;
+      margin: -2px 0 14px;
+    }
+
+    .song-browser-controls {
+      align-items: stretch;
+    }
+
+    .song-browser-controls :global(.compact-dropdown) {
+      flex: 1 1 180px;
     }
 
     .albums-landing .control-bar {
@@ -12355,6 +12473,11 @@
     .home.genre-detail-view {
       --player-height: 146px;
       --content-bottom-padding: 22px;
+    }
+
+    .home.songs-library-view {
+      --player-height: 146px;
+      --content-bottom-padding: 24px;
     }
 
     .home.albums-landing-view .home-header-actions {
