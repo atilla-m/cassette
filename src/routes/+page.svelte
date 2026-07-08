@@ -395,6 +395,8 @@
   let selectedGenreName = $state<string | null>(null);
   let isLikedSongsOpen = $state(false);
   let isMixBuilderOpen = $state(false);
+  let isCreatePlaylistOpen = $state(false);
+  let isPlaylistEditMode = $state(false);
   let isLibraryHealthOpen = $state(false);
   let selectedPlaylistId = $state<string | null>(null);
   let isShortcutHelpOpen = $state(false);
@@ -477,6 +479,7 @@
   let isArtistDetailView = $derived(activeView === "Artists" && Boolean(selectedArtist));
   let isGenreDetailView = $derived(activeView === "Genres" && Boolean(selectedGenre));
   let selectedPlaylist = $derived(playlists.find((playlist) => playlist.id === selectedPlaylistId) ?? null);
+  let isPlaylistDetailView = $derived(activeView === "Playlists" && (Boolean(selectedPlaylist) || isLikedSongsOpen));
   let selectedVideo = $derived(videos.find((video) => video.id === selectedVideoId) ?? null);
   let selectedVideoThumbnailSrc = $derived(localImageSource(selectedVideo?.thumbnailPath));
   let activeVideoStatus = $derived(videoBackendStatus?.videoId === selectedVideoId ? videoBackendStatus : null);
@@ -492,6 +495,7 @@
   let selectedCdCover = $derived(activeCdRipMetadata()?.cover ?? null);
   let selectedCdCoverSrc = $derived(localImageSource(selectedCdCover?.path));
   let selectedPlaylistTracks = $derived(selectedPlaylist ? tracksForPlaylist(selectedPlaylist) : []);
+  let selectedPlaylistDurationLabel = $derived(totalTrackDurationLabel(selectedPlaylistTracks));
   let filteredLikedTracks = $derived(searchFilterTracks(favoriteTracks, normalizedSearchQuery));
   let selectedPlaylistSearchTracks = $derived(
     selectedPlaylist && normalizedSearchQuery
@@ -1128,6 +1132,8 @@
     clearGenreEditState();
     isLikedSongsOpen = false;
     isMixBuilderOpen = false;
+    isCreatePlaylistOpen = false;
+    isPlaylistEditMode = false;
     isLibraryHealthOpen = false;
     selectedPlaylistId = null;
     clearMixSelection();
@@ -2551,6 +2557,17 @@
     ]);
   }
 
+  function openPlaylistMoreMenu(event: MouseEvent, playlist: Playlist) {
+    event.preventDefault();
+    event.stopPropagation();
+
+    openContextMenu(event.clientX, event.clientY, [
+      { label: "Rename playlist", action: () => handleRenamePlaylist(playlist) },
+      { label: isPlaylistEditMode ? "Done editing" : "Edit order", action: () => { isPlaylistEditMode = !isPlaylistEditMode; } },
+      { label: "Delete playlist", action: () => openDeletePlaylistConfirmation(playlist) },
+    ]);
+  }
+
   function handleNavigate(label: string) {
     const targetView = label === "Home" || (!ENABLE_EXPERIMENTAL_VIDEOS && label === "Videos")
       ? "Albums"
@@ -2566,6 +2583,8 @@
     clearGenreEditState();
     isLikedSongsOpen = false;
     isMixBuilderOpen = false;
+    isCreatePlaylistOpen = false;
+    isPlaylistEditMode = false;
     isLibraryHealthOpen = false;
     selectedPlaylistId = null;
     selectedVideoId = targetView === "Videos" ? selectedVideoId : null;
@@ -2690,6 +2709,26 @@
     appendTracksToQueue(selectedGenreTracks);
   }
 
+  async function handlePlayLikedSongs(shouldShuffle = false) {
+    await playTrackSet(favoriteTracks, shouldShuffle);
+  }
+
+  function handleAddLikedSongsToQueue() {
+    appendTracksToQueue(favoriteTracks);
+  }
+
+  async function handlePlayPlaylist(playlist: Playlist, shouldShuffle = false) {
+    await playTrackSet(tracksForPlaylist(playlist), shouldShuffle);
+  }
+
+  function handleAddPlaylistToQueue(playlist: Playlist) {
+    appendTracksToQueue(tracksForPlaylist(playlist));
+  }
+
+  function stopCardAction(event: MouseEvent) {
+    event.stopPropagation();
+  }
+
   function handleAlbumTrackSelect(track: Track) {
     void handleTrackSelect(track, selectedAlbumTracks);
   }
@@ -2763,6 +2802,8 @@
     albumGenreDraft = genreDraftForTracks(tracks.filter((track) => albumIdForTrack(track) === albumId));
     isLikedSongsOpen = false;
     isMixBuilderOpen = false;
+    isCreatePlaylistOpen = false;
+    isPlaylistEditMode = false;
     isLibraryHealthOpen = false;
     selectedPlaylistId = null;
     mainElement?.scrollTo({ top: 0 });
@@ -2800,6 +2841,8 @@
     artistGenreDraft = genreDraftForTracks(tracks.filter((track) => artistNameForTrack(track) === artistName));
     isLikedSongsOpen = false;
     isMixBuilderOpen = false;
+    isCreatePlaylistOpen = false;
+    isPlaylistEditMode = false;
     isLibraryHealthOpen = false;
     selectedPlaylistId = null;
     mainElement?.scrollTo({ top: 0 });
@@ -2816,6 +2859,8 @@
     clearGenreEditState();
     isLikedSongsOpen = false;
     isMixBuilderOpen = false;
+    isCreatePlaylistOpen = false;
+    isPlaylistEditMode = false;
     isLibraryHealthOpen = false;
     selectedPlaylistId = null;
     mainElement?.scrollTo({ top: 0 });
@@ -2829,6 +2874,8 @@
     clearGenreEditState();
     isLikedSongsOpen = true;
     isMixBuilderOpen = false;
+    isCreatePlaylistOpen = false;
+    isPlaylistEditMode = false;
     isLibraryHealthOpen = false;
     selectedPlaylistId = null;
     searchQuery = "";
@@ -2845,6 +2892,8 @@
     clearGenreEditState();
     isLikedSongsOpen = false;
     isMixBuilderOpen = true;
+    isCreatePlaylistOpen = false;
+    isPlaylistEditMode = false;
     isLibraryHealthOpen = false;
     selectedPlaylistId = null;
     mixMessage = null;
@@ -2859,11 +2908,26 @@
     selectedPlaylistId = playlist.id;
     isLikedSongsOpen = false;
     isMixBuilderOpen = false;
+    isCreatePlaylistOpen = false;
+    isPlaylistEditMode = false;
     isLibraryHealthOpen = false;
     searchQuery = "";
     playlistMessage = null;
     playlistError = null;
     mainElement?.scrollTo({ top: 0 });
+  }
+
+  function handleOpenCreatePlaylist() {
+    isCreatePlaylistOpen = true;
+    playlistNameDraft = "";
+    playlistError = null;
+    playlistMessage = null;
+  }
+
+  function handleCancelCreatePlaylist() {
+    isCreatePlaylistOpen = false;
+    playlistNameDraft = "";
+    playlistError = null;
   }
 
   async function handleCreatePlaylist() {
@@ -2885,6 +2949,7 @@
       const playlist = await createPlaylist(name);
       applyUpdatedPlaylist(playlist);
       playlistNameDraft = "";
+      isCreatePlaylistOpen = false;
       playlistMessage = `${playlist.name} created.`;
     } catch (error) {
       playlistError = error instanceof Error ? error.message : String(error);
@@ -3076,6 +3141,8 @@
       activeView = "Playlists";
       isLikedSongsOpen = false;
       isMixBuilderOpen = false;
+      isCreatePlaylistOpen = false;
+      isPlaylistEditMode = false;
       searchQuery = "";
       playlistMessage = `${playlist.name} deleted.`;
       mainElement?.scrollTo({ top: 0 });
@@ -3100,6 +3167,8 @@
     clearGenreEditState();
     isLikedSongsOpen = false;
     isMixBuilderOpen = false;
+    isCreatePlaylistOpen = false;
+    isPlaylistEditMode = false;
     isLibraryHealthOpen = true;
     selectedPlaylistId = null;
     searchQuery = "";
@@ -3193,6 +3262,8 @@
   function handleBackToPlaylists() {
     isLikedSongsOpen = false;
     isMixBuilderOpen = false;
+    isCreatePlaylistOpen = false;
+    isPlaylistEditMode = false;
     selectedPlaylistId = null;
     mixMessage = null;
     playlistMessage = null;
@@ -4204,6 +4275,33 @@
       : availableLabel;
   }
 
+  function totalTrackDurationLabel(libraryTracks: Track[]) {
+    const knownDurations = libraryTracks
+      .map((track) => track.durationSeconds)
+      .filter((duration): duration is number => duration !== null);
+
+    if (knownDurations.length === 0) {
+      return null;
+    }
+
+    return formatDurationSummary(knownDurations.reduce((total, duration) => total + duration, 0));
+  }
+
+  function playlistMetaLabel(playlist: Playlist) {
+    const playlistTracks = tracksForPlaylist(playlist);
+    const durationLabel = totalTrackDurationLabel(playlistTracks);
+
+    return [playlistTrackLabel(playlist), durationLabel].filter(Boolean).join(" · ");
+  }
+
+  function smartPlaylistMetaLabel(libraryTracks: Track[]) {
+    return [songCountLabel(libraryTracks.length), totalTrackDurationLabel(libraryTracks)].filter(Boolean).join(" · ");
+  }
+
+  function playlistCoverTracks(libraryTracks: Track[]) {
+    return libraryTracks.slice(0, 4);
+  }
+
   function songCountLabel(count: number) {
     return `${count} ${count === 1 ? "song" : "songs"}`;
   }
@@ -5122,11 +5220,13 @@
       class:artist-detail-view={isArtistDetailView}
       class:genre-detail-view={isGenreDetailView}
       class:lyrics-mode={activeView === "Now Playing"}
+      class:playlist-detail-view={isPlaylistDetailView}
+      class:playlists-view={activeView === "Playlists"}
       class:songs-library-view={activeView === "Songs"}
       class="home"
       bind:this={mainElement}
     >
-      {#if activeView !== "Now Playing" && !isAlbumDetailView && !isArtistDetailView && !isGenreDetailView}
+      {#if activeView !== "Now Playing" && !isAlbumDetailView && !isArtistDetailView && !isGenreDetailView && !isPlaylistDetailView}
         <header class="home-header">
           <div>
             <p class="eyebrow">{viewEyebrow()}</p>
@@ -5155,7 +5255,7 @@
         </header>
       {/if}
 
-      {#if isSearchAvailable() && !isAlbumDetailView && !isArtistDetailView && !isGenreDetailView}
+      {#if isSearchAvailable() && !isAlbumDetailView && !isArtistDetailView && !isGenreDetailView && !isPlaylistDetailView}
         <div class="search-bar">
           <input
             type="search"
@@ -6162,21 +6262,29 @@
         </LibrarySection>
       {:else if activeView === "Playlists"}
         {#if isLikedSongsOpen}
-          <section class="detail-view" aria-labelledby="liked-songs-title">
-            <button class="back-button" type="button" onclick={handleBackToPlaylists}>Back to Playlists</button>
-            <div class="playlist-detail-header">
-              <div class="liked-mark" aria-hidden="true">★</div>
-              <div class="detail-copy">
+          <section class="playlist-detail-page" aria-labelledby="liked-songs-title">
+            <button class="back-button playlist-detail-back" type="button" onclick={handleBackToPlaylists}>Back to Playlists</button>
+            <section class="playlist-hero smart" aria-labelledby="liked-songs-title">
+              <div class="playlist-hero-art liked" aria-hidden="true">★</div>
+              <div class="playlist-hero-copy">
                 <p class="eyebrow">Smart Playlist</p>
                 <h3 id="liked-songs-title">Liked Songs</h3>
-                <p>{favoriteTracks.length} {favoriteTracks.length === 1 ? "song" : "songs"}</p>
+                <div class="playlist-hero-meta">
+                  <span>{smartPlaylistMetaLabel(favoriteTracks)}</span>
+                  <span>Protected</span>
+                </div>
+                <div class="playlist-hero-actions">
+                  <button type="button" disabled={favoriteTracks.length === 0} onclick={() => void handlePlayLikedSongs()}>Play Playlist</button>
+                  <button type="button" disabled={favoriteTracks.length === 0} onclick={() => void handlePlayLikedSongs(true)}>Shuffle Playlist</button>
+                  <button type="button" disabled={favoriteTracks.length === 0} onclick={handleAddLikedSongsToQueue}>Add to Queue</button>
+                </div>
               </div>
-            </div>
+            </section>
 
             {#if playlistError}
               <div class="scan-error" role="alert">{playlistError}</div>
             {:else if playlistMessage}
-              <div class="scan-error status-message" role="status">{playlistMessage}</div>
+              <p class="playlist-status-pill" role="status">{playlistMessage}</p>
             {/if}
 
             <LibrarySection title="Songs" viewAllLabel={normalizedSearchQuery ? `${filteredLikedTracks.length} ${filteredLikedTracks.length === 1 ? "match" : "matches"}` : `${favoriteTracks.length} total`}>
@@ -6194,6 +6302,8 @@
                 <TrackList
                   tracks={filteredLikedTracks}
                   isScanning={false}
+                  variant="library"
+                  showOrder
                   selectedTrackId={currentTrack?.id}
                   onTrackSelect={handleTrackSelect}
                   onTrackContextMenu={openTrackContextMenu}
@@ -6205,29 +6315,51 @@
             </LibrarySection>
           </section>
         {:else if selectedPlaylist}
-          <section class="detail-view" aria-labelledby="custom-playlist-title">
-            <div class="detail-actions">
-              <button class="back-button" type="button" onclick={handleBackToPlaylists}>Back to Playlists</button>
-              <button class="back-button accent" type="button" onclick={() => void handleRenamePlaylist(selectedPlaylist)}>
-                Rename
-              </button>
-              <button class="back-button destructive" type="button" onclick={() => openDeletePlaylistConfirmation(selectedPlaylist)}>
-                Delete Playlist
-              </button>
-            </div>
-            <div class="playlist-detail-header">
-              <div class="playlist-mark" aria-hidden="true">P</div>
-              <div class="detail-copy">
-                <p class="eyebrow">Playlist</p>
-                <h3 id="custom-playlist-title">{selectedPlaylist.name}</h3>
-                <p>{playlistTrackLabel(selectedPlaylist)}</p>
+          <section class="playlist-detail-page" aria-labelledby="custom-playlist-title">
+            <button class="back-button playlist-detail-back" type="button" onclick={handleBackToPlaylists}>Back to Playlists</button>
+            <section class="playlist-hero" aria-labelledby="custom-playlist-title">
+              <div class="playlist-hero-art mosaic" aria-hidden="true">
+                {#each playlistCoverTracks(selectedPlaylistTracks) as track}
+                  <span>
+                    {#if track.coverArtPath}
+                      <img src={localImageSource(track.coverArtPath) ?? ""} alt="" onload={showLoadedImage} onerror={hideBrokenImage} />
+                    {:else}
+                      {track.title.slice(0, 1)}
+                    {/if}
+                  </span>
+                {/each}
+                {#if selectedPlaylistTracks.length === 0}
+                  <span>P</span>
+                {/if}
               </div>
-            </div>
+              <div class="playlist-hero-copy">
+                <p class="eyebrow">Custom Playlist</p>
+                <h3 id="custom-playlist-title">{selectedPlaylist.name}</h3>
+                <div class="playlist-hero-meta">
+                  <span>{playlistTrackLabel(selectedPlaylist)}</span>
+                  {#if selectedPlaylistDurationLabel}
+                    <span>{selectedPlaylistDurationLabel}</span>
+                  {/if}
+                </div>
+                <div class="playlist-hero-action-row">
+                  <div class="playlist-hero-actions">
+                    <button type="button" disabled={selectedPlaylistTracks.length === 0} onclick={() => void handlePlayPlaylist(selectedPlaylist)}>Play Playlist</button>
+                    <button type="button" disabled={selectedPlaylistTracks.length === 0} onclick={() => void handlePlayPlaylist(selectedPlaylist, true)}>Shuffle Playlist</button>
+                    <button type="button" disabled={selectedPlaylistTracks.length === 0} onclick={() => handleAddPlaylistToQueue(selectedPlaylist)}>Add to Queue</button>
+                  </div>
+                  <div class="playlist-hero-actions playlist-management-actions">
+                    <button class="secondary" type="button" onclick={() => void handleRenamePlaylist(selectedPlaylist)}>Rename</button>
+                    <button class:active={isPlaylistEditMode} class="secondary" type="button" onclick={() => isPlaylistEditMode = !isPlaylistEditMode}>{isPlaylistEditMode ? "Done" : "Edit Order"}</button>
+                    <button class="secondary more" type="button" aria-label="More playlist actions" onclick={(event) => openPlaylistMoreMenu(event, selectedPlaylist)}>More</button>
+                  </div>
+                </div>
+              </div>
+            </section>
 
             {#if playlistError}
               <div class="scan-error" role="alert">{playlistError}</div>
             {:else if playlistMessage}
-              <div class="scan-error status-message" role="status">{playlistMessage}</div>
+              <p class="playlist-status-pill" role="status">{playlistMessage}</p>
             {/if}
             {#if selectedPlaylistMissingTrackCount > 0}
               <div class="playlist-warning" role="status">
@@ -6235,7 +6367,7 @@
               </div>
             {/if}
 
-            <LibrarySection title="Songs" viewAllLabel={normalizedSearchQuery ? `${selectedPlaylistSearchTracks.length} ${selectedPlaylistSearchTracks.length === 1 ? "match" : "matches"}` : `${selectedPlaylistTracks.length} playable`}>
+            <LibrarySection title="Songs" viewAllLabel={isPlaylistEditMode ? "Editing order" : normalizedSearchQuery ? `${selectedPlaylistSearchTracks.length} ${selectedPlaylistSearchTracks.length === 1 ? "match" : "matches"}` : `${selectedPlaylistTracks.length} playable`}>
               {#if selectedPlaylistTracks.length === 0}
                 <div class="group-empty">
                   {#if selectedPlaylist.trackIds.length > 0}
@@ -6255,17 +6387,19 @@
                 <TrackList
                   tracks={selectedPlaylistSearchTracks}
                   isScanning={false}
+                  variant="library"
+                  showOrder
                   selectedTrackId={currentTrack?.id}
                   onTrackSelect={handleTrackSelect}
                   onTrackContextMenu={openTrackContextMenu}
                   onArtistSelect={handleTrackArtistSelect}
                   onAlbumSelect={handleTrackAlbumSelect}
                   onToggleFavorite={handleToggleFavorite}
-                  onRemoveTrack={handleRemoveTrackFromSelectedPlaylist}
-                  onMoveTrackUp={(track) => void handleMoveTrackInSelectedPlaylist(track, "up")}
-                  onMoveTrackDown={(track) => void handleMoveTrackInSelectedPlaylist(track, "down")}
-                  canMoveTrackUp={(track) => canMoveSelectedPlaylistTrack(track, "up")}
-                  canMoveTrackDown={(track) => canMoveSelectedPlaylistTrack(track, "down")}
+                  onRemoveTrack={isPlaylistEditMode ? handleRemoveTrackFromSelectedPlaylist : undefined}
+                  onMoveTrackUp={isPlaylistEditMode ? (track) => void handleMoveTrackInSelectedPlaylist(track, "up") : undefined}
+                  onMoveTrackDown={isPlaylistEditMode ? (track) => void handleMoveTrackInSelectedPlaylist(track, "down") : undefined}
+                  canMoveTrackUp={isPlaylistEditMode ? (track) => canMoveSelectedPlaylistTrack(track, "up") : undefined}
+                  canMoveTrackDown={isPlaylistEditMode ? (track) => canMoveSelectedPlaylistTrack(track, "down") : undefined}
                 />
               {/if}
             </LibrarySection>
@@ -6400,29 +6534,54 @@
             </LibrarySection>
           </section>
         {:else}
-          <section class="playlist-grid" aria-labelledby="playlists-title">
-            <button class="playlist-card" type="button" onclick={handleLikedSongsSelect}>
-              <div class="liked-mark" aria-hidden="true">★</div>
-              <div>
-                <p class="eyebrow">Smart Playlist</p>
-                <h3 id="playlists-title">Liked Songs</h3>
-                <p>{favoriteTracks.length} {favoriteTracks.length === 1 ? "song" : "songs"}</p>
+          <section class="playlists-page" aria-labelledby="playlists-title">
+            {#if playlistError && !isCreatePlaylistOpen}
+              <div class="scan-error" role="alert">{playlistError}</div>
+            {:else if playlistMessage && !isCreatePlaylistOpen}
+              <p class="playlist-status-pill" role="status">{playlistMessage}</p>
+            {/if}
+
+            <LibrarySection title="Smart Playlists" viewAllLabel={`${favoriteTracks.length} liked`}>
+              <div class="playlist-card-grid smart">
+                <article class="playlist-library-card smart">
+                  <button class="playlist-card-main" type="button" onclick={handleLikedSongsSelect}>
+                    <div class="playlist-card-art liked" aria-hidden="true">★</div>
+                    <div class="playlist-card-copy">
+                      <p class="eyebrow">Smart Playlist</p>
+                      <h3 id="playlists-title">Liked Songs</h3>
+                      <p>{smartPlaylistMetaLabel(favoriteTracks)}</p>
+                    </div>
+                  </button>
+                  <div class="playlist-card-actions">
+                    <button type="button" disabled={favoriteTracks.length === 0} onclick={(event) => { stopCardAction(event); void handlePlayLikedSongs(); }}>Play</button>
+                    <button type="button" disabled={favoriteTracks.length === 0} onclick={(event) => { stopCardAction(event); void handlePlayLikedSongs(true); }}>Shuffle</button>
+                  </div>
+                </article>
               </div>
-            </button>
-            <button class="playlist-card" type="button" onclick={handleMixBuilderSelect}>
-              <div class="mix-mark" aria-hidden="true">M</div>
-              <div>
-                <p class="eyebrow">Temporary Mix</p>
-                <h3>Mix Builder</h3>
-                <p>{tracks.length} {tracks.length === 1 ? "track" : "tracks"} available</p>
-              </div>
-            </button>
-            <form class="playlist-create-card" onsubmit={(event) => { event.preventDefault(); void handleCreatePlaylist(); }}>
-              <div class="playlist-mark" aria-hidden="true">+</div>
-              <div>
-                <p class="eyebrow">Custom Playlist</p>
-                <label for="playlist-name">Create Playlist</label>
+            </LibrarySection>
+
+            <LibrarySection title="Mixes / Tools" viewAllLabel={`${tracks.length} available`}>
+              <button class="mix-tool-card" type="button" onclick={handleMixBuilderSelect}>
+                <div class="mix-mark" aria-hidden="true">M</div>
                 <div>
+                  <p class="eyebrow">Mix Builder</p>
+                  <h3>Build a Mix</h3>
+                  <p>Build a local queue from genres, artists, albums, formats, and liked songs.</p>
+                </div>
+              </button>
+            </LibrarySection>
+
+            <LibrarySection
+              title="Custom Playlists"
+              viewAllLabel={isCreatePlaylistOpen ? "Cancel" : "New Playlist"}
+              onViewAll={isCreatePlaylistOpen ? handleCancelCreatePlaylist : handleOpenCreatePlaylist}
+            >
+              {#if isCreatePlaylistOpen}
+                <form class="playlist-create-panel" onsubmit={(event) => { event.preventDefault(); void handleCreatePlaylist(); }}>
+                  <div>
+                    <p class="eyebrow">New Playlist</p>
+                    <h3>Create Playlist</h3>
+                  </div>
                   <input
                     id="playlist-name"
                     type="text"
@@ -6431,30 +6590,63 @@
                     aria-label="Playlist name"
                     aria-invalid={playlistError ? "true" : "false"}
                   />
-                  <button type="submit" disabled={!canCreatePlaylist}>Create</button>
+                  <div class="playlist-create-actions">
+                    <button type="submit" disabled={!canCreatePlaylist}>Create</button>
+                    <button class="secondary" type="button" onclick={handleCancelCreatePlaylist}>Cancel</button>
+                  </div>
+                  {#if playlistError}
+                    <p class="form-message error" role="alert">{playlistError}</p>
+                  {:else if playlistMessage}
+                    <p class="form-message" role="status">{playlistMessage}</p>
+                  {/if}
+                </form>
+              {/if}
+
+              {#if playlists.length === 0}
+                <div class="group-empty playlist-empty-state">
+                  <h3>No custom playlists yet</h3>
+                  <p>Create your first playlist, then add songs from any track context menu.</p>
+                  {#if !isCreatePlaylistOpen}
+                    <button type="button" onclick={handleOpenCreatePlaylist}>Create your first playlist</button>
+                  {/if}
                 </div>
-                {#if playlistError}
-                  <p class="form-message error" role="alert">{playlistError}</p>
-                {:else if playlistMessage}
-                  <p class="form-message" role="status">{playlistMessage}</p>
-                {/if}
-              </div>
-            </form>
-            {#each playlists as playlist}
-              <button
-                class="playlist-card"
-                type="button"
-                onclick={() => handlePlaylistSelect(playlist)}
-                oncontextmenu={(event) => openPlaylistContextMenu(event, playlist)}
-              >
-                <div class="playlist-mark" aria-hidden="true">P</div>
-                <div>
-                  <p class="eyebrow">Custom Playlist</p>
-                  <h3>{playlist.name}</h3>
-                  <p>{playlistTrackLabel(playlist)}</p>
+              {:else}
+                <div class="playlist-card-grid">
+                  {#each playlists as playlist}
+                    {@const playlistTracks = tracksForPlaylist(playlist)}
+                    <article class="playlist-library-card" oncontextmenu={(event) => openPlaylistContextMenu(event, playlist)}>
+                      <button class="playlist-card-main" type="button" onclick={() => handlePlaylistSelect(playlist)}>
+                        <div class="playlist-card-art mosaic" aria-hidden="true">
+                          {#each playlistCoverTracks(playlistTracks) as track}
+                            <span>
+                              {#if track.coverArtPath}
+                                <img src={localImageSource(track.coverArtPath) ?? ""} alt="" onload={showLoadedImage} onerror={hideBrokenImage} />
+                              {:else}
+                                {track.title.slice(0, 1)}
+                              {/if}
+                            </span>
+                          {/each}
+                          {#if playlistTracks.length === 0}
+                            <span>P</span>
+                          {/if}
+                        </div>
+                        <div class="playlist-card-copy">
+                          <p class="eyebrow">Custom Playlist</p>
+                          <h3>{playlist.name}</h3>
+                          <p>{playlistMetaLabel(playlist)}</p>
+                        </div>
+                      </button>
+                      <div class="playlist-card-actions">
+                        <button type="button" disabled={playlistTracks.length === 0} onclick={(event) => { stopCardAction(event); void handlePlayPlaylist(playlist); }}>Play</button>
+                        <button type="button" disabled={playlistTracks.length === 0} onclick={(event) => { stopCardAction(event); void handlePlayPlaylist(playlist, true); }}>Shuffle</button>
+                        <button type="button" disabled={playlistTracks.length === 0} onclick={(event) => { stopCardAction(event); handleAddPlaylistToQueue(playlist); }}>Queue</button>
+                        <button class="secondary" type="button" onclick={(event) => { stopCardAction(event); void handleRenamePlaylist(playlist); }}>Rename</button>
+                      </div>
+                    </article>
+                  {/each}
                 </div>
-              </button>
-            {/each}
+              {/if}
+            </LibrarySection>
           </section>
         {/if}
       {:else if activeView === "Videos"}
@@ -8286,17 +8478,15 @@
   .album-card,
   .artist-card > div:last-child,
   .genre-card > div:last-child,
-  .playlist-card > div:last-child,
-  .playlist-create-card > div:last-child {
+  .playlist-card-copy,
+  .mix-tool-card > div:last-child {
     min-width: 0;
   }
 
   .artist-card h3,
   .artist-card p,
   .genre-card h3,
-  .genre-card p,
-  .playlist-card h3,
-  .playlist-card p:not(.eyebrow) {
+  .genre-card p {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -8341,8 +8531,7 @@
   }
 
   .artist-grid,
-  .genre-grid,
-  .playlist-grid {
+  .genre-grid {
     display: grid;
     grid-template-columns: repeat(4, minmax(0, 1fr));
     gap: 14px;
@@ -8640,90 +8829,330 @@
     margin-top: 4px;
   }
 
-  .playlist-card,
-  .playlist-create-card {
-    display: flex;
-    align-items: center;
-    gap: 14px;
-    min-height: 112px;
-    border: 1px solid var(--border);
+  .playlists-page,
+  .playlist-detail-page {
+    display: grid;
+    gap: 20px;
+  }
+
+  .playlists-page :global(.library-section) {
+    width: 100%;
+  }
+
+  .home.playlists-view {
+    --content-bottom-padding: 36px;
+  }
+
+  .home.playlist-detail-view {
+    --content-bottom-padding: 28px;
+    padding-top: 26px;
+  }
+
+  .playlist-card-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 360px));
+    gap: 12px;
+    justify-content: center;
+  }
+
+  .playlist-card-grid.smart {
+    grid-template-columns: minmax(min(100%, 340px), 430px);
+  }
+
+  .playlist-library-card {
+    display: grid;
+    min-width: 0;
+    gap: 12px;
+    border: 1px solid color-mix(in srgb, var(--border) 88%, transparent);
     border-radius: 8px;
-    background: var(--panel-soft);
+    background:
+      linear-gradient(180deg, color-mix(in srgb, var(--panel-strong) 72%, transparent), color-mix(in srgb, var(--panel) 90%, transparent)),
+      var(--panel-soft);
+    padding: 12px;
+    transition:
+      border-color 150ms ease,
+      background 150ms ease,
+      box-shadow 150ms ease;
+  }
+
+  .playlist-library-card:hover,
+  .playlist-library-card:focus-within {
+    border-color: var(--accent-strong);
+    background: color-mix(in srgb, var(--panel-hover) 88%, transparent);
+    box-shadow: 0 18px 44px rgba(0, 0, 0, 0.16);
+  }
+
+  .playlist-library-card.smart {
+    border-color: color-mix(in srgb, var(--accent) 28%, var(--border));
+  }
+
+  .playlist-card-main {
+    display: grid;
+    grid-template-columns: 68px minmax(0, 1fr);
+    gap: 12px;
+    align-items: center;
+    min-width: 0;
+    border: 0;
+    background: transparent;
     color: inherit;
     cursor: default;
     font: inherit;
-    padding: 18px;
+    padding: 0;
     text-align: left;
   }
 
-  .playlist-card:hover,
-  .playlist-card:focus-visible {
+  .playlist-card-main:focus-visible {
+    border-radius: 6px;
+    outline: 2px solid color-mix(in srgb, var(--accent) 58%, transparent);
+    outline-offset: 4px;
+  }
+
+  .playlist-card-art,
+  .playlist-hero-art {
+    display: grid;
+    overflow: hidden;
+    place-items: center;
+    border-radius: 8px;
+    background:
+      radial-gradient(circle at 30% 18%, rgba(255, 255, 255, 0.24), transparent 30%),
+      linear-gradient(145deg, color-mix(in srgb, var(--accent) 82%, var(--panel)), var(--panel-strong));
+    color: var(--accent-contrast);
+    font-weight: 950;
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.12);
+  }
+
+  .playlist-card-art {
+    width: 68px;
+    height: 68px;
+    font-size: 1.4rem;
+  }
+
+  .playlist-card-art.liked,
+  .playlist-hero-art.liked {
+    background:
+      radial-gradient(circle at 34% 24%, color-mix(in srgb, var(--warning) 28%, transparent), transparent 38%),
+      color-mix(in srgb, var(--warning) 16%, var(--panel));
+    color: var(--warning);
+  }
+
+  .playlist-card-art.mosaic,
+  .playlist-hero-art.mosaic {
+    grid-template-columns: repeat(2, 1fr);
+    grid-template-rows: repeat(2, 1fr);
+    gap: 1px;
+    background: var(--panel-strong);
+    color: var(--accent-text);
+  }
+
+  .playlist-card-art.mosaic span,
+  .playlist-hero-art.mosaic span {
+    display: grid;
+    width: 100%;
+    height: 100%;
+    place-items: center;
+    background: color-mix(in srgb, var(--accent-soft) 72%, var(--panel));
+    color: var(--accent-text);
+    font-size: 0.88rem;
+    font-weight: 950;
+  }
+
+  .playlist-card-art.mosaic img,
+  .playlist-hero-art.mosaic img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+
+  .playlist-card-copy {
+    display: grid;
+    gap: 4px;
+  }
+
+  .playlist-card-copy h3,
+  .playlist-card-copy p:not(.eyebrow),
+  .mix-tool-card h3,
+  .mix-tool-card p:not(.eyebrow) {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .playlist-card-copy h3,
+  .mix-tool-card h3 {
+    white-space: nowrap;
+  }
+
+  .playlist-card-copy p:not(.eyebrow),
+  .mix-tool-card p:not(.eyebrow) {
+    margin: 0;
+    color: var(--text-soft);
+    font-size: 0.86rem;
+    font-weight: 650;
+    line-height: 1.35;
+  }
+
+  .playlist-card-actions,
+  .playlist-hero-actions,
+  .playlist-create-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 7px;
+  }
+
+  .playlist-hero-action-row {
+    display: grid;
+    gap: 9px;
+  }
+
+  .playlist-management-actions {
+    gap: 6px;
+  }
+
+  .playlist-card-actions button,
+  .playlist-hero-actions button,
+  .playlist-create-actions button,
+  .playlist-empty-state button {
+    min-height: 32px;
+    border: 1px solid var(--border-strong);
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--panel-strong) 82%, transparent);
+    color: var(--text);
+    cursor: default;
+    font: inherit;
+    font-size: 0.78rem;
+    font-weight: 850;
+    padding: 0 10px;
+  }
+
+  .playlist-card-actions button:first-child,
+  .playlist-hero-actions button:first-child,
+  .playlist-create-actions button:first-child,
+  .playlist-empty-state button {
     border-color: var(--accent-strong);
-    background: var(--panel-hover);
+    background: var(--accent-soft);
+    color: var(--accent-text);
+  }
+
+  .playlist-card-actions button:hover:not(:disabled),
+  .playlist-card-actions button:focus-visible:not(:disabled),
+  .playlist-hero-actions button:hover:not(:disabled),
+  .playlist-hero-actions button:focus-visible:not(:disabled),
+  .playlist-create-actions button:hover:not(:disabled),
+  .playlist-create-actions button:focus-visible:not(:disabled),
+  .playlist-empty-state button:hover,
+  .playlist-empty-state button:focus-visible {
+    border-color: var(--accent);
+    background: color-mix(in srgb, var(--accent-soft) 84%, var(--panel-hover));
+    color: var(--accent-text);
     outline: none;
   }
 
-  .playlist-card h3 {
-    margin-bottom: 5px;
+  .playlist-card-actions button.secondary,
+  .playlist-hero-actions button.secondary,
+  .playlist-create-actions button.secondary {
+    border-color: var(--border-strong);
+    background: color-mix(in srgb, var(--panel-strong) 72%, transparent);
+    color: var(--text-muted);
   }
 
-  .playlist-card p:not(.eyebrow) {
-    margin: 0;
-    color: var(--text-soft);
-    font-weight: 650;
+  .playlist-hero-actions button.secondary.active {
+    border-color: var(--accent-strong);
+    background: var(--accent-soft);
+    color: var(--accent-text);
   }
 
-  .playlist-create-card label {
-    display: block;
-    margin-bottom: 8px;
-    color: var(--text);
-    font-size: 0.98rem;
-    font-weight: 800;
-    line-height: 1.25;
+  .playlist-hero-actions button.more {
+    min-width: 54px;
   }
 
-  .playlist-create-card > div:last-child > div {
-    display: flex;
-    gap: 8px;
+  .playlist-card-actions button:disabled,
+  .playlist-hero-actions button:disabled,
+  .playlist-create-actions button:disabled {
+    border-color: var(--border);
+    background: var(--panel-soft);
+    color: var(--text-dim);
   }
 
-  .playlist-create-card input {
+  .mix-tool-card {
+    display: grid;
+    grid-template-columns: 58px minmax(0, 1fr);
+    align-items: center;
+    gap: 14px;
+    justify-self: center;
+    width: min(100%, 640px);
+    min-height: 96px;
+    border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--border));
+    border-radius: 8px;
+    background:
+      linear-gradient(135deg, color-mix(in srgb, var(--accent-soft) 46%, transparent), transparent 58%),
+      var(--panel-soft);
+    color: inherit;
+    cursor: default;
+    font: inherit;
+    padding: 16px;
+    text-align: left;
+  }
+
+  .mix-tool-card:hover,
+  .mix-tool-card:focus-visible {
+    border-color: var(--accent-strong);
+    background:
+      linear-gradient(135deg, color-mix(in srgb, var(--accent-soft) 62%, transparent), transparent 58%),
+      var(--panel-hover);
+    outline: none;
+  }
+
+  .playlist-create-panel {
+    display: grid;
+    grid-template-columns: minmax(160px, 0.8fr) minmax(220px, 1fr) auto;
+    gap: 10px;
+    align-items: center;
+    border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--border));
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--panel-soft) 84%, transparent);
+    padding: 12px;
+  }
+
+  .playlist-create-panel input {
     width: 100%;
     min-width: 0;
-    min-height: 36px;
+    min-height: 38px;
     border: 1px solid var(--border-strong);
     border-radius: 8px;
     background: var(--bg-soft);
     color: var(--text);
     font: inherit;
-    font-size: 0.88rem;
-    font-weight: 650;
+    font-size: 0.9rem;
+    font-weight: 700;
     outline: none;
-    padding: 0 10px;
+    padding: 0 11px;
   }
 
-  .playlist-create-card input:focus {
+  .playlist-create-panel input:focus {
     border-color: var(--accent);
     box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 22%, transparent);
   }
 
-  .playlist-create-card button {
-    min-height: 36px;
-    border: 1px solid var(--accent-strong);
-    border-radius: 8px;
-    background: var(--accent-soft);
-    color: var(--accent-text);
-    cursor: default;
-    font: inherit;
-    font-size: 0.84rem;
-    font-weight: 850;
-    padding: 0 10px;
+  .playlist-create-panel .form-message {
+    grid-column: 2 / -1;
+    margin-top: -2px;
   }
 
-  .playlist-create-card button:disabled {
-    border-color: var(--border-strong);
-    background: var(--panel-soft);
-    color: var(--text-dim);
+  .playlist-empty-state {
+    gap: 8px;
+  }
+
+  .playlist-status-pill {
+    justify-self: start;
+    max-width: min(100%, 520px);
+    margin: 0;
+    border: 1px solid var(--accent-strong);
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--accent-soft) 72%, transparent);
+    color: var(--accent-text);
+    font-size: 0.82rem;
+    font-weight: 800;
+    line-height: 1.25;
+    padding: 7px 11px;
   }
 
   .form-message {
@@ -8737,9 +9166,7 @@
     color: var(--danger);
   }
 
-  .liked-mark,
   .mix-mark,
-  .playlist-mark,
   .health-mark {
     display: grid;
     width: 58px;
@@ -8751,18 +9178,8 @@
     font-weight: 900;
   }
 
-  .liked-mark {
-    background: color-mix(in srgb, var(--warning) 16%, var(--panel));
-    color: var(--warning);
-  }
-
   .mix-mark {
     background: var(--accent-soft);
-    color: var(--accent-text);
-  }
-
-  .playlist-mark {
-    background: var(--panel-strong);
     color: var(--accent-text);
   }
 
@@ -9477,34 +9894,95 @@
     outline: none;
   }
 
-  .back-button.accent {
-    border-color: var(--accent-strong);
-    background: var(--accent-soft);
-    color: var(--accent-text);
-  }
-
-  .back-button.destructive {
-    border-color: color-mix(in srgb, var(--danger) 34%, var(--border));
-    background: var(--danger-soft);
-    color: var(--danger);
-  }
-
-  .back-button.destructive:hover,
-  .back-button.destructive:focus-visible {
-    border-color: color-mix(in srgb, var(--danger) 44%, var(--border));
-    background: color-mix(in srgb, var(--danger) 18%, var(--danger-soft));
-  }
-
   .back-button:disabled {
     border-color: var(--border-strong);
     background: var(--panel-soft);
     color: var(--text-dim);
   }
 
-  .detail-actions {
+  .playlist-detail-back {
+    justify-self: start;
+  }
+
+  .playlist-hero {
+    position: relative;
+    isolation: isolate;
+    display: grid;
+    grid-template-columns: minmax(132px, 178px) minmax(0, 1fr);
+    gap: clamp(18px, 2.4vw, 28px);
+    align-items: center;
+    overflow: hidden;
+    border: 1px solid rgba(50, 61, 75, 0.72);
+    border-radius: 8px;
+    background:
+      linear-gradient(115deg, rgba(22, 27, 35, 0.96), rgba(12, 15, 20, 0.96) 60%, rgba(16, 22, 28, 0.98)),
+      var(--panel);
+    box-shadow:
+      0 22px 58px rgba(0, 0, 0, 0.18),
+      inset 0 1px 0 rgba(255, 255, 255, 0.04);
+    padding: clamp(18px, 2.6vw, 28px);
+  }
+
+  .playlist-hero::before {
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    background:
+      radial-gradient(circle at 14% 42%, color-mix(in srgb, var(--accent) 28%, transparent), transparent 36%),
+      linear-gradient(90deg, rgba(255, 255, 255, 0.04), transparent 44%);
+    opacity: 0.82;
+    pointer-events: none;
+    content: "";
+  }
+
+  .playlist-hero.smart::before {
+    background:
+      radial-gradient(circle at 14% 42%, color-mix(in srgb, var(--warning) 22%, transparent), transparent 36%),
+      linear-gradient(90deg, rgba(255, 255, 255, 0.04), transparent 44%);
+  }
+
+  .playlist-hero-art {
+    width: 100%;
+    aspect-ratio: 1;
+    min-width: 0;
+    font-size: clamp(2.2rem, 6vw, 4.6rem);
+    box-shadow:
+      0 22px 54px rgba(0, 0, 0, 0.28),
+      inset 0 0 0 1px rgba(255, 255, 255, 0.14);
+  }
+
+  .playlist-hero-copy {
+    display: grid;
+    gap: 12px;
+    min-width: 0;
+  }
+
+  .playlist-hero-copy h3 {
+    max-width: 980px;
+    margin: 0;
+    overflow: hidden;
+    color: var(--text);
+    font-size: clamp(2rem, 4.8vw, 4rem);
+    line-height: 1.03;
+    text-overflow: ellipsis;
+  }
+
+  .playlist-hero-meta {
     display: flex;
     flex-wrap: wrap;
-    gap: 10px;
+    gap: 8px;
+  }
+
+  .playlist-hero-meta span {
+    min-height: 28px;
+    border: 1px solid rgba(61, 74, 91, 0.72);
+    border-radius: 999px;
+    background: rgba(12, 15, 20, 0.44);
+    color: var(--text-muted);
+    font-size: 0.78rem;
+    font-weight: 800;
+    line-height: 1;
+    padding: 7px 10px;
   }
 
   .artist-detail-header,
@@ -12145,9 +12623,12 @@
   @media (max-width: 1020px) {
     .artist-grid,
     .genre-grid,
-    .playlist-grid,
     .video-grid {
       grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .playlist-card-grid {
+      grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 360px));
     }
 
     .videos-toolbar,
@@ -12233,6 +12714,15 @@
 
     .home.songs-library-view {
       --content-bottom-padding: 34px;
+      padding-top: 22px;
+    }
+
+    .home.playlists-view {
+      --content-bottom-padding: 36px;
+    }
+
+    .home.playlist-detail-view {
+      --content-bottom-padding: 28px;
       padding-top: 22px;
     }
 
@@ -12353,6 +12843,20 @@
       flex-direction: column;
     }
 
+    .playlist-hero {
+      grid-template-columns: 132px minmax(0, 1fr);
+      padding: 18px;
+    }
+
+    .playlist-create-panel {
+      grid-template-columns: 1fr;
+      align-items: stretch;
+    }
+
+    .playlist-create-panel .form-message {
+      grid-column: auto;
+    }
+
     .album-detail-header {
       grid-template-columns: 1fr;
       align-items: start;
@@ -12435,7 +12939,7 @@
     .album-grid,
     .artist-grid,
     .genre-grid,
-    .playlist-grid,
+    .playlist-card-grid,
     .video-grid,
     .mix-option-grid,
     .health-summary-grid,
@@ -12476,6 +12980,12 @@
     }
 
     .home.songs-library-view {
+      --player-height: 146px;
+      --content-bottom-padding: 24px;
+    }
+
+    .home.playlists-view,
+    .home.playlist-detail-view {
       --player-height: 146px;
       --content-bottom-padding: 24px;
     }
@@ -12540,6 +13050,20 @@
 
     .album-detail-header {
       padding: 16px;
+    }
+
+    .playlist-hero {
+      grid-template-columns: 1fr;
+      padding: 16px;
+    }
+
+    .playlist-hero-art {
+      width: min(100%, 180px);
+    }
+
+    .playlist-card-main,
+    .mix-tool-card {
+      grid-template-columns: 58px minmax(0, 1fr);
     }
 
     .album-detail-actions button {

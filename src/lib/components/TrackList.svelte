@@ -6,6 +6,7 @@
     tracks: Track[];
     isScanning: boolean;
     variant?: "default" | "library";
+    showOrder?: boolean;
     selectedTrackId?: string | null;
     onTrackSelect?: (track: Track, queue: Track[]) => void;
     onTrackContextMenu?: (track: Track, queue: Track[], x: number, y: number) => void;
@@ -23,6 +24,7 @@
     tracks,
     isScanning,
     variant = "default",
+    showOrder = false,
     selectedTrackId = null,
     onTrackSelect,
     onTrackContextMenu,
@@ -140,10 +142,11 @@
   </div>
 {:else}
   <div class:library-list={isLibraryVariant} class="track-list">
-    {#each tracks as track (track.id)}
+    {#each tracks as track, index (track.id)}
       <div
         class:active={track.id === selectedTrackId}
         class:library={isLibraryVariant}
+        class:withOrder={showOrder}
         class:withMove={hasMoveControls}
         class:withRemove={Boolean(onRemoveTrack)}
         class="track-row"
@@ -154,6 +157,9 @@
         oncontextmenu={(event) => openTrackContextMenu(event, track)}
         onkeydown={(event) => handleRowKeydown(event, track)}
       >
+        {#if showOrder}
+          <span class="track-order">{String(index + 1).padStart(2, "0")}</span>
+        {/if}
         <div class="mini-cover" aria-hidden="true">
           <span>{track.extension.toUpperCase()}</span>
           {#if track.coverArtPath}
@@ -293,6 +299,10 @@
     padding: 7px 10px;
   }
 
+  .track-row.library.withOrder {
+    grid-template-columns: 34px 46px minmax(180px, 1.35fr) minmax(140px, 0.85fr) minmax(54px, auto) minmax(66px, auto) 34px minmax(48px, auto);
+  }
+
   .track-row.withRemove {
     grid-template-columns: auto minmax(160px, 1.2fr) minmax(140px, 0.9fr) auto auto auto auto;
   }
@@ -303,6 +313,22 @@
 
   .track-row.withMove.withRemove {
     grid-template-columns: auto minmax(130px, 1.2fr) minmax(110px, 0.8fr) auto auto auto auto auto;
+  }
+
+  .track-row.library.withMove {
+    grid-template-columns: 46px minmax(150px, 1.25fr) minmax(120px, 0.76fr) minmax(54px, auto) minmax(66px, auto) 34px minmax(78px, auto) minmax(48px, auto);
+  }
+
+  .track-row.library.withOrder.withMove {
+    grid-template-columns: 34px 46px minmax(150px, 1.25fr) minmax(120px, 0.76fr) minmax(54px, auto) minmax(66px, auto) 34px minmax(78px, auto) minmax(48px, auto);
+  }
+
+  .track-row.library.withMove.withRemove {
+    grid-template-columns: 46px minmax(140px, 1.16fr) minmax(110px, 0.7fr) minmax(54px, auto) minmax(66px, auto) 34px minmax(78px, auto) minmax(72px, auto) minmax(48px, auto);
+  }
+
+  .track-row.library.withOrder.withMove.withRemove {
+    grid-template-columns: 34px 46px minmax(140px, 1.16fr) minmax(110px, 0.7fr) minmax(54px, auto) minmax(66px, auto) 34px minmax(78px, auto) minmax(72px, auto) minmax(48px, auto);
   }
 
   .track-row:hover,
@@ -346,6 +372,18 @@
     justify-self: end;
   }
 
+  .track-order {
+    color: var(--text-dim) !important;
+    font-size: 0.8rem !important;
+    font-variant-numeric: tabular-nums;
+    font-weight: 850 !important;
+    text-align: right;
+  }
+
+  .track-row.library.active .track-order {
+    color: var(--accent-text) !important;
+  }
+
   .favorite-button {
     display: grid;
     width: 32px;
@@ -384,6 +422,10 @@
   .move-buttons {
     display: flex;
     gap: 6px;
+  }
+
+  .track-row.library .move-buttons {
+    justify-self: end;
   }
 
   .move-buttons button {
@@ -612,6 +654,10 @@
       padding: 7px 8px;
     }
 
+    .track-row.library.withOrder {
+      grid-template-columns: 28px 44px minmax(0, 1fr) 34px minmax(48px, auto);
+    }
+
     .track-row.withRemove {
       grid-template-columns: auto minmax(0, 1fr) auto auto auto;
     }
@@ -620,6 +666,27 @@
     .track-row.withMove.withRemove {
       grid-template-columns: auto minmax(0, 1fr) auto auto auto auto;
       gap: 10px;
+    }
+
+    .track-row.library.withMove,
+    .track-row.library.withMove.withRemove {
+      grid-template-columns: 44px minmax(0, 1fr) 34px minmax(48px, auto);
+      gap: 10px;
+    }
+
+    .track-row.library.withOrder.withMove,
+    .track-row.library.withOrder.withMove.withRemove {
+      grid-template-columns: 28px 44px minmax(0, 1fr) 34px minmax(48px, auto);
+    }
+
+    .track-row.library .move-buttons,
+    .track-row.library .remove-button {
+      grid-column: 2 / -1;
+      justify-self: start;
+    }
+
+    .track-row.library.withMove .track-duration {
+      display: none;
     }
 
     .album-link,
@@ -637,6 +704,12 @@
   @media (max-width: 520px) {
     .track-row.library {
       grid-template-columns: 42px minmax(0, 1fr) 34px minmax(46px, auto);
+    }
+
+    .track-row.library.withOrder,
+    .track-row.library.withOrder.withMove,
+    .track-row.library.withOrder.withMove.withRemove {
+      grid-template-columns: 26px 42px minmax(0, 1fr) 34px minmax(46px, auto);
     }
 
     .track-row.library .track-duration {
