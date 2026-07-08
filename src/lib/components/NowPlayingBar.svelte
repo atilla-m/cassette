@@ -437,7 +437,7 @@
     min-height: 86px;
     padding: 14px 24px;
     border-top: 1px solid rgba(255, 255, 255, 0.08);
-    background: #12161c;
+    background: var(--panel);
   }
 
   .player.compact {
@@ -447,7 +447,7 @@
     min-height: 64px;
     padding: 10px 22px;
     border-top-color: rgba(255, 255, 255, 0.06);
-    background: rgba(13, 15, 19, 0.9);
+    background: color-mix(in srgb, var(--bg) 90%, transparent);
   }
 
   .track {
@@ -478,11 +478,11 @@
 
   .track-open:hover .track-copy > span,
   .track-open:focus-visible .track-copy > span {
-    color: #ffffff;
+    color: var(--text);
   }
 
   .track-open:focus-visible {
-    outline: 2px solid rgba(47, 143, 131, 0.55);
+    outline: 2px solid var(--focus-ring);
     outline-offset: 4px;
   }
 
@@ -495,7 +495,7 @@
     border-radius: 8px;
     background:
       linear-gradient(135deg, rgba(255, 255, 255, 0.18), transparent 58%),
-      #2f8f83;
+      var(--accent);
     box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.12);
   }
 
@@ -522,14 +522,14 @@
 
   .track-copy > span {
     margin: 0 0 4px;
-    color: #f5f7fb;
+    color: var(--text);
     font-weight: 750;
   }
 
   .track-copy small,
   .progress-area span,
   .volume span {
-    color: #919ba9;
+    color: var(--text-soft);
     font-size: 0.84rem;
     font-weight: 650;
   }
@@ -549,9 +549,9 @@
     width: 34px;
     height: 34px;
     flex: 0 0 auto;
-    border-color: #303844;
-    background: #171c23;
-    color: #8f9aa8;
+    border-color: var(--border-strong);
+    background: var(--panel-strong);
+    color: var(--text-soft);
     font-size: 0.95rem;
   }
 
@@ -563,15 +563,15 @@
   button.favorite:hover,
   button.favorite:focus-visible,
   button.favorite.active {
-    border-color: #6d5b2a;
-    background: #262214;
-    color: #f0c85a;
+    border-color: color-mix(in srgb, var(--warning) 48%, var(--border));
+    background: color-mix(in srgb, var(--warning) 16%, var(--panel));
+    color: var(--warning);
   }
 
   button.favorite:disabled {
-    border-color: #303844;
-    background: #151a21;
-    color: #626c79;
+    border-color: var(--border-strong);
+    background: var(--panel-soft);
+    color: var(--text-dim);
   }
 
   button.queue-button,
@@ -587,9 +587,9 @@
   button.queue-button.active,
   button.queue-button:hover,
   button.queue-button:focus-visible {
-    border-color: #35544f;
-    background: #17332f;
-    color: #d8fffa;
+    border-color: var(--accent-strong);
+    background: var(--accent-soft);
+    color: var(--accent-text);
     outline: none;
   }
 
@@ -603,9 +603,9 @@
   button.mode-button.active,
   button.mode-button:hover,
   button.mode-button:focus-visible {
-    border-color: #35544f;
-    background: #17332f;
-    color: #d8fffa;
+    border-color: var(--accent-strong);
+    background: var(--accent-soft);
+    color: var(--accent-text);
     outline: none;
   }
 
@@ -614,10 +614,10 @@
     width: 38px;
     height: 38px;
     place-items: center;
-    border: 1px solid #303844;
+    border: 1px solid var(--border-strong);
     border-radius: 8px;
-    background: #1a2028;
-    color: #eef3f8;
+    background: var(--panel-strong);
+    color: var(--text);
     font: inherit;
     font-size: 0.78rem;
     font-weight: 900;
@@ -627,13 +627,13 @@
   .player.compact button {
     height: 34px;
     border-color: rgba(58, 68, 82, 0.76);
-    background: rgba(26, 32, 40, 0.78);
+    background: color-mix(in srgb, var(--panel-strong) 78%, transparent);
     font-size: 0.74rem;
   }
 
   button:disabled {
-    color: #626c79;
-    background: #151a21;
+    color: var(--text-dim);
+    background: var(--panel-soft);
   }
 
   button.track-open {
@@ -654,24 +654,24 @@
   button.play {
     width: 44px;
     height: 44px;
-    border-color: #2f8f83;
-    background: #2f8f83;
-    color: #07110f;
+    border-color: var(--accent);
+    background: var(--accent);
+    color: var(--accent-contrast);
   }
 
   .player.compact button.play {
     width: 40px;
     height: 40px;
-    border-color: #2f8f83;
-    background: #2f8f83;
-    color: #07110f;
-    box-shadow: 0 0 24px rgba(47, 143, 131, 0.16);
+    border-color: var(--accent);
+    background: var(--accent);
+    color: var(--accent-contrast);
+    box-shadow: 0 0 24px color-mix(in srgb, var(--accent) 18%, transparent);
   }
 
   button.play:disabled {
-    border-color: #303844;
-    background: #151a21;
-    color: #626c79;
+    border-color: var(--border-strong);
+    background: var(--panel-soft);
+    color: var(--text-dim);
   }
 
   .progress-area,
@@ -698,10 +698,10 @@
     background:
       linear-gradient(
         to right,
-        #2f8f83 0%,
-        #2f8f83 var(--range-fill, 0%),
-        rgba(63, 73, 87, 0.72) var(--range-fill, 0%),
-        rgba(63, 73, 87, 0.72) 100%
+        var(--accent) 0%,
+        var(--accent) var(--range-fill, 0%),
+        color-mix(in srgb, var(--range-empty) 72%, transparent) var(--range-fill, 0%),
+        color-mix(in srgb, var(--range-empty) 72%, transparent) 100%
       );
   }
 
@@ -717,12 +717,12 @@
     background:
       linear-gradient(
         to right,
-        #2f8f83 0%,
-        #2f8f83 var(--range-fill, 0%),
-        #2a313c var(--range-fill, 0%),
-        #2a313c 100%
+        var(--accent) 0%,
+        var(--accent) var(--range-fill, 0%),
+        var(--border) var(--range-fill, 0%),
+        var(--border) 100%
       );
-    accent-color: #2f8f83;
+    accent-color: var(--accent);
   }
 
   .progress:disabled,
@@ -736,7 +736,7 @@
     width: 12px;
     height: 12px;
     border-radius: 50%;
-    background: #d8dde4;
+    background: var(--text-muted);
   }
 
   .progress::-moz-range-thumb,
@@ -745,13 +745,13 @@
     height: 12px;
     border: 0;
     border-radius: 50%;
-    background: #d8dde4;
+    background: var(--text-muted);
   }
 
   .progress::-moz-range-progress,
   .volume-bar::-moz-range-progress {
     height: 7px;
-    background: #2f8f83;
+    background: var(--accent);
   }
 
   @media (max-width: 920px) {

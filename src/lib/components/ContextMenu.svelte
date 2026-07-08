@@ -70,9 +70,9 @@
     display: grid;
     width: 210px;
     overflow: hidden;
-    border: 1px solid #303844;
+    border: 1px solid var(--border-strong);
     border-radius: 8px;
-    background: #12161c;
+    background: var(--panel);
     box-shadow: 0 18px 42px rgba(0, 0, 0, 0.36);
     padding: 6px;
   }
@@ -82,7 +82,7 @@
     border: 0;
     border-radius: 6px;
     background: transparent;
-    color: #d5dce5;
+    color: var(--text);
     cursor: default;
     font: inherit;
     font-size: 0.88rem;
@@ -93,12 +93,12 @@
 
   button:hover,
   button:focus-visible {
-    background: #1b2027;
-    color: #f4f7fb;
+    background: var(--panel-hover);
+    color: var(--text);
     outline: none;
   }
 
   button:disabled {
-    color: #66717f;
+    color: var(--text-dim);
   }
 </style>

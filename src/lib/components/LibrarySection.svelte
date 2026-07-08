@@ -39,7 +39,7 @@
 
   h2 {
     margin: 0;
-    color: #f4f7fb;
+    color: var(--text);
     font-size: 1.08rem;
     line-height: 1.25;
   }
@@ -47,10 +47,10 @@
   button,
   .section-label {
     min-height: 32px;
-    border: 1px solid #303844;
+    border: 1px solid var(--border-strong);
     border-radius: 8px;
-    background: #161a20;
-    color: #aeb7c4;
+    background: var(--panel-strong);
+    color: var(--text-muted);
     cursor: default;
     font: inherit;
     font-size: 0.84rem;
@@ -65,9 +65,9 @@
 
   button:hover,
   button:focus-visible {
-    border-color: #35544f;
-    background: #1b2027;
-    color: #d5dce5;
+    border-color: var(--accent-strong);
+    background: var(--panel-hover);
+    color: var(--text);
     outline: none;
   }
 </style>

@@ -39,7 +39,7 @@
     width: 244px;
     min-width: 244px;
     border-right: 1px solid rgba(255, 255, 255, 0.08);
-    background: #111317;
+    background: var(--bg-soft);
     padding: 24px 16px;
   }
 
@@ -57,14 +57,14 @@
     height: 42px;
     place-items: center;
     border-radius: 8px;
-    background: #2f8f83;
-    color: #07110f;
+    background: var(--accent);
+    color: var(--accent-contrast);
     font-weight: 800;
   }
 
   .eyebrow {
     margin: 0 0 2px;
-    color: #8d96a3;
+    color: var(--text-soft);
     font-size: 0.72rem;
     font-weight: 700;
     letter-spacing: 0;
@@ -73,7 +73,7 @@
 
   h1 {
     margin: 0;
-    color: #f4f7fb;
+    color: var(--text);
     font-size: 1.35rem;
     line-height: 1.1;
   }
@@ -93,7 +93,7 @@
     padding: 0 12px;
     border-radius: 8px;
     background: transparent;
-    color: #b4bdc8;
+    color: var(--text-muted);
     cursor: default;
     font: inherit;
     font-weight: 650;
@@ -101,13 +101,13 @@
 
   button:hover,
   button.active {
-    background: #1b2027;
-    color: #ffffff;
+    background: var(--panel-hover);
+    color: var(--text);
   }
 
   button.active .nav-icon {
-    background: #2f8f83;
-    color: #07110f;
+    background: var(--accent);
+    color: var(--accent-contrast);
   }
 
   .nav-icon {
@@ -116,8 +116,8 @@
     height: 28px;
     place-items: center;
     border-radius: 7px;
-    background: #232a33;
-    color: #d1d7df;
+    background: var(--panel-strong);
+    color: var(--text);
     font-size: 0.78rem;
     font-weight: 800;
   }
