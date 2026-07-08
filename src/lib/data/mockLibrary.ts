@@ -1,7 +1,6 @@
 import type { Album, Artist, Genre, NavItem, Track } from "$lib/types/library";
 
 export const navItems: NavItem[] = [
-  { label: "Home", icon: "H" },
   { label: "Albums", icon: "A" },
   { label: "Artists", icon: "R" },
   { label: "Genres", icon: "G" },

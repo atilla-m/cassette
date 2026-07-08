@@ -662,6 +662,9 @@
   .player.compact button.play {
     width: 40px;
     height: 40px;
+    border-color: #2f8f83;
+    background: #2f8f83;
+    color: #07110f;
     box-shadow: 0 0 24px rgba(47, 143, 131, 0.16);
   }
 

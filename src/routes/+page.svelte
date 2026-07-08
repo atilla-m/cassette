@@ -330,7 +330,7 @@
   let repeatMode = $state<RepeatMode>("off");
   let isHandlingTrackEnd = $state(false);
   let mainElement: HTMLElement | undefined = $state();
-  let activeView = $state("Home");
+  let activeView = $state("Albums");
   let selectedAlbumId = $state<string | null>(null);
   let selectedArtistName = $state<string | null>(null);
   let selectedGenreName = $state<string | null>(null);
@@ -395,7 +395,7 @@
   let displayAlbums = $derived(!hasLoadedCache ? mockAlbums : buildAlbums(tracks));
   let displayArtists = $derived(!hasLoadedCache ? mockArtists : buildArtists(tracks));
   let displayGenres = $derived(!hasLoadedCache ? mockGenres : buildGenres(tracks));
-  let visibleNavItems = $derived(navItems.filter((item) => ENABLE_EXPERIMENTAL_VIDEOS || item.label !== "Videos"));
+  let visibleNavItems = $derived(navItems.filter((item) => item.label !== "Home" && (ENABLE_EXPERIMENTAL_VIDEOS || item.label !== "Videos")));
   let favoriteTracks = $derived(tracks.filter((track) => track.isFavorite));
   let availableFormats = $derived(availableTrackFormats(tracks));
   let sortedSongTracks = $derived(sortTracks(tracks, songSort, songSortDirection));
@@ -403,9 +403,6 @@
   let sortedAlbums = $derived(sortAlbums(displayAlbums, albumSort, albumSortDirection));
   let sortedArtists = $derived(sortArtists(displayArtists, artistSort, artistSortDirection));
   let sortedGenres = $derived(sortGenres(displayGenres, genreSort, genreSortDirection));
-  let homeTracks = $derived(tracks.slice(0, 8));
-  let recentlyPlayedTracks = $derived(recentlyPlayed(tracks).slice(0, 8));
-  let mostPlayedTracks = $derived(mostPlayed(tracks).slice(0, 8));
   let statsTopTracks = $derived(mostPlayed(tracks).slice(0, 10));
   let statsRecentlyPlayedTracks = $derived(recentlyPlayed(tracks).slice(0, 10));
   let statsTopArtists = $derived(buildTopArtistStats(tracks, displayArtists).slice(0, 8));
@@ -413,26 +410,8 @@
   let statsTopGenres = $derived(buildTopGenreStats(tracks, displayGenres).slice(0, 8));
   let statsTotalPlays = $derived(tracks.reduce((total, track) => total + track.playCount, 0));
   let statsRecentlyPlayedCount = $derived(tracks.filter((track) => track.lastPlayedAt !== null).length);
-  let homeAlbums = $derived(sortedAlbums.slice(0, 4));
-  let homeArtists = $derived(sortedArtists.slice(0, 4));
   let normalizedSearchQuery = $derived(normalizeSearch(searchQuery));
-  let searchTracks = $derived(
-    normalizedSearchQuery ? tracks.filter((track) => trackMatchesSearch(track, normalizedSearchQuery)) : [],
-  );
-  let searchAlbums = $derived(
-    normalizedSearchQuery ? displayAlbums.filter((album) => albumMatchesSearch(album, normalizedSearchQuery)) : [],
-  );
-  let searchArtists = $derived(
-    normalizedSearchQuery ? displayArtists.filter((artist) => artistMatchesSearch(artist, normalizedSearchQuery)) : [],
-  );
-  let searchGenres = $derived(
-    normalizedSearchQuery ? displayGenres.filter((genre) => genreMatchesSearch(genre, normalizedSearchQuery)) : [],
-  );
   let libraryTracksById = $derived(new Map(tracks.map((track) => [track.id, track])));
-  let isHomeSearchActive = $derived(activeView === "Home" && Boolean(normalizedSearchQuery));
-  let hasSearchResults = $derived(
-    searchTracks.length > 0 || searchAlbums.length > 0 || searchArtists.length > 0 || searchGenres.length > 0,
-  );
   let selectedAlbum = $derived(displayAlbums.find((album) => album.id === selectedAlbumId) ?? null);
   let selectedArtist = $derived(displayArtists.find((artist) => artist.name === selectedArtistName) ?? null);
   let selectedGenre = $derived(displayGenres.find((genre) => genre.name === selectedGenreName) ?? null);
@@ -592,8 +571,8 @@
   });
 
   $effect(() => {
-    if (!ENABLE_EXPERIMENTAL_VIDEOS && activeView === "Videos") {
-      activeView = "Home";
+    if (activeView === "Home" || (!ENABLE_EXPERIMENTAL_VIDEOS && activeView === "Videos")) {
+      activeView = "Albums";
       selectedVideoId = null;
       isEditingVideo = false;
     }
@@ -2496,13 +2475,12 @@
   }
 
   function handleNavigate(label: string) {
-    if (!ENABLE_EXPERIMENTAL_VIDEOS && label === "Videos") {
-      activeView = "Home";
-      return;
-    }
+    const targetView = label === "Home" || (!ENABLE_EXPERIMENTAL_VIDEOS && label === "Videos")
+      ? "Albums"
+      : label;
 
     void saveActiveVideoProgress(true);
-    activeView = label;
+    activeView = targetView;
     selectedAlbumId = null;
     selectedArtistName = null;
     selectedGenreName = null;
@@ -2513,7 +2491,7 @@
     isMixBuilderOpen = false;
     isLibraryHealthOpen = false;
     selectedPlaylistId = null;
-    selectedVideoId = label === "Videos" ? selectedVideoId : null;
+    selectedVideoId = targetView === "Videos" ? selectedVideoId : null;
     isEditingVideo = false;
     searchQuery = "";
     mainElement?.scrollTo({ top: 0 });
@@ -2534,7 +2512,9 @@
   }
 
   function handleCloseLyrics() {
-    activeView = lyricsReturnView && lyricsReturnView !== "Now Playing" ? lyricsReturnView : "Home";
+    activeView = lyricsReturnView && lyricsReturnView !== "Now Playing" && lyricsReturnView !== "Home"
+      ? lyricsReturnView
+      : "Albums";
     lyricsReturnView = null;
     isLyricsOptionsOpen = false;
     isLyricsPickerOpen = false;
@@ -2543,30 +2523,6 @@
 
   function toggleLyricsOptions() {
     isLyricsOptionsOpen = !isLyricsOptionsOpen;
-  }
-
-  function handleHomeSongsViewAll(sortKey: SongSortKey, direction: SortDirection) {
-    activeView = "Songs";
-    selectedAlbumId = null;
-    selectedArtistName = null;
-    selectedGenreName = null;
-    clearGenreEditState();
-    isLikedSongsOpen = false;
-    isMixBuilderOpen = false;
-    isLibraryHealthOpen = false;
-    selectedPlaylistId = null;
-    searchQuery = "";
-    songSort = sortKey;
-    songSortDirection = direction;
-    mainElement?.scrollTo({ top: 0 });
-  }
-
-  function handleHomeAlbumsViewAll() {
-    handleNavigate("Albums");
-  }
-
-  function handleHomeArtistsViewAll() {
-    handleNavigate("Artists");
   }
 
   function handleAlbumSelect(album: Album) {
@@ -4816,10 +4772,6 @@
   }
 
   function searchPlaceholder() {
-    if (activeView === "Home") {
-      return "Search songs, albums, artists...";
-    }
-
     if (activeView === "Songs") {
       return "Search songs...";
     }
@@ -4858,14 +4810,6 @@
   }
 
   function viewTitle() {
-    if (isHomeSearchActive) {
-      return "Search Results";
-    }
-
-    if (activeView === "Home") {
-      return "Your music, on this machine.";
-    }
-
     if (activeView === "Now Playing") {
       return currentTrack ? currentTrack.title : "Current Track";
     }
@@ -4874,10 +4818,6 @@
   }
 
   function viewEyebrow() {
-    if (isHomeSearchActive) {
-      return "Search";
-    }
-
     if (activeView === "Now Playing") {
       return "Lyrics";
     }
@@ -4886,11 +4826,6 @@
   }
 
   function viewStatus() {
-    if (isHomeSearchActive) {
-      const total = searchTracks.length + searchAlbums.length + searchArtists.length + searchGenres.length;
-      return `${total} ${total === 1 ? "match" : "matches"} for "${searchQuery.trim()}"`;
-    }
-
     if (isScanning) {
       return "Scanning your local music files...";
     }
@@ -5021,110 +4956,7 @@
         <div class="scan-error status-message" role="status">{playlistMessage}</div>
       {/if}
 
-      {#if isHomeSearchActive}
-        {#if hasSearchResults}
-          <LibrarySection title="Songs" viewAllLabel={`${searchTracks.length} ${searchTracks.length === 1 ? "match" : "matches"}`}>
-            {#if searchTracks.length === 0}
-              <div class="group-empty">
-                <h3>No songs matched</h3>
-                <p>Try a track title, artist, album, or file name.</p>
-              </div>
-            {:else}
-              <TrackList
-                tracks={searchTracks}
-                isScanning={false}
-                selectedTrackId={currentTrack?.id}
-                onTrackSelect={handleTrackSelect}
-                onTrackContextMenu={openTrackContextMenu}
-                onArtistSelect={handleTrackArtistSelect}
-                onAlbumSelect={handleTrackAlbumSelect}
-                onToggleFavorite={handleToggleFavorite}
-              />
-            {/if}
-          </LibrarySection>
-
-          <LibrarySection title="Albums" viewAllLabel={`${searchAlbums.length} ${searchAlbums.length === 1 ? "match" : "matches"}`}>
-            {#if searchAlbums.length === 0}
-              <div class="group-empty">
-                <h3>No albums matched</h3>
-                <p>Try an album title or artist name.</p>
-              </div>
-            {:else}
-              <div class="album-grid">
-                {#each searchAlbums as album}
-                  <button class="album-card" type="button" onclick={() => handleAlbumSelect(album)} oncontextmenu={(event) => openAlbumContextMenu(event, album)}>
-                    <div class="album-art" style={`--item-color: ${album.color}`} aria-hidden="true">
-                      {#if album.coverArtPath}
-                        <img
-                          src={localImageSource(album.coverArtPath) ?? ""}
-                          alt=""
-                          loading="lazy"
-                          onload={showLoadedImage}
-                          onerror={hideBrokenImage}
-                        />
-                      {/if}
-                      <span></span>
-                    </div>
-                    <h3>{album.title}</h3>
-                    <p>{albumDetail(album)}</p>
-                  </button>
-                {/each}
-              </div>
-            {/if}
-          </LibrarySection>
-
-          <LibrarySection title="Artists" viewAllLabel={`${searchArtists.length} ${searchArtists.length === 1 ? "match" : "matches"}`}>
-            {#if searchArtists.length === 0}
-              <div class="group-empty">
-                <h3>No artists matched</h3>
-                <p>Try a different artist name.</p>
-              </div>
-            {:else}
-              <div class="artist-grid">
-                {#each searchArtists as artist}
-                  <button class="artist-card" type="button" onclick={() => handleArtistSelect(artist)} oncontextmenu={(event) => openArtistContextMenu(event, artist)}>
-                    <div class="artist-avatar" style={`--item-color: ${artist.color}`} aria-hidden="true">
-                      {artist.name.slice(0, 1)}
-                    </div>
-                    <div>
-                      <h3>{artist.name}</h3>
-                      <p>{artistSongCount(artist)}</p>
-                    </div>
-                  </button>
-                {/each}
-              </div>
-            {/if}
-          </LibrarySection>
-
-          <LibrarySection title="Genres" viewAllLabel={`${searchGenres.length} ${searchGenres.length === 1 ? "match" : "matches"}`}>
-            {#if searchGenres.length === 0}
-              <div class="group-empty">
-                <h3>No genres matched</h3>
-                <p>Try a different genre name.</p>
-              </div>
-            {:else}
-              <div class="genre-grid">
-                {#each searchGenres as genre}
-                  <button class="genre-card" type="button" onclick={() => handleGenreSelect(genre)} oncontextmenu={(event) => openGenreContextMenu(event, genre)}>
-                    <div class="genre-mark" style={`--item-color: ${genre.color}`} aria-hidden="true">
-                      {genre.name.slice(0, 1)}
-                    </div>
-                    <div>
-                      <h3>{genre.name}</h3>
-                      <p>{genreDetail(genre)}</p>
-                    </div>
-                  </button>
-                {/each}
-              </div>
-            {/if}
-          </LibrarySection>
-        {:else}
-          <div class="group-empty">
-            <h3>No matches found</h3>
-            <p>Search looks at song titles, artists, albums, album artists, genres, and file names.</p>
-          </div>
-        {/if}
-      {:else if activeView === "Now Playing"}
+      {#if activeView === "Now Playing"}
         <section class="lyrics-view" aria-labelledby="lyrics-view-title">
           {#if currentTrack}
             <header class="lyrics-view-top">
@@ -5360,112 +5192,6 @@
             </div>
           {/if}
         </section>
-      {:else if activeView === "Home"}
-        <LibrarySection title="Recently Played" onViewAll={() => handleHomeSongsViewAll("recentlyPlayed", "desc")}>
-          {#if recentlyPlayedTracks.length === 0}
-            <div class="group-empty">
-              <h3>No playback history yet</h3>
-              <p>Played songs will appear here after they pass the listening threshold.</p>
-            </div>
-          {:else}
-            <TrackList
-              tracks={recentlyPlayedTracks}
-              {isScanning}
-              selectedTrackId={currentTrack?.id}
-              onTrackSelect={handleTrackSelect}
-              onTrackContextMenu={openTrackContextMenu}
-              onArtistSelect={handleTrackArtistSelect}
-              onAlbumSelect={handleTrackAlbumSelect}
-              onToggleFavorite={handleToggleFavorite}
-            />
-          {/if}
-        </LibrarySection>
-
-        <LibrarySection title="Most Played" onViewAll={() => handleHomeSongsViewAll("playCount", "desc")}>
-          {#if mostPlayedTracks.length === 0}
-            <div class="group-empty">
-              <h3>No play counts yet</h3>
-              <p>Play counts begin once a song reaches 30 seconds or half its duration.</p>
-            </div>
-          {:else}
-            <TrackList
-              tracks={mostPlayedTracks}
-              {isScanning}
-              selectedTrackId={currentTrack?.id}
-              onTrackSelect={handleTrackSelect}
-              onTrackContextMenu={openTrackContextMenu}
-              onArtistSelect={handleTrackArtistSelect}
-              onAlbumSelect={handleTrackAlbumSelect}
-              onToggleFavorite={handleToggleFavorite}
-            />
-          {/if}
-        </LibrarySection>
-
-        <LibrarySection title="Recently Added" onViewAll={() => handleHomeSongsViewAll("recentlyAdded", "desc")}>
-          <TrackList
-            tracks={homeTracks}
-            {isScanning}
-            selectedTrackId={currentTrack?.id}
-            onTrackSelect={handleTrackSelect}
-            onTrackContextMenu={openTrackContextMenu}
-            onArtistSelect={handleTrackArtistSelect}
-            onAlbumSelect={handleTrackAlbumSelect}
-            onToggleFavorite={handleToggleFavorite}
-          />
-        </LibrarySection>
-
-        <LibrarySection title="Albums" onViewAll={handleHomeAlbumsViewAll}>
-          {#if homeAlbums.length === 0}
-            <div class="group-empty">
-              <h3>No albums found</h3>
-              <p>Album tags were not found in the scanned tracks.</p>
-            </div>
-          {:else}
-            <div class="album-grid">
-              {#each homeAlbums as album}
-                <button class="album-card" type="button" onclick={() => handleAlbumSelect(album)} oncontextmenu={(event) => openAlbumContextMenu(event, album)}>
-                  <div class="album-art" style={`--item-color: ${album.color}`} aria-hidden="true">
-                    {#if album.coverArtPath}
-                      <img
-                        src={localImageSource(album.coverArtPath) ?? ""}
-                        alt=""
-                        loading="lazy"
-                        onload={showLoadedImage}
-                        onerror={hideBrokenImage}
-                      />
-                    {/if}
-                    <span></span>
-                  </div>
-                  <h3>{album.title}</h3>
-                  <p>{albumDetail(album)}</p>
-                </button>
-              {/each}
-            </div>
-          {/if}
-        </LibrarySection>
-
-        <LibrarySection title="Artists" onViewAll={handleHomeArtistsViewAll}>
-          {#if homeArtists.length === 0}
-            <div class="group-empty">
-              <h3>No artists found</h3>
-              <p>Artist tags were not found in the scanned tracks.</p>
-            </div>
-          {:else}
-            <div class="artist-grid">
-              {#each homeArtists as artist}
-                <button class="artist-card" type="button" onclick={() => handleArtistSelect(artist)} oncontextmenu={(event) => openArtistContextMenu(event, artist)}>
-                  <div class="artist-avatar" style={`--item-color: ${artist.color}`} aria-hidden="true">
-                    {artist.name.slice(0, 1)}
-                  </div>
-                  <div>
-                    <h3>{artist.name}</h3>
-                    <p>{artistSongCount(artist)}</p>
-                  </div>
-                </button>
-              {/each}
-            </div>
-          {/if}
-        </LibrarySection>
       {:else if activeView === "Stats"}
         <section class="stats-page" aria-label="Listening and library statistics">
           <div class="stats-overview-grid" aria-label="Library and listening overview">
