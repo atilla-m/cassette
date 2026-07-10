@@ -764,6 +764,13 @@
         return;
       }
 
+      if (event.key === "Escape" && isQueueOpen) {
+        event.preventDefault();
+        event.stopPropagation();
+        isQueueOpen = false;
+        return;
+      }
+
       if (shouldIgnoreShortcut(event.target)) {
         return;
       }
@@ -3645,7 +3652,15 @@
     isQueueOpen = !isQueueOpen;
   }
 
-  function handleClearQueue() {
+  function handleClearQueue(shouldConfirm = false) {
+    if (playbackQueue.length === 0) {
+      return;
+    }
+
+    if (shouldConfirm && !window.confirm("Clear the current Up Next queue? Playback will not delete any files.")) {
+      return;
+    }
+
     playbackQueue = [];
     currentQueueIndex = null;
     shuffledQueueOrder = [];
@@ -3662,6 +3677,36 @@
     if (confirmed) {
       handleClearQueue();
     }
+  }
+
+  function handleRemoveQueueTrack(event: MouseEvent, queueIndex: number) {
+    event.stopPropagation();
+
+    if (queueIndex < 0 || queueIndex >= playbackQueue.length || queueIndex === currentQueueIndex) {
+      return;
+    }
+
+    const previousLength = playbackQueue.length;
+    const nextQueue = playbackQueue.filter((_, index) => index !== queueIndex);
+
+    if (nextQueue.length === 0) {
+      playbackQueue = [];
+      currentQueueIndex = null;
+      shuffledQueueOrder = [];
+      return;
+    }
+
+    playbackQueue = nextQueue;
+
+    if (currentQueueIndex !== null && queueIndex < currentQueueIndex) {
+      currentQueueIndex -= 1;
+    }
+
+    shuffledQueueOrder = isShuffleEnabled
+      ? normalizedQueueOrder(shuffledQueueOrder, previousLength)
+          .filter((index) => index !== queueIndex)
+          .map((index) => index > queueIndex ? index - 1 : index)
+      : [];
   }
 
   async function playTrackSet(libraryTracks: Track[], shouldShuffle = false) {
@@ -7736,38 +7781,70 @@
   </div>
 
   {#if isQueueOpen}
+    <button class="queue-backdrop" type="button" aria-label="Close Up Next" onclick={() => isQueueOpen = false}></button>
     <aside class="queue-panel" aria-label="Up Next">
-      <div class="queue-panel-header">
-        <div>
+      <header class="queue-panel-header">
+        <div class="queue-panel-title">
           <p class="eyebrow">Playback</p>
-          <h3>Up Next</h3>
+          <div>
+            <h3>Up Next</h3>
+            <span>{queueLengthLabel}</span>
+          </div>
         </div>
-        <button type="button" disabled={playbackQueue.length === 0} onclick={handleClearQueue}>
-          Clear
-        </button>
-      </div>
+        <div class="queue-panel-actions">
+          <button class="secondary" type="button" disabled={playbackQueue.length === 0} onclick={() => handleClearQueue(true)}>
+            Clear
+          </button>
+          <button class="icon" type="button" aria-label="Close Up Next" onclick={() => isQueueOpen = false}>
+            X
+          </button>
+        </div>
+      </header>
 
       {#if queuePanelEntries.length === 0}
-        <div class="group-empty">
-          <h3>No queued songs</h3>
-          <p>Play a song from any list to build an Up Next queue.</p>
+        <div class="queue-empty-state">
+          <h3>Queue is empty</h3>
+          <p>Play an album, shuffle your library, or add tracks to queue.</p>
         </div>
       {:else}
         <div class="queue-list">
-          {#each queuePanelEntries as entry (entry.track.id)}
-            <button
+          {#each queuePanelEntries as entry (`${entry.track.id}-${entry.queueIndex}`)}
+            <div
               class:active={entry.queueIndex === currentQueueIndex}
               class="queue-row"
-              type="button"
               title={entry.track.filePath}
-              onclick={() => playQueuedTrackAtIndex(entry.queueIndex)}
             >
-              <span>{queuePositionLabel(entry.offset)}</span>
-              <div>
-                <p>{entry.track.title}</p>
-                <small>{entry.track.artist ?? "Unknown Artist"}</small>
-              </div>
-            </button>
+              <button class="queue-row-main" type="button" onclick={() => playQueuedTrackAtIndex(entry.queueIndex)}>
+                <span class="queue-row-position">{queuePositionLabel(entry.offset)}</span>
+                <span class="queue-row-art" aria-hidden="true">
+                  {#if entry.track.coverArtPath}
+                    <img src={localImageSource(entry.track.coverArtPath) ?? ""} alt="" loading="lazy" onload={showLoadedImage} onerror={hideBrokenImage} />
+                  {:else}
+                    <span>{entry.track.title.slice(0, 1)}</span>
+                  {/if}
+                </span>
+                <span class="queue-row-copy">
+                  <strong>{entry.track.title}</strong>
+                  <small>{entry.track.artist ?? "Unknown Artist"}</small>
+                  {#if entry.track.album}
+                    <small class="queue-row-album">{entry.track.album}</small>
+                  {/if}
+                </span>
+              </button>
+              <span class="queue-row-side">
+                <span class="queue-row-duration">{formatPlaybackTime(entry.track.durationSeconds)}</span>
+                {#if entry.queueIndex !== currentQueueIndex}
+                  <span class="queue-row-actions">
+                    <button type="button" onclick={() => playQueuedTrackAtIndex(entry.queueIndex)}>Play</button>
+                    <button type="button" aria-label={`Remove ${entry.track.title} from queue`} onclick={(event) => handleRemoveQueueTrack(event, entry.queueIndex)}>
+                      Remove
+                    </button>
+                  </span>
+                {:else}
+                  <span class="queue-current-label">Now Playing</span>
+                {/if}
+              </span>
+            </div>
           {/each}
         </div>
       {/if}
@@ -12516,21 +12593,34 @@
     font-size: 0.82rem;
   }
 
+  .queue-backdrop {
+    position: fixed;
+    inset: 0 0 86px;
+    z-index: 3;
+    border: 0;
+    background: transparent;
+    cursor: default;
+  }
+
   .queue-panel {
     position: fixed;
-    right: 24px;
+    right: 22px;
     bottom: 104px;
     z-index: 4;
     display: grid;
     grid-template-rows: auto minmax(0, 1fr);
     gap: 14px;
-    width: min(420px, calc(100vw - 32px));
-    max-height: min(520px, calc(100dvh - 136px));
+    width: min(480px, calc(100vw - 32px));
+    max-height: min(620px, calc(100dvh - 136px));
     overflow: hidden;
-    border: 1px solid var(--border);
+    border: 1px solid color-mix(in srgb, var(--border-strong) 86%, transparent);
     border-radius: 8px;
-    background: var(--panel);
-    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.34);
+    background:
+      linear-gradient(180deg, color-mix(in srgb, var(--panel-strong) 78%, transparent), color-mix(in srgb, var(--panel) 96%, transparent)),
+      var(--panel);
+    box-shadow:
+      0 28px 76px rgba(0, 0, 0, 0.42),
+      inset 0 1px 0 rgba(255, 255, 255, 0.04);
     padding: 16px;
   }
 
@@ -12539,35 +12629,78 @@
     align-items: flex-start;
     justify-content: space-between;
     gap: 14px;
+    padding-bottom: 4px;
+  }
+
+  .queue-panel-title {
+    display: grid;
+    gap: 6px;
+    min-width: 0;
+  }
+
+  .queue-panel-title > div {
+    display: flex;
+    align-items: baseline;
+    gap: 9px;
+    min-width: 0;
   }
 
   .queue-panel-header h3 {
-    font-size: 1.1rem;
+    font-size: 1.2rem;
   }
 
-  .queue-panel-header button {
-    min-height: 34px;
+  .queue-panel-title span,
+  .queue-current-label {
+    color: var(--text-muted);
+    font-size: 0.8rem;
+    font-weight: 800;
+    white-space: nowrap;
+  }
+
+  .queue-panel-actions,
+  .queue-row-actions {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+  }
+
+  .queue-panel-actions button,
+  .queue-row-actions button {
+    min-height: 32px;
     border: 1px solid var(--border-strong);
-    border-radius: 8px;
-    background: var(--panel-strong);
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--panel-strong) 82%, transparent);
     color: var(--text);
     cursor: default;
     font: inherit;
-    font-size: 0.82rem;
+    font-size: 0.78rem;
     font-weight: 850;
-    padding: 0 11px;
+    padding: 0 10px;
   }
 
-  .queue-panel-header button:hover,
-  .queue-panel-header button:focus-visible {
-    border-color: var(--accent-strong);
-    background: var(--panel-hover);
+  .queue-panel-actions button.icon {
+    width: 32px;
+    padding: 0;
+  }
+
+  .queue-panel-actions button:hover:not(:disabled),
+  .queue-panel-actions button:focus-visible:not(:disabled),
+  .queue-row-actions button:hover,
+  .queue-row-actions button:focus-visible {
+    border-color: var(--accent);
+    background: color-mix(in srgb, var(--accent-soft) 84%, var(--panel-hover));
+    color: var(--accent-text);
     outline: none;
   }
 
-  .queue-panel-header button:disabled {
-    color: var(--text-dim);
+  .queue-panel-actions button.secondary {
+    color: var(--text-muted);
+  }
+
+  .queue-panel-actions button:disabled {
+    border-color: var(--border);
     background: var(--panel-soft);
+    color: var(--text-dim);
   }
 
   .queue-list {
@@ -12577,34 +12710,111 @@
     min-height: 0;
     overflow-y: auto;
     overscroll-behavior: contain;
-    padding-right: 2px;
+    padding: 1px 3px 1px 1px;
+    scrollbar-color: transparent transparent;
+    scrollbar-gutter: stable;
+    scrollbar-width: thin;
+  }
+
+  .queue-list::-webkit-scrollbar {
+    width: 6px;
+  }
+
+  .queue-list::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .queue-list::-webkit-scrollbar-thumb {
+    border: 2px solid transparent;
+    border-radius: 999px;
+    background-clip: content-box;
+    background-color: transparent;
+  }
+
+  .queue-list:hover,
+  .queue-list:focus-within {
+    scrollbar-color: color-mix(in srgb, var(--text-muted) 18%, transparent) transparent;
+  }
+
+  .queue-list:hover::-webkit-scrollbar-thumb,
+  .queue-list:focus-within::-webkit-scrollbar-thumb {
+    background-color: color-mix(in srgb, var(--text-muted) 18%, transparent);
+  }
+
+  .queue-empty-state {
+    display: grid;
+    align-content: center;
+    min-height: 210px;
+    border: 1px dashed var(--border-strong);
+    border-radius: 8px;
+    background:
+      radial-gradient(circle at 50% 0%, color-mix(in srgb, var(--accent) 10%, transparent), transparent 54%),
+      color-mix(in srgb, var(--panel-soft) 86%, transparent);
+    padding: 24px;
+    text-align: center;
+  }
+
+  .queue-empty-state h3,
+  .queue-empty-state p {
+    margin: 0;
+  }
+
+  .queue-empty-state p {
+    margin-top: 7px;
+    color: var(--text-soft);
+    font-size: 0.9rem;
+    font-weight: 650;
+    line-height: 1.4;
   }
 
   .queue-row {
+    position: relative;
     display: grid;
-    grid-template-columns: 44px minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1fr) auto;
     align-items: center;
     gap: 10px;
-    min-height: 54px;
-    border: 1px solid var(--border);
+    min-height: 70px;
+    overflow: hidden;
+    border: 1px solid color-mix(in srgb, var(--border) 86%, transparent);
     border-radius: 8px;
-    background: var(--panel-soft);
-    color: inherit;
-    cursor: default;
-    font: inherit;
-    padding: 9px 10px;
-    text-align: left;
+    background: color-mix(in srgb, var(--panel-soft) 88%, transparent);
+    transition:
+      border-color 150ms ease,
+      background 150ms ease;
   }
 
   .queue-row:hover,
-  .queue-row:focus-visible,
+  .queue-row:focus-within,
   .queue-row.active {
     border-color: var(--accent-strong);
-    background: var(--panel-hover);
+    background: color-mix(in srgb, var(--panel-hover) 88%, transparent);
+  }
+
+  .queue-row.active {
+    box-shadow: inset 3px 0 0 var(--accent);
+  }
+
+  .queue-row-main {
+    display: grid;
+    grid-template-columns: 42px 46px minmax(0, 1fr);
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+    min-height: 68px;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    cursor: default;
+    font: inherit;
+    padding: 9px 0 9px 10px;
+    text-align: left;
+  }
+
+  .queue-row-main:focus-visible {
     outline: none;
   }
 
-  .queue-row > span {
+  .queue-row-position {
     display: grid;
     min-height: 30px;
     place-items: center;
@@ -12612,38 +12822,117 @@
     background: var(--panel-hover);
     color: var(--text-soft);
     font-size: 0.76rem;
-    font-weight: 900;
+    font-weight: 950;
   }
 
-  .queue-row.active > span {
+  .queue-row.active .queue-row-position {
     background: var(--accent-soft);
     color: var(--accent-text);
   }
 
-  .queue-row div {
+  .queue-row-art {
+    display: grid;
+    width: 46px;
+    height: 46px;
+    overflow: hidden;
+    place-items: center;
+    border-radius: 8px;
+    background:
+      radial-gradient(circle at 30% 18%, rgba(255, 255, 255, 0.22), transparent 32%),
+      linear-gradient(145deg, color-mix(in srgb, var(--accent) 42%, var(--panel)), var(--panel-strong));
+    color: var(--accent-text);
+    font-size: 1rem;
+    font-weight: 950;
+  }
+
+  .queue-row-art img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+
+  .queue-row-copy {
+    display: grid;
+    gap: 2px;
     min-width: 0;
   }
 
-  .queue-row p,
-  .queue-row small {
-    display: block;
+  .queue-row-copy strong,
+  .queue-row-copy small,
+  .queue-row-duration,
+  .queue-current-label {
     overflow: hidden;
-    margin: 0;
     text-overflow: ellipsis;
+  }
+
+  .queue-row-copy strong,
+  .queue-row-copy small {
     white-space: nowrap;
   }
 
-  .queue-row p {
+  .queue-row-copy strong {
     color: var(--text);
-    font-size: 0.92rem;
-    font-weight: 750;
+    font-size: 0.94rem;
+    font-weight: 850;
+    line-height: 1.2;
   }
 
-  .queue-row small {
-    margin-top: 2px;
+  .queue-row-copy small {
     color: var(--text-soft);
     font-size: 0.8rem;
-    font-weight: 650;
+    font-weight: 680;
+    line-height: 1.25;
+  }
+
+  .queue-row-copy .queue-row-album {
+    color: var(--text-muted);
+    font-size: 0.76rem;
+  }
+
+  .queue-row-side {
+    display: grid;
+    justify-items: end;
+    gap: 7px;
+    min-width: 88px;
+    padding: 9px 10px 9px 0;
+  }
+
+  .queue-row-duration {
+    max-width: 84px;
+    color: var(--text-muted);
+    font-size: 0.78rem;
+    font-weight: 800;
+    white-space: nowrap;
+  }
+
+  .queue-row-actions {
+    opacity: 0;
+    pointer-events: none;
+    transform: translateY(2px);
+    transition:
+      opacity 140ms ease,
+      transform 140ms ease;
+  }
+
+  .queue-row:hover .queue-row-actions,
+  .queue-row:focus-within .queue-row-actions {
+    opacity: 1;
+    pointer-events: auto;
+    transform: translateY(0);
+  }
+
+  .queue-row-actions button {
+    min-height: 28px;
+    font-size: 0.74rem;
+    padding: 0 9px;
+  }
+
+  @media (hover: none) {
+    .queue-row-actions {
+      opacity: 1;
+      pointer-events: auto;
+      transform: none;
+    }
   }
 
   @media (min-width: 900px) {
@@ -12960,6 +13249,22 @@
       max-height: calc(100dvh - 178px);
     }
 
+    .queue-row {
+      grid-template-columns: minmax(0, 1fr);
+    }
+
+    .queue-row-side {
+      grid-template-columns: auto 1fr;
+      justify-items: start;
+      padding: 0 10px 10px 108px;
+    }
+
+    .queue-row-actions {
+      opacity: 1;
+      pointer-events: auto;
+      transform: none;
+    }
+
     .shortcuts-backdrop,
     .confirmation-backdrop {
       align-items: start;
@@ -13020,6 +13325,20 @@
     .home.playlist-detail-view {
       --player-height: 146px;
       --content-bottom-padding: 24px;
+    }
+
+    .queue-backdrop {
+      bottom: 146px;
+    }
+
+    .queue-row-main {
+      grid-template-columns: 38px 44px minmax(0, 1fr);
+      gap: 8px;
+      padding-right: 10px;
+    }
+
+    .queue-row-side {
+      padding-left: 100px;
     }
 
     .home.albums-landing-view .home-header-actions {
