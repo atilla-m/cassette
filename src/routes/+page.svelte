@@ -6561,14 +6561,16 @@
             </LibrarySection>
 
             <LibrarySection title="Mixes / Tools" viewAllLabel={`${tracks.length} available`}>
-              <button class="mix-tool-card" type="button" onclick={handleMixBuilderSelect}>
-                <div class="mix-mark" aria-hidden="true">M</div>
-                <div>
-                  <p class="eyebrow">Mix Builder</p>
-                  <h3>Build a Mix</h3>
-                  <p>Build a local queue from genres, artists, albums, formats, and liked songs.</p>
-                </div>
-              </button>
+              <div class="playlist-card-grid tools">
+                <button class="mix-tool-card" type="button" onclick={handleMixBuilderSelect}>
+                  <div class="mix-mark" aria-hidden="true">M</div>
+                  <div>
+                    <p class="eyebrow">Mix Builder</p>
+                    <h3>Build a Mix</h3>
+                    <p>Build a local queue from genres, artists, albums, formats, and liked songs.</p>
+                  </div>
+                </button>
+              </div>
             </LibrarySection>
 
             <LibrarySection
@@ -8835,12 +8837,31 @@
     gap: 20px;
   }
 
+  .playlists-page {
+    gap: 16px;
+  }
+
   .playlists-page :global(.library-section) {
     width: 100%;
+    gap: 12px;
+  }
+
+  .playlists-page :global(.library-section + .library-section) {
+    margin-top: 0;
+  }
+
+  .playlists-page :global(.section-header) {
+    align-items: center;
+    justify-content: flex-start;
+  }
+
+  .home.playlists-view > .scan-error,
+  .playlists-page > .scan-error {
+    max-width: 720px;
   }
 
   .home.playlists-view {
-    --content-bottom-padding: 36px;
+    --content-bottom-padding: 28px;
   }
 
   .home.playlist-detail-view {
@@ -8850,13 +8871,16 @@
 
   .playlist-card-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 360px));
-    gap: 12px;
-    justify-content: center;
+    width: 100%;
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 260px), 1fr));
+    align-items: stretch;
+    justify-items: stretch;
+    gap: 16px;
   }
 
-  .playlist-card-grid.smart {
-    grid-template-columns: minmax(min(100%, 340px), 430px);
+  .playlist-card-grid.smart,
+  .playlist-card-grid.tools {
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 260px), 1fr));
   }
 
   .playlist-library-card {
@@ -9077,9 +9101,9 @@
     grid-template-columns: 58px minmax(0, 1fr);
     align-items: center;
     gap: 14px;
-    justify-self: center;
-    width: min(100%, 640px);
-    min-height: 96px;
+    width: 100%;
+    min-width: 0;
+    min-height: 106px;
     border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--border));
     border-radius: 8px;
     background:
@@ -9106,6 +9130,8 @@
     grid-template-columns: minmax(160px, 0.8fr) minmax(220px, 1fr) auto;
     gap: 10px;
     align-items: center;
+    justify-self: start;
+    width: min(100%, 820px);
     border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--border));
     border-radius: 8px;
     background: color-mix(in srgb, var(--panel-soft) 84%, transparent);
@@ -12620,6 +12646,12 @@
     font-weight: 650;
   }
 
+  @media (min-width: 900px) {
+    .playlist-card-grid.tools .mix-tool-card {
+      grid-column: span 2;
+    }
+  }
+
   @media (max-width: 1020px) {
     .artist-grid,
     .genre-grid,
@@ -12628,7 +12660,7 @@
     }
 
     .playlist-card-grid {
-      grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 360px));
+      grid-template-columns: repeat(auto-fill, minmax(min(100%, 260px), 1fr));
     }
 
     .videos-toolbar,
@@ -12718,7 +12750,7 @@
     }
 
     .home.playlists-view {
-      --content-bottom-padding: 36px;
+      --content-bottom-padding: 28px;
     }
 
     .home.playlist-detail-view {
