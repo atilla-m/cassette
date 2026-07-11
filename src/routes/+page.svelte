@@ -65,6 +65,18 @@
   import { buildAlbums, buildArtists, buildGenres } from "$lib/data/libraryViews";
   import { albums as mockAlbums, artists as mockArtists, genres as mockGenres, navItems } from "$lib/data/mockLibrary";
   import { ENABLE_EXPERIMENTAL_VIDEOS } from "$lib/featureFlags";
+  import {
+    TRACK_CHANGE_NOTIFICATIONS_SETTING_KEY,
+    checkTrackNotificationPermission,
+    isLinuxNotificationDebugAvailable,
+    notifyTrackChange,
+    notifyTrackNotificationTest,
+    requestTrackNotificationPermissionOnce,
+    sendLinuxDebugNotification,
+    trackNotificationKey,
+    type TrackNotificationResult,
+    type TrackNotificationPermissionState,
+  } from "$lib/utils/trackNotifications";
   import type {
     Album,
     Artist,
@@ -436,6 +448,12 @@
   let contextMenu = $state<ContextMenuState | null>(null);
   let currentLyrics = $state<TrackLyrics | null>(null);
   let autoFindLyricsEnabled = $state(true);
+  let trackChangeNotificationsEnabled = $state(false);
+  let trackNotificationPermission = $state<TrackNotificationPermissionState | null>(null);
+  let trackNotificationStatusMessage = $state<string | null>(null);
+  let isTestingTrackNotification = $state(false);
+  let canDebugLinuxNotifications = $state(false);
+  let isSendingLinuxDebugNotification = $state(false);
   let selectedTheme = $state<ThemeId>("cassette-teal");
   let isLoadingLyrics = $state(false);
   let isAutoFindingLyrics = $state(false);
@@ -586,6 +604,7 @@
   );
   let hadSearchQuery = false;
   let lyricsRequestId = 0;
+  let lastNotifiedTrackKey: string | null = null;
 
   $effect(() => {
     const hasSearchQuery = normalizedSearchQuery.length > 0;
@@ -641,6 +660,130 @@
     window.localStorage.setItem(THEME_SETTING_KEY, theme);
   }
 
+  async function handleTrackChangeNotificationSettingChange(event: Event) {
+    const nextEnabled = event.currentTarget instanceof HTMLInputElement ? event.currentTarget.checked : false;
+
+    if (!nextEnabled) {
+      trackChangeNotificationsEnabled = false;
+      trackNotificationPermission = null;
+      trackNotificationStatusMessage = null;
+      window.localStorage.setItem(TRACK_CHANGE_NOTIFICATIONS_SETTING_KEY, "off");
+      return;
+    }
+
+    lastNotifiedTrackKey = trackNotificationKey(currentTrack);
+    trackChangeNotificationsEnabled = true;
+    window.localStorage.setItem(TRACK_CHANGE_NOTIFICATIONS_SETTING_KEY, "on");
+    trackNotificationPermission = await requestTrackNotificationPermissionOnce();
+    trackNotificationStatusMessage = notificationPermissionMessage(trackNotificationPermission);
+  }
+
+  async function handleTestTrackNotification() {
+    if (!trackChangeNotificationsEnabled || isTestingTrackNotification) {
+      return;
+    }
+
+    isTestingTrackNotification = true;
+    try {
+      const result = await notifyTrackNotificationTest();
+      trackNotificationPermission = result.permission;
+      trackNotificationStatusMessage = notificationResultMessage(result, "test");
+    } finally {
+      isTestingTrackNotification = false;
+    }
+  }
+
+  async function handleDebugLinuxNotification() {
+    if (!canDebugLinuxNotifications || !trackChangeNotificationsEnabled || isSendingLinuxDebugNotification) {
+      return;
+    }
+
+    isSendingLinuxDebugNotification = true;
+    try {
+      const result = await sendLinuxDebugNotification();
+      trackNotificationStatusMessage = result.message;
+    } finally {
+      isSendingLinuxDebugNotification = false;
+    }
+  }
+
+  function maybeNotifyTrackChange(track: Track, status: PlaybackStatus) {
+    const notificationKey = trackNotificationKey(track);
+
+    if (!trackChangeNotificationsEnabled || !status.isPlaying || !notificationKey) {
+      return;
+    }
+
+    if (lastNotifiedTrackKey === notificationKey) {
+      return;
+    }
+
+    lastNotifiedTrackKey = notificationKey;
+    void notifyTrackChange(track).then((result) => {
+      trackNotificationPermission = result.permission;
+      if (result.ok) {
+        trackNotificationPermission = "granted";
+        trackNotificationStatusMessage = null;
+      } else {
+        trackNotificationStatusMessage = notificationResultMessage(result, "track");
+      }
+    });
+  }
+
+  function notificationPermissionMessage(permission: TrackNotificationPermissionState | null) {
+    if (permission === "granted") {
+      return "Notifications are enabled.";
+    }
+
+    if (permission === "default") {
+      return "Notification permission has not been granted.";
+    }
+
+    if (permission === "denied") {
+      return "Notification permission was denied.";
+    }
+
+    if (permission === "unavailable") {
+      return "Notifications are blocked by the system.";
+    }
+
+    return null;
+  }
+
+  function notificationResultMessage(result: TrackNotificationResult, source: "test" | "track") {
+    if (source === "test") {
+      const diagnostics = result.diagnostics.join(" · ");
+
+      if (result.ok) {
+        return `${diagnostics} · Notification request sent. If nothing appeared, check OS notification settings or use Debug Linux Notification.`;
+      }
+
+      return diagnostics || (
+        result.errorMessage
+          ? `Notification test failed: ${result.errorMessage}`
+          : "Notification test failed. Check desktop notification settings."
+      );
+    }
+
+    if (result.ok) {
+      return null;
+    }
+
+    if (result.code === "permission-default") {
+      return "Notification permission has not been granted.";
+    }
+
+    if (result.code === "permission-denied") {
+      return "Notification permission was denied.";
+    }
+
+    if (result.code === "permission-unavailable") {
+      return "Notifications are blocked by the system.";
+    }
+
+    return "Track notification failed. Check desktop notification settings.";
+  }
+
   $effect(() => {
     void loadCurrentTrackLyrics(currentTrack?.filePath ?? null);
   });
@@ -676,6 +819,14 @@
       window.localStorage.setItem(THEME_SETTING_KEY, selectedTheme);
     }
     autoFindLyricsEnabled = window.localStorage.getItem(AUTO_LYRICS_SETTING_KEY) !== "off";
+    canDebugLinuxNotifications = isLinuxNotificationDebugAvailable();
+    trackChangeNotificationsEnabled = window.localStorage.getItem(TRACK_CHANGE_NOTIFICATIONS_SETTING_KEY) === "on";
+    if (trackChangeNotificationsEnabled) {
+      void checkTrackNotificationPermission().then((permission) => {
+        trackNotificationPermission = permission;
+        trackNotificationStatusMessage = notificationPermissionMessage(permission);
+      });
+    }
     void loadLibraryCache();
     if (ENABLE_EXPERIMENTAL_VIDEOS) {
       void loadVideoLibrary();
@@ -3373,6 +3524,7 @@
       const status = await playTrack(track.filePath);
       applyPlaybackStatus(status);
       durationSeconds = status.durationSeconds ?? track.durationSeconds;
+      maybeNotifyTrackChange(track, status);
     } catch (error) {
       playbackError = error instanceof Error ? error.message : String(error);
     }
@@ -7644,6 +7796,33 @@
                 </div>
               </div>
 
+              <div class="settings-control-list">
+                <div class="settings-notification-control">
+                  <label class="settings-toggle-row">
+                    <span>Track change notifications</span>
+                    <input
+                      type="checkbox"
+                      checked={trackChangeNotificationsEnabled}
+                      onchange={handleTrackChangeNotificationSettingChange}
+                    />
+                    <strong>{trackChangeNotificationsEnabled ? "On" : "Off"}</strong>
+                  </label>
+                  <div class="settings-notification-actions">
+                    <button type="button" disabled={!trackChangeNotificationsEnabled || isTestingTrackNotification} onclick={() => void handleTestTrackNotification()}>
+                      {isTestingTrackNotification ? "Testing..." : "Test Notification"}
+                    </button>
+                    {#if canDebugLinuxNotifications}
+                      <button type="button" disabled={!trackChangeNotificationsEnabled || isSendingLinuxDebugNotification} onclick={() => void handleDebugLinuxNotification()}>
+                        {isSendingLinuxDebugNotification ? "Debugging..." : "Debug Linux Notification"}
+                      </button>
+                    {/if}
+                  </div>
+                  {#if trackNotificationStatusMessage}
+                    <small>{trackNotificationStatusMessage}</small>
+                  {/if}
+                </div>
+              </div>
+
               <div class="settings-actions">
                 <button type="button" disabled={playbackQueue.length === 0} onclick={handleSettingsClearQueue}>
                   Clear Queue
@@ -11759,6 +11938,17 @@
     accent-color: var(--accent);
   }
 
+  .settings-notification-control {
+    display: grid;
+    gap: 10px;
+  }
+
+  .settings-notification-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+
   .theme-preset-grid {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(164px, 1fr));
@@ -11833,6 +12023,7 @@
   }
 
   .settings-actions button,
+  .settings-notification-actions button,
   .cd-rip-actions button,
   .settings-tool-grid button {
     min-height: 40px;
@@ -11846,7 +12037,8 @@
     font-weight: 850;
   }
 
-  .settings-actions button {
+  .settings-actions button,
+  .settings-notification-actions button {
     padding: 0 13px;
   }
 
@@ -11856,6 +12048,8 @@
 
   .settings-actions button:hover:not(:disabled),
   .settings-actions button:focus-visible:not(:disabled),
+  .settings-notification-actions button:hover:not(:disabled),
+  .settings-notification-actions button:focus-visible:not(:disabled),
   .cd-rip-actions button:hover:not(:disabled),
   .cd-rip-actions button:focus-visible:not(:disabled),
   .settings-tool-grid button:hover,
@@ -11883,6 +12077,7 @@
   }
 
   .settings-actions button:disabled,
+  .settings-notification-actions button:disabled,
   .cd-rip-actions button:disabled {
     border-color: var(--border);
     background: var(--bg-soft);

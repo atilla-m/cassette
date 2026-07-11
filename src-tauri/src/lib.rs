@@ -4061,6 +4061,40 @@ impl LibraryDatabase {
 }
 
 #[tauri::command]
+#[cfg(target_os = "linux")]
+fn send_linux_test_notification() -> Result<(), String> {
+    let status = Command::new("notify-send")
+        .arg("Cassette")
+        .arg("Notifications are working.")
+        .status()
+        .map_err(|error| {
+            if error.kind() == io::ErrorKind::NotFound {
+                "notify-send is not installed or is not in PATH.".to_owned()
+            } else {
+                format!("Could not run notify-send: {error}")
+            }
+        })?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "notify-send exited with status {}.",
+            status
+                .code()
+                .map(|code| code.to_string())
+                .unwrap_or_else(|| "unknown".to_owned())
+        ))
+    }
+}
+
+#[tauri::command]
+#[cfg(not(target_os = "linux"))]
+fn send_linux_test_notification() -> Result<(), String> {
+    Err("Linux notification debug is only available on Linux.".to_owned())
+}
+
+#[tauri::command]
 fn play_track(
     file_path: String,
     playback: State<'_, Mutex<PlaybackState>>,
@@ -6491,6 +6525,7 @@ pub fn run() {
             }
         })
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             get_library_cache,
@@ -6540,7 +6575,8 @@ pub fn run() {
             resume_playback,
             get_playback_status,
             seek_playback,
-            set_playback_volume
+            set_playback_volume,
+            send_linux_test_notification
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
