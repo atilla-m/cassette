@@ -95,6 +95,7 @@
     VideoPlaybackStatus,
     VideoType,
   } from "$lib/types/library";
+  import { sendLinuxNotification } from "$lib/utils/linuxNotifications";
   import { localImageSource } from "$lib/utils/localImage";
   import { listen } from "@tauri-apps/api/event";
   import { openPath } from "@tauri-apps/plugin-opener";
@@ -217,7 +218,16 @@
   const mixFormatOptions = ["All", "FLAC", "MP3", "OGG", "OPUS", "WAV", "M4A"];
   const AUTO_LYRICS_COOLDOWN_MS = 7 * 24 * 60 * 60 * 1000;
   const AUTO_LYRICS_SETTING_KEY = "cassette:auto-find-lyrics";
+  const TRACK_NOTIFICATIONS_SETTING_KEY = "cassette:track-change-notifications";
   const THEME_SETTING_KEY = "cassette:theme";
+  const DEFAULT_THEME: ThemeId = "cassette-teal";
+  const VALID_THEME_IDS: readonly ThemeId[] = [
+    "cassette-teal",
+    "rose-noir",
+    "royal-gold",
+    "glacier",
+    "obsidian",
+  ];
   const themePresets: ThemePreset[] = [
     {
       id: "cassette-teal",
@@ -386,6 +396,12 @@
   let shuffledQueueOrder = $state<number[]>([]);
   let repeatMode = $state<RepeatMode>("off");
   let isHandlingTrackEnd = $state(false);
+  let trackNotificationsEnabled = $state(false);
+  let trackNotificationStatus = $state<string | null>(null);
+  let trackNotificationStatusIsError = $state(false);
+  let lastNotifiedTrackKey: string | null = null;
+  let lastNotifiedPlaybackStartId: number | null = null;
+  let playbackStartId = 0;
   let mainElement: HTMLElement | undefined = $state();
   let activeView = $state("Albums");
   let selectedAlbumId = $state<string | null>(null);
@@ -436,7 +452,7 @@
   let contextMenu = $state<ContextMenuState | null>(null);
   let currentLyrics = $state<TrackLyrics | null>(null);
   let autoFindLyricsEnabled = $state(true);
-  let selectedTheme = $state<ThemeId>("cassette-teal");
+  let selectedTheme = $state<ThemeId>(DEFAULT_THEME);
   let isLoadingLyrics = $state(false);
   let isAutoFindingLyrics = $state(false);
   let isSavingLyricsSelection = $state(false);
@@ -618,15 +634,11 @@
   });
 
   function isThemeId(value: string | null): value is ThemeId {
-    return themePresets.some((theme) => theme.id === value);
+    return VALID_THEME_IDS.some((themeId) => themeId === value);
   }
 
   function savedThemeOrDefault(value: string | null): ThemeId {
-    if (value === "amber") {
-      return "obsidian";
-    }
-
-    return isThemeId(value) ? value : "cassette-teal";
+    return isThemeId(value) ? value : DEFAULT_THEME;
   }
 
   function applyTheme(theme: ThemeId) {
@@ -676,6 +688,7 @@
       window.localStorage.setItem(THEME_SETTING_KEY, selectedTheme);
     }
     autoFindLyricsEnabled = window.localStorage.getItem(AUTO_LYRICS_SETTING_KEY) !== "off";
+    trackNotificationsEnabled = window.localStorage.getItem(TRACK_NOTIFICATIONS_SETTING_KEY) === "on";
     void loadLibraryCache();
     if (ENABLE_EXPERIMENTAL_VIDEOS) {
       void loadVideoLibrary();
@@ -1040,6 +1053,36 @@
       ? event.currentTarget.checked
       : autoFindLyricsEnabled;
     window.localStorage.setItem(AUTO_LYRICS_SETTING_KEY, autoFindLyricsEnabled ? "on" : "off");
+  }
+
+  function handleTrackNotificationsSettingChange(event: Event) {
+    trackNotificationsEnabled = event.currentTarget instanceof HTMLInputElement
+      ? event.currentTarget.checked
+      : trackNotificationsEnabled;
+    trackNotificationStatus = null;
+    trackNotificationStatusIsError = false;
+    window.localStorage.setItem(TRACK_NOTIFICATIONS_SETTING_KEY, trackNotificationsEnabled ? "on" : "off");
+  }
+
+  async function handleTestTrackNotification() {
+    if (!trackNotificationsEnabled) {
+      return;
+    }
+
+    trackNotificationStatus = null;
+    trackNotificationStatusIsError = false;
+
+    const result = await sendLinuxNotification("Cassette", "Notifications are working.");
+
+    if (result.ok) {
+      trackNotificationStatus = "Notification sent.";
+      return;
+    }
+
+    trackNotificationStatusIsError = true;
+    trackNotificationStatus = result.unavailable
+      ? "notify-send is unavailable."
+      : `Notification failed: ${safeNotificationError(result.error)}`;
   }
 
   async function handleSelectLyricsResult(result: LrclibLyricsResult) {
@@ -3368,14 +3411,54 @@
     hasCurrentTrackEnded = false;
     isHandlingTrackEnd = false;
     resetPlaybackListenSession(track);
+    const currentPlaybackStartId = playbackStartId + 1;
+    playbackStartId = currentPlaybackStartId;
 
     try {
       const status = await playTrack(track.filePath);
       applyPlaybackStatus(status);
       durationSeconds = status.durationSeconds ?? track.durationSeconds;
+      await notifyTrackPlaybackStarted(track, currentPlaybackStartId);
     } catch (error) {
       playbackError = error instanceof Error ? error.message : String(error);
     }
+  }
+
+  async function notifyTrackPlaybackStarted(track: Track, currentPlaybackStartId: number) {
+    if (!trackNotificationsEnabled) {
+      return;
+    }
+
+    const trackKey = trackNotificationKey(track);
+
+    if (lastNotifiedTrackKey === trackKey && lastNotifiedPlaybackStartId === currentPlaybackStartId) {
+      return;
+    }
+
+    lastNotifiedTrackKey = trackKey;
+    lastNotifiedPlaybackStartId = currentPlaybackStartId;
+    const result = await sendLinuxNotification(track.title, trackNotificationBody(track));
+
+    if (!result.ok) {
+      console.warn("Track notification failed:", safeNotificationError(result.error));
+    }
+  }
+
+  function trackNotificationKey(track: Track) {
+    return track.id || track.filePath;
+  }
+
+  function trackNotificationBody(track: Track) {
+    const artist = track.artist ?? track.albumArtist ?? "Unknown Artist";
+    const album = track.album ?? "Unknown Album";
+
+    return `${artist} · ${album}`;
+  }
+
+  function safeNotificationError(error: string) {
+    const normalized = error.replace(/[\r\n]+/g, " ").trim();
+
+    return normalized || "Unknown error";
   }
 
   async function handlePlaybackStatusUpdate(status: PlaybackStatus, source: "status" | "duration") {
@@ -7644,6 +7727,34 @@
                 </div>
               </div>
 
+              <div class="settings-control-list">
+                <label class="settings-toggle-row">
+                  <span>Track change notifications</span>
+                  <input
+                    type="checkbox"
+                    checked={trackNotificationsEnabled}
+                    onchange={handleTrackNotificationsSettingChange}
+                  />
+                  <strong>{trackNotificationsEnabled ? "On" : "Off"}</strong>
+                </label>
+                <div>
+                  <span>Notification support</span>
+                  <strong>Linux only</strong>
+                  <small>Uses the system notify-send command.</small>
+                </div>
+              </div>
+
+              {#if trackNotificationsEnabled}
+                <div class="settings-actions">
+                  <button type="button" onclick={handleTestTrackNotification}>
+                    Test Notification
+                  </button>
+                </div>
+                {#if trackNotificationStatus}
+                  <p class="form-message" class:error={trackNotificationStatusIsError} role="status">{trackNotificationStatus}</p>
+                {/if}
+              {/if}
+
               <div class="settings-actions">
                 <button type="button" disabled={playbackQueue.length === 0} onclick={handleSettingsClearQueue}>
                   Clear Queue
@@ -7977,7 +8088,8 @@
 </div>
 
 <style>
-  :global(:root) {
+  :global(:root),
+  :global(:root[data-theme="cassette-teal"]) {
     color-scheme: dark;
     --bg: #0d0f13;
     --bg-soft: #111317;

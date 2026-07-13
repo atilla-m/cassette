@@ -524,6 +524,40 @@ fn get_library_cache(library: State<'_, Mutex<LibraryDatabase>>) -> Result<Libra
 }
 
 #[tauri::command]
+fn send_linux_notification(title: String, body: String) -> Result<(), String> {
+    let output = Command::new("notify-send")
+        .arg("--app-name=Cassette")
+        .arg(title)
+        .arg(body)
+        .output()
+        .map_err(|error| {
+            if error.kind() == io::ErrorKind::NotFound {
+                "notify-send is unavailable.".to_owned()
+            } else {
+                format!("Could not run notify-send: {error}")
+            }
+        })?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+
+    if stderr.is_empty() {
+        Err(format!(
+            "notify-send exited unsuccessfully with status {}.",
+            output
+                .status
+                .code()
+                .map_or_else(|| "unknown".to_owned(), |code| code.to_string())
+        ))
+    } else {
+        Err(format!("notify-send failed: {stderr}"))
+    }
+}
+
+#[tauri::command]
 fn get_video_library(library: State<'_, Mutex<LibraryDatabase>>) -> Result<VideoLibrary, String> {
     let library = library
         .lock()
@@ -6494,6 +6528,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             get_library_cache,
+            send_linux_notification,
             get_video_library,
             scan_video_folder,
             update_video_info,
