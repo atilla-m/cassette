@@ -6274,8 +6274,7 @@ fn replace_original_with_verified_temp(
     }
 
     if let Err(error) = verify_tag_values(original_path, request) {
-        let _ = fs::remove_file(original_path);
-        return match fs::rename(backup_path, original_path) {
+        return match restore_backup_after_failed_replacement(original_path, backup_path) {
             Ok(()) => Err(format!("Final tag verification failed; original was restored: {error}")),
             Err(restore_error) => Err(format!(
                 "Final tag verification failed and automatic restore failed: {error}; restore error: {restore_error}"
@@ -6283,15 +6282,42 @@ fn replace_original_with_verified_temp(
         };
     }
 
-    if let Err(error) = fs::remove_file(backup_path) {
-        let _ = fs::remove_file(original_path);
-        return match fs::rename(backup_path, original_path) {
-            Ok(()) => Err(format!("Could not remove temporary backup; original was restored: {error}")),
-            Err(restore_error) => Err(format!(
-                "Could not remove temporary backup and automatic restore failed: {error}; restore error: {restore_error}"
+    cleanup_file(backup_path);
+
+    Ok(())
+}
+
+fn restore_backup_after_failed_replacement(
+    original_path: &Path,
+    backup_path: &Path,
+) -> Result<(), String> {
+    let failed_path = unique_sidecar_path(original_path, "failed")?;
+
+    fs::rename(original_path, &failed_path).map_err(|error| {
+        format!(
+            "edited file remains at {}; backup remains at {}; could not move edited file aside: {error}",
+            original_path.display(),
+            backup_path.display()
+        )
+    })?;
+
+    if let Err(error) = fs::rename(backup_path, original_path) {
+        let restore_edited_result = fs::rename(&failed_path, original_path);
+        return match restore_edited_result {
+            Ok(()) => Err(format!(
+                "backup remains at {}; edited file was put back at {}; restore error: {error}",
+                backup_path.display(),
+                original_path.display()
+            )),
+            Err(edited_restore_error) => Err(format!(
+                "backup remains at {}; edited file remains at {}; restore error: {error}; edited file restore error: {edited_restore_error}",
+                backup_path.display(),
+                failed_path.display()
             )),
         };
     }
+
+    cleanup_file(&failed_path);
 
     Ok(())
 }
