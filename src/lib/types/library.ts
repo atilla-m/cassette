@@ -23,6 +23,29 @@ export type Track = {
   lastPlayedAt: number | null;
 };
 
+export type TrackTagValues = {
+  title: string | null;
+  artist: string | null;
+  album: string | null;
+  albumArtist: string | null;
+  genre: string | null;
+  year: number | null;
+  trackNumber: number | null;
+  discNumber: number | null;
+};
+
+export type TrackTagEditorData = {
+  track: Track;
+  fileValues: TrackTagValues;
+  genreOverrideActive: boolean;
+  tagEditingSupported: boolean;
+  unsupportedReason: string | null;
+};
+
+export type UpdateTrackTagsRequest = TrackTagValues & {
+  trackId: string;
+};
+
 export type Album = {
   id: string;
   title: string;
