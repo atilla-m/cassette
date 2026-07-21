@@ -485,11 +485,14 @@
   let tagEditorOriginal = $state<TagEditorDraft>(emptyTagEditorDraft());
   let isLoadingTagEditor = $state(false);
   let isSavingTagEditor = $state(false);
+  let isTagEditorDiscardConfirmationOpen = $state(false);
+  let tagEditorPendingTrack = $state<Track | null>(null);
   let tagEditorError = $state<string | null>(null);
   let tagEditorMessage = $state<string | null>(null);
   let shortcutModalElement: HTMLElement | undefined = $state();
   let deletePlaylistModalElement: HTMLElement | undefined = $state();
   let tagEditorModalElement: HTMLElement | undefined = $state();
+  let tagEditorDiscardModalElement: HTMLElement | undefined = $state();
   let lyricsPanelElement: HTMLElement | undefined = $state();
   let displayAlbums = $derived(!hasLoadedCache ? mockAlbums : buildAlbums(tracks));
   let displayArtists = $derived(!hasLoadedCache ? mockArtists : buildArtists(tracks));
@@ -626,6 +629,7 @@
   );
   let hadSearchQuery = false;
   let lyricsRequestId = 0;
+  let tagEditorRequestId = 0;
 
   $effect(() => {
     const hasSearchQuery = normalizedSearchQuery.length > 0;
@@ -664,6 +668,16 @@
 
     window.requestAnimationFrame(() => {
       tagEditorModalElement?.focus();
+    });
+  });
+
+  $effect(() => {
+    if (!isTagEditorDiscardConfirmationOpen) {
+      return;
+    }
+
+    window.requestAnimationFrame(() => {
+      tagEditorDiscardModalElement?.focus();
     });
   });
 
@@ -789,7 +803,11 @@
         if (event.key === "Escape") {
           event.preventDefault();
           event.stopPropagation();
-          requestCloseTagEditor();
+          if (isTagEditorDiscardConfirmationOpen) {
+            keepEditingTagEditor();
+          } else {
+            requestCloseTagEditor();
+          }
         }
 
         return;
@@ -2561,8 +2579,22 @@
     };
   }
 
-  async function handleEditTrackTags(track: Track) {
+  function handleEditTrackTags(track: Track) {
     closeContextMenu();
+
+    if (tagEditorTrack) {
+      if (tagEditorTrack.id !== track.id) {
+        requestCloseTagEditor(track);
+      }
+
+      return;
+    }
+
+    void openTagEditor(track);
+  }
+
+  async function openTagEditor(track: Track) {
+    const requestId = ++tagEditorRequestId;
     tagEditorTrack = track;
     tagEditorData = null;
     tagEditorDraft = emptyTagEditorDraft();
@@ -2574,34 +2606,75 @@
 
     try {
       const data = await getTrackTagEditorData(track.id);
+
+      if (requestId !== tagEditorRequestId) {
+        return;
+      }
+
       tagEditorData = data;
       tagEditorTrack = data.track;
       tagEditorDraft = tagEditorDraftFromValues(data.fileValues);
       tagEditorOriginal = tagEditorDraftFromValues(data.fileValues);
     } catch (error) {
-      tagEditorError = error instanceof Error ? error.message : String(error);
+      if (requestId === tagEditorRequestId) {
+        tagEditorError = error instanceof Error ? error.message : String(error);
+      }
     } finally {
-      isLoadingTagEditor = false;
+      if (requestId === tagEditorRequestId) {
+        isLoadingTagEditor = false;
+      }
     }
   }
 
-  function requestCloseTagEditor() {
+  function requestCloseTagEditor(replacementTrack: Track | null = null) {
     if (isSavingTagEditor) {
       return;
     }
 
-    if (tagEditorHasChanges() && !window.confirm("Discard unsaved tag changes?")) {
+    if (tagEditorHasChanges()) {
+      tagEditorPendingTrack = replacementTrack;
+      isTagEditorDiscardConfirmationOpen = true;
       return;
     }
 
     closeTagEditor();
+
+    if (replacementTrack) {
+      void openTagEditor(replacementTrack);
+    }
+  }
+
+  function keepEditingTagEditor() {
+    isTagEditorDiscardConfirmationOpen = false;
+    tagEditorPendingTrack = null;
+    window.requestAnimationFrame(() => {
+      tagEditorModalElement?.focus();
+    });
+  }
+
+  function discardTagEditorChanges() {
+    const replacementTrack = tagEditorPendingTrack;
+    closeTagEditor();
+
+    if (replacementTrack) {
+      void openTagEditor(replacementTrack);
+    }
+  }
+
+  function handleTagEditorDiscardBackdropClick(event: MouseEvent) {
+    if (event.target === event.currentTarget) {
+      keepEditingTagEditor();
+    }
   }
 
   function closeTagEditor() {
+    tagEditorRequestId += 1;
     tagEditorTrack = null;
     tagEditorData = null;
     tagEditorDraft = emptyTagEditorDraft();
     tagEditorOriginal = emptyTagEditorDraft();
+    isTagEditorDiscardConfirmationOpen = false;
+    tagEditorPendingTrack = null;
     tagEditorError = null;
     tagEditorMessage = null;
     isLoadingTagEditor = false;
@@ -2623,8 +2696,38 @@
     tagEditorMessage = null;
   }
 
+  function normalizeTagEditorText(value: string) {
+    return value.trim();
+  }
+
+  function normalizeTagEditorNumber(value: string) {
+    const trimmed = value.trim();
+
+    if (!/^\d+$/.test(trimmed)) {
+      return trimmed;
+    }
+
+    const parsed = Number.parseInt(trimmed, 10);
+    return Number.isSafeInteger(parsed) ? String(parsed) : trimmed;
+  }
+
+  function normalizedTagEditorDraft(draft: TagEditorDraft): TagEditorDraft {
+    return {
+      title: normalizeTagEditorText(draft.title),
+      artist: normalizeTagEditorText(draft.artist),
+      album: normalizeTagEditorText(draft.album),
+      albumArtist: normalizeTagEditorText(draft.albumArtist),
+      genre: normalizeTagEditorText(draft.genre),
+      year: normalizeTagEditorNumber(draft.year),
+      trackNumber: normalizeTagEditorNumber(draft.trackNumber),
+      discNumber: normalizeTagEditorNumber(draft.discNumber),
+    };
+  }
+
   function tagEditorFieldChanged(key: keyof TagEditorDraft) {
-    return tagEditorDraft[key].trim() !== tagEditorOriginal[key].trim();
+    const draft = normalizedTagEditorDraft(tagEditorDraft);
+    const original = normalizedTagEditorDraft(tagEditorOriginal);
+    return draft[key] !== original[key];
   }
 
   function tagEditorHasChanges() {
@@ -2664,13 +2767,13 @@
   }
 
   function nullableTagText(value: string) {
-    const trimmed = value.trim();
+    const trimmed = normalizeTagEditorText(value);
 
     return trimmed ? trimmed : null;
   }
 
   function nullableTagNumber(value: string) {
-    const trimmed = value.trim();
+    const trimmed = normalizeTagEditorNumber(value);
 
     return trimmed ? Number.parseInt(trimmed, 10) : null;
   }
@@ -2708,11 +2811,13 @@
     isSavingTagEditor = true;
     tagEditorError = null;
     tagEditorMessage = "Writing tags...";
+    const savedSnapshot = normalizedTagEditorDraft(tagEditorDraft);
     let shouldCloseAfterSave = false;
 
     try {
       const updatedTrack = await updateTrackTags(tagUpdateRequestFromDraft(tagEditorTrack.id));
       applyUpdatedTrack(updatedTrack);
+      tagEditorOriginal = savedSnapshot;
       tagEditorMessage = "Tags updated successfully.";
       shouldCloseAfterSave = true;
     } catch (error) {
@@ -8255,7 +8360,7 @@
             <strong>{tagEditorTrack.title}</strong>
             <small>{tagEditorTrack.fileName} · {tagEditorTrack.extension.toUpperCase()}</small>
           </div>
-          <button type="button" aria-label="Close tag editor" disabled={isSavingTagEditor} onclick={requestCloseTagEditor}>Close</button>
+          <button type="button" aria-label="Close tag editor" disabled={isSavingTagEditor} onclick={() => requestCloseTagEditor()}>Close</button>
         </header>
 
         <div class="tag-editor-path">
@@ -8318,13 +8423,41 @@
 
             <div class="tag-editor-actions">
               <button type="button" disabled={isSavingTagEditor || !tagEditorHasChanges()} onclick={resetTagEditorDraft}>Reset</button>
-              <button type="button" disabled={isSavingTagEditor} onclick={requestCloseTagEditor}>Cancel</button>
+              <button type="button" disabled={isSavingTagEditor} onclick={() => requestCloseTagEditor()}>Cancel</button>
               <button class="primary" type="submit" disabled={!tagEditorCanSave()}>
                 {isSavingTagEditor ? "Saving..." : "Save Changes"}
               </button>
             </div>
           </form>
         {/if}
+      </div>
+    </div>
+  {/if}
+
+  {#if isTagEditorDiscardConfirmationOpen}
+    <div class="confirmation-backdrop" role="presentation" onclick={handleTagEditorDiscardBackdropClick}>
+      <div
+        bind:this={tagEditorDiscardModalElement}
+        class="confirmation-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="discard-tag-editor-title"
+        aria-describedby="discard-tag-editor-description"
+        tabindex="-1"
+      >
+        <header class="confirmation-header">
+          <div>
+            <p class="eyebrow">Audio Tags</p>
+            <h3 id="discard-tag-editor-title">Unsaved Changes</h3>
+          </div>
+        </header>
+
+        <p id="discard-tag-editor-description">Discard unsaved tag changes?</p>
+
+        <div class="confirmation-actions">
+          <button type="button" onclick={keepEditingTagEditor}>Keep Editing</button>
+          <button class="destructive" type="button" onclick={discardTagEditorChanges}>Discard Changes</button>
+        </div>
       </div>
     </div>
   {/if}
