@@ -61,9 +61,18 @@
   import CompactDropdown, { type DropdownOption } from "$lib/components/CompactDropdown.svelte";
   import ContextMenu from "$lib/components/ContextMenu.svelte";
   import LibrarySection from "$lib/components/LibrarySection.svelte";
+  import ModernAlbumsPage from "$lib/components/modern/ModernAlbumsPage.svelte";
+  import ModernSidebar from "$lib/components/modern/ModernSidebar.svelte";
+  import ModernTopbar from "$lib/components/modern/ModernTopbar.svelte";
   import NowPlayingBar from "$lib/components/NowPlayingBar.svelte";
   import Sidebar from "$lib/components/Sidebar.svelte";
   import TrackList from "$lib/components/TrackList.svelte";
+  import {
+    DEFAULT_INTERFACE_MODE,
+    INTERFACE_MODE_SETTING_KEY,
+    resolveInterfaceMode,
+    type InterfaceMode,
+  } from "$lib/app/interfaceMode";
   import { buildAlbums, buildArtists, buildGenres } from "$lib/data/libraryViews";
   import { albums as mockAlbums, artists as mockArtists, genres as mockGenres, navItems } from "$lib/data/mockLibrary";
   import { ENABLE_EXPERIMENTAL_VIDEOS } from "$lib/featureFlags";
@@ -468,6 +477,7 @@
   let currentLyrics = $state<TrackLyrics | null>(null);
   let autoFindLyricsEnabled = $state(true);
   let selectedTheme = $state<ThemeId>(DEFAULT_THEME);
+  let interfaceMode = $state<InterfaceMode>(DEFAULT_INTERFACE_MODE);
   let isLoadingLyrics = $state(false);
   let isAutoFindingLyrics = $state(false);
   let isSavingLyricsSelection = $state(false);
@@ -611,6 +621,7 @@
   let currentTrackGenres = $derived(currentTrack ? trackGenres(currentTrack).filter((genre) => genre !== "Unknown Genre") : []);
   let currentTrackCoverArtSrc = $derived(localImageSource(currentTrack?.coverArtPath));
   let currentTrackDuration = $derived(durationSeconds ?? currentTrack?.durationSeconds ?? null);
+  let currentAlbumId = $derived(currentTrack ? albumIdForTrack(currentTrack) : null);
   let syncedLyricLines = $derived(currentLyrics?.kind === "synced" ? parseLrcLyrics(currentLyrics.text) : []);
   let lyricsOffsetSeconds = $derived(currentLyrics?.offsetSeconds ?? 0);
   let adjustedLyricPositionSeconds = $derived(positionSeconds - lyricsOffsetSeconds);
@@ -701,6 +712,18 @@
     window.localStorage.setItem(THEME_SETTING_KEY, theme);
   }
 
+  function applyInterfaceMode(mode: InterfaceMode) {
+    if (typeof document !== "undefined") {
+      document.documentElement.dataset.interface = mode;
+    }
+  }
+
+  function handleInterfaceModeSelect(mode: InterfaceMode) {
+    interfaceMode = mode;
+    applyInterfaceMode(mode);
+    window.localStorage.setItem(INTERFACE_MODE_SETTING_KEY, mode);
+  }
+
   $effect(() => {
     void loadCurrentTrackLyrics(currentTrack?.filePath ?? null);
   });
@@ -734,6 +757,13 @@
     applyTheme(selectedTheme);
     if (storedTheme !== selectedTheme) {
       window.localStorage.setItem(THEME_SETTING_KEY, selectedTheme);
+    }
+    const storedInterfaceMode = window.localStorage.getItem(INTERFACE_MODE_SETTING_KEY);
+    const resolvedInterfaceMode = resolveInterfaceMode(storedInterfaceMode, window.location.search);
+    interfaceMode = resolvedInterfaceMode.mode;
+    applyInterfaceMode(interfaceMode);
+    if (!resolvedInterfaceMode.hasOverride && storedInterfaceMode !== interfaceMode) {
+      window.localStorage.setItem(INTERFACE_MODE_SETTING_KEY, interfaceMode);
     }
     autoFindLyricsEnabled = window.localStorage.getItem(AUTO_LYRICS_SETTING_KEY) !== "off";
     trackNotificationsEnabled = window.localStorage.getItem(TRACK_NOTIFICATIONS_SETTING_KEY) === "on";
@@ -5695,10 +5725,14 @@
   <title>Cassette</title>
 </svelte:head>
 
-<div class="app-shell">
-  <div class:lyrics-mode={activeView === "Now Playing"} class="workspace">
+<div class:modern={interfaceMode === "modern"} class="app-shell" data-interface={interfaceMode}>
+  <div class:lyrics-mode={activeView === "Now Playing"} class:modern={interfaceMode === "modern"} class="workspace">
     {#if activeView !== "Now Playing"}
-      <Sidebar items={visibleNavItems} active={activeView} onNavigate={handleNavigate} />
+      {#if interfaceMode === "modern"}
+        <ModernSidebar items={visibleNavItems} active={activeView} onNavigate={handleNavigate} />
+      {:else}
+        <Sidebar items={visibleNavItems} active={activeView} onNavigate={handleNavigate} />
+      {/if}
     {/if}
 
     <main
@@ -5710,39 +5744,66 @@
       class:playlist-detail-view={isPlaylistDetailView}
       class:playlists-view={activeView === "Playlists"}
       class:songs-library-view={activeView === "Songs"}
+      class:modern={interfaceMode === "modern"}
       class="home"
       bind:this={mainElement}
     >
       {#if activeView !== "Now Playing" && !isAlbumDetailView && !isArtistDetailView && !isGenreDetailView && !isPlaylistDetailView}
-        <header class="home-header">
-          <div>
-            <p class="eyebrow">{viewEyebrow()}</p>
-            <h2>{viewTitle()}</h2>
-            <p class="scan-status">{viewStatus()}</p>
-          </div>
-          <div class="home-header-actions">
-            {#if activeView === "Albums" && !selectedAlbum}
-              <button type="button" disabled={tracks.length === 0} onclick={() => void handleShuffleLibrary()}>
-                Shuffle Library
-              </button>
-              <button type="button" disabled={tracks.length === 0 || displayAlbums.length === 0} onclick={handleRandomAlbum}>
-                Random Album
-              </button>
-            {/if}
-            {#if ENABLE_EXPERIMENTAL_VIDEOS && activeView === "Videos"}
-              <button type="button" disabled={isScanningVideos} onclick={() => void (videoFolder ? handleRescanVideos() : handleAddVideoFolder())}>
-                {isScanningVideos ? "Scanning..." : videoFolder ? "Rescan Videos" : "Add Video Folder"}
-              </button>
-            {:else}
-              <button type="button" disabled={isScanning} onclick={handleScanLibrary}>
-                {isScanning ? "Scanning..." : "Scan Library"}
-              </button>
-            {/if}
-          </div>
-        </header>
+        {#if interfaceMode === "modern"}
+          <ModernTopbar
+            eyebrow={viewEyebrow()}
+            title={viewTitle()}
+            status={viewStatus()}
+            searchValue={searchQuery}
+            searchPlaceholder={searchPlaceholder() || "Search Cassette..."}
+            showSearch={isSearchAvailable()}
+            isAlbumsLanding={activeView === "Albums" && !selectedAlbum}
+            hasTracks={tracks.length > 0}
+            hasAlbums={displayAlbums.length > 0}
+            isScanning={ENABLE_EXPERIMENTAL_VIDEOS && activeView === "Videos" ? isScanningVideos : isScanning}
+            scanLabel={ENABLE_EXPERIMENTAL_VIDEOS && activeView === "Videos"
+              ? isScanningVideos ? "Scanning..." : videoFolder ? "Rescan Videos" : "Add Video Folder"
+              : isScanning ? "Scanning..." : "Scan Library"}
+            onSearchInput={(value) => searchQuery = value}
+            onSearchKeydown={handleSearchKeydown}
+            onClearSearch={clearSearch}
+            onShuffleLibrary={() => void handleShuffleLibrary()}
+            onRandomAlbum={handleRandomAlbum}
+            onScanLibrary={() => void (ENABLE_EXPERIMENTAL_VIDEOS && activeView === "Videos"
+              ? videoFolder ? handleRescanVideos() : handleAddVideoFolder()
+              : handleScanLibrary())}
+          />
+        {:else}
+          <header class="home-header">
+            <div>
+              <p class="eyebrow">{viewEyebrow()}</p>
+              <h2>{viewTitle()}</h2>
+              <p class="scan-status">{viewStatus()}</p>
+            </div>
+            <div class="home-header-actions">
+              {#if activeView === "Albums" && !selectedAlbum}
+                <button type="button" disabled={tracks.length === 0} onclick={() => void handleShuffleLibrary()}>
+                  Shuffle Library
+                </button>
+                <button type="button" disabled={tracks.length === 0 || displayAlbums.length === 0} onclick={handleRandomAlbum}>
+                  Random Album
+                </button>
+              {/if}
+              {#if ENABLE_EXPERIMENTAL_VIDEOS && activeView === "Videos"}
+                <button type="button" disabled={isScanningVideos} onclick={() => void (videoFolder ? handleRescanVideos() : handleAddVideoFolder())}>
+                  {isScanningVideos ? "Scanning..." : videoFolder ? "Rescan Videos" : "Add Video Folder"}
+                </button>
+              {:else}
+                <button type="button" disabled={isScanning} onclick={handleScanLibrary}>
+                  {isScanning ? "Scanning..." : "Scan Library"}
+                </button>
+              {/if}
+            </div>
+          </header>
+        {/if}
       {/if}
 
-      {#if isSearchAvailable() && !isAlbumDetailView && !isArtistDetailView && !isGenreDetailView && !isPlaylistDetailView}
+      {#if interfaceMode === "legacy" && isSearchAvailable() && !isAlbumDetailView && !isArtistDetailView && !isGenreDetailView && !isPlaylistDetailView}
         <div class="search-bar">
           <input
             type="search"
@@ -6332,77 +6393,93 @@
             </LibrarySection>
           </section>
         {:else}
-          <div class="albums-landing">
-            <LibrarySection title="All Albums" viewAllLabel={`${visibleAlbums.length} total`}>
-            <div class="control-bar">
-              <label>
-                <span>Sort</span>
-                <select bind:value={albumSort}>
-                  <option value="title">Album title</option>
-                  <option value="artist">Artist</option>
-                  <option value="year">Year</option>
-                  <option value="trackCount">Song count</option>
-                </select>
-              </label>
-              <button
-                class="direction-toggle"
-                type="button"
-                aria-label={`Album sort direction: ${sortDirectionLabel(albumSortDirection)}`}
-                onclick={() => albumSortDirection = nextSortDirection(albumSortDirection)}
-              >
-                {sortDirectionLabel(albumSortDirection)}
-              </button>
-            </div>
-            {#if visibleAlbums.length === 0}
-              <div class="group-empty">
-                <h3>{normalizedSearchQuery ? "No albums matched" : "No albums found"}</h3>
-                <p>{normalizedSearchQuery ? "Search is limited to album titles, artists, and years." : "Scan a music folder to build your local album library."}</p>
+          {#if interfaceMode === "modern"}
+            <ModernAlbumsPage
+              albums={visibleAlbums}
+              {currentAlbumId}
+              hasSearchQuery={normalizedSearchQuery.length > 0}
+              sort={albumSort}
+              sortDirectionLabel={sortDirectionLabel(albumSortDirection)}
+              onSortChange={(value) => albumSort = value}
+              onToggleSortDirection={() => albumSortDirection = nextSortDirection(albumSortDirection)}
+              onOpenAlbum={handleAlbumSelect}
+              onPlayAlbum={(album, shouldShuffle) => void playTrackSet(tracksForAlbum(album), shouldShuffle)}
+              onQueueAlbum={(album) => appendTracksToQueue(tracksForAlbum(album))}
+              onOpenContextMenu={openAlbumContextMenu}
+            />
+          {:else}
+            <div class="albums-landing">
+              <LibrarySection title="All Albums" viewAllLabel={`${visibleAlbums.length} total`}>
+              <div class="control-bar">
+                <label>
+                  <span>Sort</span>
+                  <select bind:value={albumSort}>
+                    <option value="title">Album title</option>
+                    <option value="artist">Artist</option>
+                    <option value="year">Year</option>
+                    <option value="trackCount">Song count</option>
+                  </select>
+                </label>
+                <button
+                  class="direction-toggle"
+                  type="button"
+                  aria-label={`Album sort direction: ${sortDirectionLabel(albumSortDirection)}`}
+                  onclick={() => albumSortDirection = nextSortDirection(albumSortDirection)}
+                >
+                  {sortDirectionLabel(albumSortDirection)}
+                </button>
               </div>
-            {:else}
-              <div class="album-grid">
-                {#each visibleAlbums as album}
-                  <article class="album-card" oncontextmenu={(event) => openAlbumContextMenu(event, album)}>
-                    <div class="album-card-main">
-                      <div class="album-art" style={`--item-color: ${album.color}`}>
-                        {#if album.coverArtPath}
-                          <img
-                            src={localImageSource(album.coverArtPath) ?? ""}
-                            alt=""
-                            loading="lazy"
-                            onload={showLoadedImage}
-                            onerror={hideBrokenImage}
-                          />
-                          <span class="album-art-disc"></span>
-                        {:else}
-                          <span class="album-art-placeholder">
-                            <strong>{albumInitials(album)}</strong>
-                            <small>{album.artist}</small>
-                          </span>
-                        {/if}
-                        <button class="album-art-open" type="button" aria-label={`Open ${album.title}`} onclick={() => handleAlbumSelect(album)}></button>
-                        <div class="album-card-actions" role="group" aria-label={`${album.title} actions`}>
-                          <button type="button" disabled={!albumHasTracks(album)} onclick={(event) => void handleAlbumCardPlay(event, album)}>
-                            Play
-                          </button>
-                          <button type="button" disabled={!albumHasTracks(album)} onclick={(event) => void handleAlbumCardPlay(event, album, true)}>
-                            Shuffle
-                          </button>
-                          <button type="button" disabled={!albumHasTracks(album)} onclick={(event) => handleAlbumCardAddToQueue(event, album)}>
-                            Queue
-                          </button>
+              {#if visibleAlbums.length === 0}
+                <div class="group-empty">
+                  <h3>{normalizedSearchQuery ? "No albums matched" : "No albums found"}</h3>
+                  <p>{normalizedSearchQuery ? "Search is limited to album titles, artists, and years." : "Scan a music folder to build your local album library."}</p>
+                </div>
+              {:else}
+                <div class="album-grid">
+                  {#each visibleAlbums as album}
+                    <article class="album-card" oncontextmenu={(event) => openAlbumContextMenu(event, album)}>
+                      <div class="album-card-main">
+                        <div class="album-art" style={`--item-color: ${album.color}`}>
+                          {#if album.coverArtPath}
+                            <img
+                              src={localImageSource(album.coverArtPath) ?? ""}
+                              alt=""
+                              loading="lazy"
+                              onload={showLoadedImage}
+                              onerror={hideBrokenImage}
+                            />
+                            <span class="album-art-disc"></span>
+                          {:else}
+                            <span class="album-art-placeholder">
+                              <strong>{albumInitials(album)}</strong>
+                              <small>{album.artist}</small>
+                            </span>
+                          {/if}
+                          <button class="album-art-open" type="button" aria-label={`Open ${album.title}`} onclick={() => handleAlbumSelect(album)}></button>
+                          <div class="album-card-actions" role="group" aria-label={`${album.title} actions`}>
+                            <button type="button" disabled={!albumHasTracks(album)} onclick={(event) => void handleAlbumCardPlay(event, album)}>
+                              Play
+                            </button>
+                            <button type="button" disabled={!albumHasTracks(album)} onclick={(event) => void handleAlbumCardPlay(event, album, true)}>
+                              Shuffle
+                            </button>
+                            <button type="button" disabled={!albumHasTracks(album)} onclick={(event) => handleAlbumCardAddToQueue(event, album)}>
+                              Queue
+                            </button>
+                          </div>
                         </div>
+                        <button class="album-card-copy" type="button" onclick={() => handleAlbumSelect(album)}>
+                          <strong>{album.title}</strong>
+                          <small>{albumDetail(album)}</small>
+                        </button>
                       </div>
-                      <button class="album-card-copy" type="button" onclick={() => handleAlbumSelect(album)}>
-                        <strong>{album.title}</strong>
-                        <small>{albumDetail(album)}</small>
-                      </button>
-                    </div>
-                  </article>
-                {/each}
-              </div>
-            {/if}
-            </LibrarySection>
-          </div>
+                    </article>
+                  {/each}
+                </div>
+              {/if}
+              </LibrarySection>
+            </div>
+          {/if}
         {/if}
       {:else if activeView === "Artists"}
         {#if selectedArtist}
@@ -8153,10 +8230,37 @@
             <section class="settings-section" aria-labelledby="settings-interface-title">
               <div class="settings-section-header">
                 <div>
-                  <p class="eyebrow">Interface</p>
+                  <p class="eyebrow">Appearance</p>
                   <h4 id="settings-interface-title">Display preferences</h4>
                 </div>
                 <span class="settings-pill">{themePresets.find((theme) => theme.id === selectedTheme)?.name ?? "Cassette Teal"}</span>
+              </div>
+
+              <div class="interface-mode-setting">
+                <div class="interface-mode-heading">
+                  <strong>Interface</strong>
+                  <small>Switch layouts without interrupting playback or changing your theme.</small>
+                </div>
+                <div class="interface-mode-options" aria-label="Interface">
+                  <button
+                    class:selected={interfaceMode === "modern"}
+                    type="button"
+                    aria-pressed={interfaceMode === "modern"}
+                    onclick={() => handleInterfaceModeSelect("modern")}
+                  >
+                    <strong>Modern</strong>
+                    <small>Artwork-forward Cassette interface.</small>
+                  </button>
+                  <button
+                    class:selected={interfaceMode === "legacy"}
+                    type="button"
+                    aria-pressed={interfaceMode === "legacy"}
+                    onclick={() => handleInterfaceModeSelect("legacy")}
+                  >
+                    <strong>Legacy</strong>
+                    <small>Original compact Cassette interface.</small>
+                  </button>
+                </div>
               </div>
 
               <div class="theme-preset-grid" aria-label="Theme presets">
@@ -8563,6 +8667,7 @@
       {isShuffleEnabled}
       {repeatMode}
       compact={activeView === "Now Playing"}
+      {interfaceMode}
       onTogglePlayback={handleTogglePlayback}
       onPrevious={handlePreviousTrack}
       onNext={handleNextTrack}
@@ -8605,6 +8710,11 @@
     --shadow: rgba(0, 0, 0, 0.22);
     --focus-ring: rgba(47, 143, 131, 0.55);
     --range-empty: #2a313c;
+    --modern-sidebar: #0f1318;
+    --modern-elevated: #171c23;
+    --modern-player: #101419;
+    --modern-selected: #1a2528;
+    --modern-shadow: rgba(0, 0, 0, 0.34);
   }
 
   :global(:root[data-theme="rose-noir"]) {
@@ -8628,6 +8738,11 @@
     --shadow: rgba(0, 0, 0, 0.26);
     --focus-ring: rgba(191, 102, 125, 0.5);
     --range-empty: #2b2731;
+    --modern-sidebar: #110e13;
+    --modern-elevated: #1c1820;
+    --modern-player: #121015;
+    --modern-selected: #281c24;
+    --modern-shadow: rgba(0, 0, 0, 0.38);
   }
 
   :global(:root[data-theme="royal-gold"]) {
@@ -8651,6 +8766,11 @@
     --shadow: rgba(0, 0, 0, 0.28);
     --focus-ring: rgba(185, 154, 77, 0.5);
     --range-empty: #2c2b27;
+    --modern-sidebar: #11110f;
+    --modern-elevated: #1c1b17;
+    --modern-player: #11110f;
+    --modern-selected: #28241b;
+    --modern-shadow: rgba(0, 0, 0, 0.4);
   }
 
   :global(:root[data-theme="obsidian"]) {
@@ -8674,6 +8794,11 @@
     --shadow: rgba(0, 0, 0, 0.34);
     --focus-ring: rgba(154, 166, 178, 0.5);
     --range-empty: #24262c;
+    --modern-sidebar: #030304;
+    --modern-elevated: #131419;
+    --modern-player: #06070a;
+    --modern-selected: #1d2026;
+    --modern-shadow: rgba(0, 0, 0, 0.56);
   }
 
   :global(:root[data-theme="glacier"]) {
@@ -8697,6 +8822,11 @@
     --shadow: rgba(0, 0, 0, 0.26);
     --focus-ring: rgba(121, 199, 232, 0.52);
     --range-empty: #24394c;
+    --modern-sidebar: #09131c;
+    --modern-elevated: #13212d;
+    --modern-player: #09131c;
+    --modern-selected: #183043;
+    --modern-shadow: rgba(0, 0, 0, 0.38);
   }
 
   :global(*) {
@@ -12362,6 +12492,77 @@
     accent-color: var(--accent);
   }
 
+  .interface-mode-setting {
+    display: grid;
+    gap: 10px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--panel);
+    padding: 14px;
+  }
+
+  .interface-mode-heading strong,
+  .interface-mode-heading small {
+    display: block;
+  }
+
+  .interface-mode-heading strong {
+    color: var(--text);
+    font-size: 0.94rem;
+    font-weight: 850;
+  }
+
+  .interface-mode-heading small {
+    margin-top: 3px;
+    color: var(--text-soft);
+    font-size: 0.78rem;
+    font-weight: 700;
+  }
+
+  .interface-mode-options {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  .interface-mode-options button {
+    display: grid;
+    gap: 3px;
+    min-width: 0;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--panel-soft);
+    color: inherit;
+    cursor: default;
+    font: inherit;
+    padding: 12px;
+    text-align: left;
+  }
+
+  .interface-mode-options button:hover,
+  .interface-mode-options button:focus-visible,
+  .interface-mode-options button.selected {
+    border-color: var(--accent-strong);
+    background: var(--panel-hover);
+    outline: none;
+  }
+
+  .interface-mode-options button.selected {
+    box-shadow: inset 3px 0 0 var(--accent);
+  }
+
+  .interface-mode-options strong {
+    color: var(--text);
+    font-size: 0.88rem;
+    font-weight: 850;
+  }
+
+  .interface-mode-options small {
+    color: var(--text-soft);
+    font-size: 0.76rem;
+    font-weight: 680;
+  }
+
   .theme-preset-grid {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(164px, 1fr));
@@ -13750,6 +13951,34 @@
     }
   }
 
+  .app-shell.modern {
+    background:
+      radial-gradient(circle at 82% -12%, color-mix(in srgb, var(--accent) 11%, transparent), transparent 34rem),
+      var(--bg);
+  }
+
+  .home.modern {
+    --content-bottom-padding: 30px;
+    padding: 22px clamp(22px, 2.6vw, 46px) var(--content-bottom-padding);
+  }
+
+  .home.modern.albums-landing-view,
+  .home.modern.songs-library-view {
+    --content-bottom-padding: 30px;
+    padding-top: 22px;
+  }
+
+  .app-shell.modern .queue-backdrop {
+    bottom: 108px;
+  }
+
+  .app-shell.modern .queue-panel {
+    bottom: 122px;
+    border-radius: 10px;
+    background: var(--modern-elevated, var(--panel));
+    box-shadow: 0 24px 70px var(--modern-shadow, rgba(0, 0, 0, 0.42));
+  }
+
   @media (min-width: 900px) {
     .playlist-card-grid.tools .mix-tool-card {
       grid-column: span 2;
@@ -13826,9 +14055,18 @@
       flex-direction: column;
     }
 
+    .workspace.modern {
+      flex-direction: row;
+    }
+
     .home {
       --content-bottom-padding: 58px;
       padding: 22px 16px var(--content-bottom-padding);
+    }
+
+    .home.modern {
+      --content-bottom-padding: 24px;
+      padding: 18px 16px var(--content-bottom-padding);
     }
 
     .home.albums-landing-view {
@@ -14064,6 +14302,15 @@
       max-height: calc(100dvh - 178px);
     }
 
+    .app-shell.modern .queue-panel {
+      bottom: 168px;
+      max-height: calc(100dvh - 194px);
+    }
+
+    .app-shell.modern .queue-backdrop {
+      bottom: 154px;
+    }
+
     .queue-row {
       grid-template-columns: minmax(0, 1fr);
     }
@@ -14163,6 +14410,19 @@
 
     .queue-backdrop {
       bottom: 146px;
+    }
+
+    .app-shell.modern .queue-backdrop {
+      bottom: 220px;
+    }
+
+    .app-shell.modern .queue-panel {
+      bottom: 234px;
+      max-height: calc(100dvh - 258px);
+    }
+
+    .interface-mode-options {
+      grid-template-columns: 1fr;
     }
 
     .queue-row-main {

@@ -18,6 +18,7 @@
     isShuffleEnabled?: boolean;
     repeatMode?: RepeatMode;
     compact?: boolean;
+    interfaceMode?: "modern" | "legacy";
     onTogglePlayback?: () => void;
     onPrevious?: () => void;
     onNext?: () => void;
@@ -44,6 +45,7 @@
     isShuffleEnabled = false,
     repeatMode = "off",
     compact = false,
+    interfaceMode = "legacy",
     onTogglePlayback,
     onPrevious,
     onNext,
@@ -307,7 +309,7 @@
   }
 </script>
 
-<footer class:compact class="player" aria-label="Now playing">
+<footer class:compact class:modern={interfaceMode === "modern"} class="player" aria-label="Now playing">
   <div class="track">
     {#if !compact}
       <button class="track-open" type="button" aria-label="Open current track" disabled={!track} onclick={onOpenNowPlaying}>
@@ -448,6 +450,67 @@
     padding: 10px 22px;
     border-top-color: rgba(255, 255, 255, 0.06);
     background: color-mix(in srgb, var(--bg) 90%, transparent);
+  }
+
+  .player.modern:not(.compact) {
+    grid-template-areas:
+      "track transport volume"
+      "track progress volume";
+    grid-template-columns: minmax(230px, 1fr) minmax(390px, 1.5fr) minmax(250px, 0.95fr);
+    grid-template-rows: auto auto;
+    gap: 7px clamp(20px, 2.2vw, 38px);
+    min-height: 108px;
+    border-top-color: color-mix(in srgb, var(--border-strong) 72%, transparent);
+    background: var(--modern-player, var(--panel));
+    box-shadow: 0 -14px 36px color-mix(in srgb, var(--modern-shadow, var(--shadow)) 54%, transparent);
+    padding: 13px clamp(18px, 2vw, 30px);
+  }
+
+  .player.modern:not(.compact) .track {
+    grid-area: track;
+  }
+
+  .player.modern:not(.compact) .transport {
+    grid-area: transport;
+    align-self: end;
+  }
+
+  .player.modern:not(.compact) .progress-area {
+    grid-area: progress;
+    align-self: start;
+  }
+
+  .player.modern:not(.compact) .volume {
+    grid-area: volume;
+    justify-content: flex-end;
+  }
+
+  .player.modern:not(.compact) .cover {
+    width: 68px;
+    height: 68px;
+    border-radius: 9px;
+    box-shadow: 0 8px 24px var(--modern-shadow, var(--shadow));
+  }
+
+  .player.modern:not(.compact) .track-copy > span {
+    font-size: 0.94rem;
+    font-weight: 790;
+  }
+
+  .player.modern:not(.compact) .track-copy small {
+    font-size: 0.76rem;
+  }
+
+  .player.modern:not(.compact) button.play {
+    width: 48px;
+    height: 48px;
+    border-radius: 50%;
+    box-shadow: 0 6px 20px color-mix(in srgb, var(--accent) 22%, transparent);
+  }
+
+  .player.modern:not(.compact) .progress,
+  .player.modern:not(.compact) .volume-bar {
+    height: 6px;
   }
 
   .track {
@@ -764,6 +827,25 @@
     .volume {
       display: none;
     }
+
+    .player.modern:not(.compact) {
+      grid-template-areas:
+        "track transport"
+        "progress progress"
+        "volume volume";
+      grid-template-columns: minmax(200px, 1fr) auto;
+      min-height: 154px;
+      gap: 8px 18px;
+    }
+
+    .player.modern:not(.compact) .progress-area,
+    .player.modern:not(.compact) .volume {
+      display: flex;
+    }
+
+    .player.modern:not(.compact) .volume {
+      justify-content: flex-start;
+    }
   }
 
   @media (max-width: 560px) {
@@ -776,6 +858,16 @@
 
     .transport {
       justify-content: flex-start;
+    }
+
+    .player.modern:not(.compact) {
+      grid-template-areas:
+        "track"
+        "transport"
+        "progress"
+        "volume";
+      grid-template-columns: minmax(0, 1fr);
+      min-height: 220px;
     }
   }
 </style>
