@@ -13,6 +13,7 @@
     detectAudioCd,
     detectDvd,
     getLibraryCache,
+    getTrackTagEditorData,
     getVideoLibrary,
     importDvdTitle,
     lookupCdMetadata,
@@ -34,6 +35,7 @@
     setArtistGenres,
     setTrackLyricsOffset,
     toggleTrackFavorite,
+    updateTrackTags,
     updateVideoInfo,
     updateVideoProgress,
   } from "$lib/api/library";
@@ -87,7 +89,10 @@
     PlaybackStatus,
     Playlist,
     Track,
+    TrackTagEditorData,
+    TrackTagValues,
     TrackLyrics,
+    UpdateTrackTagsRequest,
     VideoEntry,
     VideoCodecInfo,
     VideoInfoUpdate,
@@ -213,6 +218,16 @@
     country: string;
     descriptionOrNotes: string;
     outputFilename: string;
+  };
+  type TagEditorDraft = {
+    title: string;
+    artist: string;
+    album: string;
+    albumArtist: string;
+    genre: string;
+    year: string;
+    trackNumber: string;
+    discNumber: string;
   };
 
   const mixFormatOptions = ["All", "FLAC", "MP3", "OGG", "OPUS", "WAV", "M4A"];
@@ -464,8 +479,17 @@
   let lyricsLookupError = $state<string | null>(null);
   let isLyricsOptionsOpen = $state(false);
   let lyricsReturnView = $state<string | null>(null);
+  let tagEditorData = $state<TrackTagEditorData | null>(null);
+  let tagEditorTrack = $state<Track | null>(null);
+  let tagEditorDraft = $state<TagEditorDraft>(emptyTagEditorDraft());
+  let tagEditorOriginal = $state<TagEditorDraft>(emptyTagEditorDraft());
+  let isLoadingTagEditor = $state(false);
+  let isSavingTagEditor = $state(false);
+  let tagEditorError = $state<string | null>(null);
+  let tagEditorMessage = $state<string | null>(null);
   let shortcutModalElement: HTMLElement | undefined = $state();
   let deletePlaylistModalElement: HTMLElement | undefined = $state();
+  let tagEditorModalElement: HTMLElement | undefined = $state();
   let lyricsPanelElement: HTMLElement | undefined = $state();
   let displayAlbums = $derived(!hasLoadedCache ? mockAlbums : buildAlbums(tracks));
   let displayArtists = $derived(!hasLoadedCache ? mockArtists : buildArtists(tracks));
@@ -633,6 +657,16 @@
     });
   });
 
+  $effect(() => {
+    if (!tagEditorTrack) {
+      return;
+    }
+
+    window.requestAnimationFrame(() => {
+      tagEditorModalElement?.focus();
+    });
+  });
+
   function isThemeId(value: string | null): value is ThemeId {
     return VALID_THEME_IDS.some((themeId) => themeId === value);
   }
@@ -751,6 +785,16 @@
       : null;
 
     function handleKeydown(event: KeyboardEvent) {
+      if (tagEditorTrack) {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          event.stopPropagation();
+          requestCloseTagEditor();
+        }
+
+        return;
+      }
+
       if (playlistPendingDelete) {
         if (event.key === "Escape") {
           event.preventDefault();
@@ -2491,6 +2535,215 @@
     return safe || fallback;
   }
 
+  function emptyTagEditorDraft(): TagEditorDraft {
+    return {
+      title: "",
+      artist: "",
+      album: "",
+      albumArtist: "",
+      genre: "",
+      year: "",
+      trackNumber: "",
+      discNumber: "",
+    };
+  }
+
+  function tagEditorDraftFromValues(values: TrackTagValues): TagEditorDraft {
+    return {
+      title: values.title ?? "",
+      artist: values.artist ?? "",
+      album: values.album ?? "",
+      albumArtist: values.albumArtist ?? "",
+      genre: values.genre ?? "",
+      year: values.year?.toString() ?? "",
+      trackNumber: values.trackNumber?.toString() ?? "",
+      discNumber: values.discNumber?.toString() ?? "",
+    };
+  }
+
+  async function handleEditTrackTags(track: Track) {
+    closeContextMenu();
+    tagEditorTrack = track;
+    tagEditorData = null;
+    tagEditorDraft = emptyTagEditorDraft();
+    tagEditorOriginal = emptyTagEditorDraft();
+    tagEditorError = null;
+    tagEditorMessage = null;
+    isLoadingTagEditor = true;
+    isSavingTagEditor = false;
+
+    try {
+      const data = await getTrackTagEditorData(track.id);
+      tagEditorData = data;
+      tagEditorTrack = data.track;
+      tagEditorDraft = tagEditorDraftFromValues(data.fileValues);
+      tagEditorOriginal = tagEditorDraftFromValues(data.fileValues);
+    } catch (error) {
+      tagEditorError = error instanceof Error ? error.message : String(error);
+    } finally {
+      isLoadingTagEditor = false;
+    }
+  }
+
+  function requestCloseTagEditor() {
+    if (isSavingTagEditor) {
+      return;
+    }
+
+    if (tagEditorHasChanges() && !window.confirm("Discard unsaved tag changes?")) {
+      return;
+    }
+
+    closeTagEditor();
+  }
+
+  function closeTagEditor() {
+    tagEditorTrack = null;
+    tagEditorData = null;
+    tagEditorDraft = emptyTagEditorDraft();
+    tagEditorOriginal = emptyTagEditorDraft();
+    tagEditorError = null;
+    tagEditorMessage = null;
+    isLoadingTagEditor = false;
+    isSavingTagEditor = false;
+  }
+
+  function resetTagEditorDraft() {
+    tagEditorDraft = { ...tagEditorOriginal };
+    tagEditorError = null;
+    tagEditorMessage = null;
+  }
+
+  function updateTagEditorField(key: keyof TagEditorDraft, value: string) {
+    tagEditorDraft = {
+      ...tagEditorDraft,
+      [key]: value,
+    };
+    tagEditorError = null;
+    tagEditorMessage = null;
+  }
+
+  function tagEditorFieldChanged(key: keyof TagEditorDraft) {
+    return tagEditorDraft[key].trim() !== tagEditorOriginal[key].trim();
+  }
+
+  function tagEditorHasChanges() {
+    return (Object.keys(tagEditorDraft) as Array<keyof TagEditorDraft>).some(tagEditorFieldChanged);
+  }
+
+  function tagEditorValidationError() {
+    if (!parsePositiveIntegerField(tagEditorDraft.year, "Year", 65535)) {
+      return "Year must be blank or a valid positive integer.";
+    }
+
+    if (!parsePositiveIntegerField(tagEditorDraft.trackNumber, "Track number")) {
+      return "Track number must be blank or an integer greater than or equal to 1.";
+    }
+
+    if (!parsePositiveIntegerField(tagEditorDraft.discNumber, "Disc number")) {
+      return "Disc number must be blank or an integer greater than or equal to 1.";
+    }
+
+    return null;
+  }
+
+  function parsePositiveIntegerField(value: string, _label: string, maxValue: number | null = null) {
+    const trimmed = value.trim();
+
+    if (!trimmed) {
+      return true;
+    }
+
+    if (!/^\d+$/.test(trimmed)) {
+      return false;
+    }
+
+    const parsed = Number.parseInt(trimmed, 10);
+
+    return Number.isSafeInteger(parsed) && parsed >= 1 && (maxValue === null || parsed <= maxValue);
+  }
+
+  function nullableTagText(value: string) {
+    const trimmed = value.trim();
+
+    return trimmed ? trimmed : null;
+  }
+
+  function nullableTagNumber(value: string) {
+    const trimmed = value.trim();
+
+    return trimmed ? Number.parseInt(trimmed, 10) : null;
+  }
+
+  function tagUpdateRequestFromDraft(trackId: string): UpdateTrackTagsRequest {
+    return {
+      trackId,
+      title: nullableTagText(tagEditorDraft.title),
+      artist: nullableTagText(tagEditorDraft.artist),
+      album: nullableTagText(tagEditorDraft.album),
+      albumArtist: nullableTagText(tagEditorDraft.albumArtist),
+      genre: nullableTagText(tagEditorDraft.genre),
+      year: nullableTagNumber(tagEditorDraft.year),
+      trackNumber: nullableTagNumber(tagEditorDraft.trackNumber),
+      discNumber: nullableTagNumber(tagEditorDraft.discNumber),
+    };
+  }
+
+  async function handleSaveTagEditor() {
+    if (!tagEditorTrack || !tagEditorData || isSavingTagEditor) {
+      return;
+    }
+
+    const validationError = tagEditorValidationError();
+
+    if (validationError) {
+      tagEditorError = validationError;
+      return;
+    }
+
+    if (!tagEditorHasChanges()) {
+      return;
+    }
+
+    isSavingTagEditor = true;
+    tagEditorError = null;
+    tagEditorMessage = "Writing tags...";
+    let shouldCloseAfterSave = false;
+
+    try {
+      const updatedTrack = await updateTrackTags(tagUpdateRequestFromDraft(tagEditorTrack.id));
+      applyUpdatedTrack(updatedTrack);
+      tagEditorMessage = "Tags updated successfully.";
+      shouldCloseAfterSave = true;
+    } catch (error) {
+      tagEditorMessage = null;
+      tagEditorError = error instanceof Error ? error.message : String(error);
+    } finally {
+      if (shouldCloseAfterSave) {
+        window.setTimeout(() => {
+          isSavingTagEditor = false;
+          closeTagEditor();
+        }, 450);
+      } else {
+        isSavingTagEditor = false;
+      }
+    }
+  }
+
+  function tagEditorCanSave() {
+    return Boolean(
+      tagEditorData?.tagEditingSupported
+      && tagEditorHasChanges()
+      && !tagEditorValidationError()
+      && !isSavingTagEditor
+      && !isLoadingTagEditor,
+    );
+  }
+
+  function tagEditorCoverSource(track: Track | null) {
+    return track?.coverArtPath ? localImageSource(track.coverArtPath) : null;
+  }
+
   function releaseDetail(release: CdMetadataRelease) {
     return [
       release.artist,
@@ -2531,6 +2784,7 @@
       { label: "Play", action: () => handleTrackSelect(track, queue) },
       { label: "Play next", action: () => insertTracksNext([track]) },
       { label: "Add to queue", action: () => appendTracksToQueue([track]) },
+      { label: "Edit Tags", action: () => handleEditTrackTags(track) },
       ...playlistAddMenuItems(track),
       { label: "Go to artist", action: () => handleTrackArtistSelect(track) },
       { label: "Go to album", action: () => handleTrackAlbumSelect(track) },
@@ -7924,6 +8178,12 @@
               class:active={entry.queueIndex === currentQueueIndex}
               class="queue-row"
               title={entry.track.filePath}
+              role="group"
+              aria-label={`Queue track ${entry.track.title}`}
+              oncontextmenu={(event) => {
+                event.preventDefault();
+                openTrackContextMenu(entry.track, playbackQueue, event.clientX, event.clientY);
+              }}
             >
               <button class="queue-row-main" type="button" onclick={() => playQueuedTrackAtIndex(entry.queueIndex)}>
                 <span class="queue-row-position">{queuePositionLabel(entry.offset)}</span>
@@ -7969,6 +8229,104 @@
       items={contextMenu.items}
       onClose={closeContextMenu}
     />
+  {/if}
+
+  {#if tagEditorTrack}
+    <div class="tag-editor-backdrop" role="presentation" onclick={(event) => { if (event.target === event.currentTarget) requestCloseTagEditor(); }}>
+      <div
+        bind:this={tagEditorModalElement}
+        class="tag-editor-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="tag-editor-title"
+        tabindex="-1"
+      >
+        <header class="tag-editor-header">
+          <div class="tag-editor-art" aria-hidden="true">
+            {#if tagEditorCoverSource(tagEditorTrack)}
+              <img src={tagEditorCoverSource(tagEditorTrack) ?? ""} alt="" onload={showLoadedImage} onerror={hideBrokenImage} />
+            {:else}
+              <span>{tagEditorTrack.title.slice(0, 1)}</span>
+            {/if}
+          </div>
+          <div class="tag-editor-heading">
+            <p class="eyebrow">Audio Tags</p>
+            <h3 id="tag-editor-title">Edit Tags</h3>
+            <strong>{tagEditorTrack.title}</strong>
+            <small>{tagEditorTrack.fileName} · {tagEditorTrack.extension.toUpperCase()}</small>
+          </div>
+          <button type="button" aria-label="Close tag editor" disabled={isSavingTagEditor} onclick={requestCloseTagEditor}>Close</button>
+        </header>
+
+        <div class="tag-editor-path">
+          <span>File path</span>
+          <code>{tagEditorTrack.filePath}</code>
+        </div>
+
+        {#if isLoadingTagEditor}
+          <div class="tag-editor-loading" role="status">Loading tags...</div>
+        {:else}
+          {#if tagEditorData?.genreOverrideActive}
+            <div class="tag-editor-warning" role="status">
+              A Cassette library override currently controls the displayed genre for this album or artist.
+            </div>
+          {/if}
+
+          {#if tagEditorData?.unsupportedReason}
+            <div class="tag-editor-warning" role="status">{tagEditorData.unsupportedReason}</div>
+          {/if}
+
+          <form class="tag-editor-form" onsubmit={(event) => { event.preventDefault(); void handleSaveTagEditor(); }}>
+            <label class:changed={tagEditorFieldChanged("title")}>
+              <span>Title</span>
+              <input value={tagEditorDraft.title} oninput={(event) => updateTagEditorField("title", inputValue(event))} disabled={isSavingTagEditor || !tagEditorData?.tagEditingSupported} />
+            </label>
+            <label class:changed={tagEditorFieldChanged("artist")}>
+              <span>Artist</span>
+              <input value={tagEditorDraft.artist} oninput={(event) => updateTagEditorField("artist", inputValue(event))} disabled={isSavingTagEditor || !tagEditorData?.tagEditingSupported} />
+            </label>
+            <label class:changed={tagEditorFieldChanged("album")}>
+              <span>Album</span>
+              <input value={tagEditorDraft.album} oninput={(event) => updateTagEditorField("album", inputValue(event))} disabled={isSavingTagEditor || !tagEditorData?.tagEditingSupported} />
+            </label>
+            <label class:changed={tagEditorFieldChanged("albumArtist")}>
+              <span>Album Artist</span>
+              <input value={tagEditorDraft.albumArtist} oninput={(event) => updateTagEditorField("albumArtist", inputValue(event))} disabled={isSavingTagEditor || !tagEditorData?.tagEditingSupported} />
+            </label>
+            <label class:changed={tagEditorFieldChanged("genre")}>
+              <span>Genre</span>
+              <input value={tagEditorDraft.genre} oninput={(event) => updateTagEditorField("genre", inputValue(event))} disabled={isSavingTagEditor || !tagEditorData?.tagEditingSupported} />
+            </label>
+            <label class:changed={tagEditorFieldChanged("year")}>
+              <span>Year</span>
+              <input inputmode="numeric" value={tagEditorDraft.year} aria-invalid={tagEditorValidationError()?.startsWith("Year") ? "true" : "false"} oninput={(event) => updateTagEditorField("year", inputValue(event))} disabled={isSavingTagEditor || !tagEditorData?.tagEditingSupported} />
+            </label>
+            <label class:changed={tagEditorFieldChanged("trackNumber")}>
+              <span>Track Number</span>
+              <input inputmode="numeric" value={tagEditorDraft.trackNumber} aria-invalid={tagEditorValidationError()?.startsWith("Track number") ? "true" : "false"} oninput={(event) => updateTagEditorField("trackNumber", inputValue(event))} disabled={isSavingTagEditor || !tagEditorData?.tagEditingSupported} />
+            </label>
+            <label class:changed={tagEditorFieldChanged("discNumber")}>
+              <span>Disc Number</span>
+              <input inputmode="numeric" value={tagEditorDraft.discNumber} aria-invalid={tagEditorValidationError()?.startsWith("Disc number") ? "true" : "false"} oninput={(event) => updateTagEditorField("discNumber", inputValue(event))} disabled={isSavingTagEditor || !tagEditorData?.tagEditingSupported} />
+            </label>
+
+            {#if tagEditorError || tagEditorValidationError()}
+              <p class="form-message error" role="alert">{tagEditorError ?? tagEditorValidationError()}</p>
+            {:else if tagEditorMessage}
+              <p class="form-message" role="status">{tagEditorMessage}</p>
+            {/if}
+
+            <div class="tag-editor-actions">
+              <button type="button" disabled={isSavingTagEditor || !tagEditorHasChanges()} onclick={resetTagEditorDraft}>Reset</button>
+              <button type="button" disabled={isSavingTagEditor} onclick={requestCloseTagEditor}>Cancel</button>
+              <button class="primary" type="submit" disabled={!tagEditorCanSave()}>
+                {isSavingTagEditor ? "Saving..." : "Save Changes"}
+              </button>
+            </div>
+          </form>
+        {/if}
+      </div>
+    </div>
   {/if}
 
   {#if playlistPendingDelete}
@@ -12354,6 +12712,7 @@
     font-weight: 900;
   }
 
+  .tag-editor-backdrop,
   .shortcuts-backdrop,
   .confirmation-backdrop {
     position: fixed;
@@ -12366,6 +12725,7 @@
     padding: 24px;
   }
 
+  .tag-editor-modal,
   .shortcuts-modal,
   .confirmation-modal {
     width: min(720px, 100%);
@@ -12381,6 +12741,216 @@
 
   .confirmation-modal {
     width: min(460px, 100%);
+  }
+
+  .tag-editor-modal {
+    display: grid;
+    gap: 16px;
+    width: min(820px, 100%);
+  }
+
+  .tag-editor-header {
+    display: grid;
+    grid-template-columns: 78px minmax(0, 1fr) auto;
+    align-items: start;
+    gap: 14px;
+  }
+
+  .tag-editor-art {
+    position: relative;
+    display: grid;
+    width: 78px;
+    height: 78px;
+    overflow: hidden;
+    place-items: center;
+    border-radius: 8px;
+    background: linear-gradient(145deg, color-mix(in srgb, var(--accent) 42%, var(--panel)), var(--panel-strong));
+    color: var(--accent-text);
+    font-size: 1.5rem;
+    font-weight: 950;
+  }
+
+  .tag-editor-art img {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+
+  .tag-editor-heading {
+    min-width: 0;
+  }
+
+  .tag-editor-heading h3,
+  .tag-editor-heading strong,
+  .tag-editor-heading small {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .tag-editor-heading h3 {
+    margin: 0 0 6px;
+    color: var(--text);
+    font-size: 1.32rem;
+    line-height: 1.2;
+  }
+
+  .tag-editor-heading strong,
+  .tag-editor-heading small {
+    display: block;
+  }
+
+  .tag-editor-heading strong {
+    color: var(--text);
+    font-size: 0.98rem;
+    font-weight: 850;
+  }
+
+  .tag-editor-heading small {
+    margin-top: 3px;
+    color: var(--text-soft);
+    font-size: 0.82rem;
+    font-weight: 750;
+  }
+
+  .tag-editor-header > button,
+  .tag-editor-actions button {
+    min-height: 38px;
+    border: 1px solid var(--border-strong);
+    border-radius: 8px;
+    background: var(--panel-soft);
+    color: var(--text);
+    cursor: default;
+    font: inherit;
+    font-size: 0.84rem;
+    font-weight: 850;
+    padding: 0 12px;
+  }
+
+  .tag-editor-header > button:hover:not(:disabled),
+  .tag-editor-header > button:focus-visible:not(:disabled),
+  .tag-editor-actions button:hover:not(:disabled),
+  .tag-editor-actions button:focus-visible:not(:disabled) {
+    border-color: var(--accent-strong);
+    background: var(--panel-hover);
+    outline: none;
+  }
+
+  .tag-editor-actions button.primary {
+    border-color: var(--accent-strong);
+    background: var(--accent-soft);
+    color: var(--accent-text);
+  }
+
+  .tag-editor-header > button:disabled,
+  .tag-editor-actions button:disabled {
+    border-color: var(--border);
+    background: var(--bg-soft);
+    color: var(--text-dim);
+  }
+
+  .tag-editor-path {
+    min-width: 0;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg-soft);
+    padding: 12px;
+  }
+
+  .tag-editor-path span,
+  .tag-editor-form label span {
+    display: block;
+    margin-bottom: 5px;
+    color: var(--text-soft);
+    font-size: 0.74rem;
+    font-weight: 850;
+    text-transform: uppercase;
+  }
+
+  .tag-editor-path code {
+    display: block;
+    overflow-wrap: anywhere;
+    color: var(--text-muted);
+    font-family: ui-monospace, SFMono-Regular, "Cascadia Code", "Liberation Mono", monospace;
+    font-size: 0.82rem;
+    line-height: 1.35;
+  }
+
+  .tag-editor-loading,
+  .tag-editor-warning {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg-soft);
+    color: var(--text-muted);
+    font-size: 0.9rem;
+    font-weight: 760;
+    padding: 12px;
+  }
+
+  .tag-editor-warning {
+    border-color: color-mix(in srgb, var(--warning) 34%, var(--border));
+    background: color-mix(in srgb, var(--warning) 12%, var(--panel));
+    color: var(--text);
+  }
+
+  .tag-editor-form {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+  }
+
+  .tag-editor-form label {
+    min-width: 0;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--panel-soft);
+    padding: 12px;
+  }
+
+  .tag-editor-form label.changed {
+    border-color: var(--accent-strong);
+    box-shadow: inset 3px 0 0 var(--accent);
+  }
+
+  .tag-editor-form input {
+    width: 100%;
+    min-height: 38px;
+    border: 1px solid var(--border-strong);
+    border-radius: 8px;
+    background: var(--bg-soft);
+    color: var(--text);
+    font: inherit;
+    font-size: 0.9rem;
+    font-weight: 720;
+    padding: 0 10px;
+  }
+
+  .tag-editor-form input:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--focus-ring) 64%, transparent);
+    outline: none;
+  }
+
+  .tag-editor-form input[aria-invalid="true"] {
+    border-color: color-mix(in srgb, var(--danger) 52%, var(--border));
+  }
+
+  .tag-editor-form input:disabled {
+    color: var(--text-dim);
+  }
+
+  .tag-editor-form .form-message,
+  .tag-editor-actions {
+    grid-column: 1 / -1;
+  }
+
+  .tag-editor-actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 10px;
   }
 
   .shortcuts-header,
@@ -13377,10 +13947,29 @@
       transform: none;
     }
 
+    .tag-editor-backdrop,
     .shortcuts-backdrop,
     .confirmation-backdrop {
       align-items: start;
       padding: 16px;
+    }
+
+    .tag-editor-header {
+      grid-template-columns: 64px minmax(0, 1fr);
+    }
+
+    .tag-editor-header > button {
+      grid-column: 1 / -1;
+      justify-self: start;
+    }
+
+    .tag-editor-art {
+      width: 64px;
+      height: 64px;
+    }
+
+    .tag-editor-form {
+      grid-template-columns: 1fr;
     }
   }
 

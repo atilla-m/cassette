@@ -1,10 +1,13 @@
 use gst::prelude::*;
 use gstreamer as gst;
 use libloading::Library;
-use lofty::config::WriteOptions;
+use lofty::config::{ParseOptions, WriteOptions};
 use lofty::file::{AudioFile, TaggedFileExt};
+use lofty::flac::FlacFile;
+use lofty::ogg::VorbisComments;
 use lofty::picture::{MimeType, Picture, PictureType};
 use lofty::probe::Probe;
+use lofty::tag::items::Timestamp;
 use lofty::tag::{Accessor, ItemKey, Tag, TagType};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -34,8 +37,10 @@ const MAX_LYRICS_BYTES: u64 = 1024 * 1024;
 const GENRE_SCOPE_ALBUM: &str = "album";
 const GENRE_SCOPE_ARTIST: &str = "artist";
 const MUSICBRAINZ_USER_AGENT: &str = "Cassette/0.1.0 (local music player; contact: none)";
+const UNVALIDATED_TAG_FORMAT_MESSAGE: &str =
+    "Tag editing for this format has not been safely validated yet.";
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Track {
     id: String,
@@ -74,6 +79,43 @@ struct TrackMetadata {
     year: Option<u16>,
     duration_seconds: Option<u32>,
     embedded_cover_art: Option<EmbeddedCoverArt>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateTrackTagsRequest {
+    track_id: String,
+    title: Option<String>,
+    artist: Option<String>,
+    album: Option<String>,
+    album_artist: Option<String>,
+    genre: Option<String>,
+    year: Option<u16>,
+    track_number: Option<u32>,
+    disc_number: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TrackTagValues {
+    title: Option<String>,
+    artist: Option<String>,
+    album: Option<String>,
+    album_artist: Option<String>,
+    genre: Option<String>,
+    year: Option<u16>,
+    track_number: Option<u32>,
+    disc_number: Option<u32>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TrackTagEditorData {
+    track: Track,
+    file_values: TrackTagValues,
+    genre_override_active: bool,
+    tag_editing_supported: bool,
+    unsupported_reason: Option<String>,
 }
 
 #[derive(Debug)]
@@ -508,6 +550,11 @@ struct PlaybackHistory {
     last_played_at: Option<i64>,
 }
 
+#[derive(Debug, Default)]
+struct TagWriteState {
+    active_paths: HashSet<String>,
+}
+
 struct ImportedDvdVideo {
     video: VideoEntry,
     output_folder: String,
@@ -875,6 +922,111 @@ async fn scan_library(
     library.replace_library(&root_path, &mut tracks, scanned_at)?;
 
     Ok(tracks)
+}
+
+#[tauri::command]
+fn get_track_tag_editor_data(
+    track_id: String,
+    library: State<'_, Mutex<LibraryDatabase>>,
+) -> Result<TrackTagEditorData, String> {
+    let (track, root_path, genre_assignments) = {
+        let library = library
+            .lock()
+            .map_err(|_| "Library cache is unavailable.".to_owned())?;
+        let track = library
+            .track_by_id(&track_id)?
+            .ok_or_else(|| "Track is not in the library cache.".to_owned())?;
+        let root_path = library
+            .meta_value("last_scanned_folder")?
+            .ok_or_else(|| "No active library folder is configured.".to_owned())?;
+        let genre_assignments = library.genre_assignments()?;
+
+        (track, PathBuf::from(root_path), genre_assignments)
+    };
+    let target_path = validated_cached_track_path(&track, &root_path)?;
+    let tagged_file = read_tagged_file(&target_path)?;
+    let file_values = track_tag_values_from_file(&tagged_file);
+    let safely_validated_format = tag_editing_safely_validated_for_path(&target_path);
+    let tag_editing_supported = safely_validated_format && tag_editing_supported(&tagged_file);
+    let unsupported_reason = if tag_editing_supported {
+        None
+    } else if !safely_validated_format {
+        Some(UNVALIDATED_TAG_FORMAT_MESSAGE.to_owned())
+    } else {
+        Some("Tag editing is not currently supported for this file format.".to_owned())
+    };
+    let genre_override_active = genre_override_active_for_values(
+        &file_values,
+        &track,
+        &genre_assignments,
+    );
+
+    Ok(TrackTagEditorData {
+        track,
+        file_values,
+        genre_override_active,
+        tag_editing_supported,
+        unsupported_reason,
+    })
+}
+
+#[tauri::command]
+fn update_track_tags(
+    request: UpdateTrackTagsRequest,
+    app: AppHandle,
+    library: State<'_, Mutex<LibraryDatabase>>,
+    playback: State<'_, Mutex<PlaybackState>>,
+    mpris: State<'_, MprisState>,
+    tag_writes: State<'_, Mutex<TagWriteState>>,
+) -> Result<Track, String> {
+    validate_update_track_tags_request(&request)?;
+
+    let (cached_track, root_path) = {
+        let library = library
+            .lock()
+            .map_err(|_| "Library cache is unavailable.".to_owned())?;
+        let track = library
+            .track_by_id(&request.track_id)?
+            .ok_or_else(|| "Track is not in the library cache.".to_owned())?;
+        let root_path = library
+            .meta_value("last_scanned_folder")?
+            .ok_or_else(|| "No active library folder is configured.".to_owned())?;
+
+        (track, PathBuf::from(root_path))
+    };
+    let target_path = validated_cached_track_path(&cached_track, &root_path)?;
+    let canonical_key = target_path.to_string_lossy().into_owned();
+    let _write_guard = TagWriteGuard::new(&tag_writes, canonical_key)?;
+    update_track_tags_file(&target_path, &request)?;
+
+    let scanned_at = unix_timestamp();
+    let mut updated_track = rescan_single_track_after_tag_write(
+        &PathBuf::from(&cached_track.file_path),
+        scanned_at,
+        app.path().app_data_dir().ok().map(|path| path.join("cover-art")),
+        cached_track.cover_art_path.clone(),
+    )?;
+
+    {
+        let mut library = library
+            .lock()
+            .map_err(|_| "Library cache is unavailable.".to_owned())?;
+        library.update_cached_track(&mut updated_track)?;
+    }
+
+    let current_status = playback
+        .lock()
+        .ok()
+        .map(|playback| playback.status());
+    if current_status
+        .as_ref()
+        .and_then(|status| status.file_path.as_deref())
+        == Some(updated_track.file_path.as_str())
+    {
+        mpris.update_track(Some(MprisTrack::from(&updated_track)), current_status.map(|status| status.is_playing).unwrap_or(false));
+    }
+
+    Ok(updated_track)
 }
 
 #[tauri::command]
@@ -3480,6 +3632,101 @@ impl LibraryDatabase {
         Ok(())
     }
 
+    fn update_cached_track(&mut self, track: &mut Track) -> Result<(), String> {
+        let favorite_track_ids = favorite_track_ids(&self.connection)
+            .map_err(|error| format!("Could not read favorite tracks: {error}"))?;
+        let playback_history = playback_history_by_id(&self.connection)
+            .map_err(|error| format!("Could not read playback history: {error}"))?;
+        track.is_favorite = track.is_favorite || favorite_track_ids.contains(&track.id);
+        if let Some(history) = playback_history.get(&track.id) {
+            track.play_count = history.play_count;
+            track.last_played_at = history.last_played_at;
+        }
+
+        let genres_json = serde_json::to_string(&track.genres).unwrap_or_else(|_| "[]".to_owned());
+        self.connection
+            .execute(
+                "
+                INSERT INTO tracks (
+                    id,
+                    title,
+                    artist,
+                    album,
+                    album_artist,
+                    genres,
+                    track_number,
+                    disc_number,
+                    year,
+                    duration_seconds,
+                    file_path,
+                    file_name,
+                    extension,
+                    modified_time,
+                    file_size,
+                    scanned_at,
+                    cover_art_path,
+                    lyrics_path,
+                    lyrics_kind,
+                    is_favorite,
+                    play_count,
+                    last_played_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)
+                ON CONFLICT(id) DO UPDATE SET
+                    title = excluded.title,
+                    artist = excluded.artist,
+                    album = excluded.album,
+                    album_artist = excluded.album_artist,
+                    genres = excluded.genres,
+                    track_number = excluded.track_number,
+                    disc_number = excluded.disc_number,
+                    year = excluded.year,
+                    duration_seconds = excluded.duration_seconds,
+                    file_path = excluded.file_path,
+                    file_name = excluded.file_name,
+                    extension = excluded.extension,
+                    modified_time = excluded.modified_time,
+                    file_size = excluded.file_size,
+                    scanned_at = excluded.scanned_at,
+                    cover_art_path = excluded.cover_art_path,
+                    lyrics_path = excluded.lyrics_path,
+                    lyrics_kind = excluded.lyrics_kind,
+                    is_favorite = excluded.is_favorite,
+                    play_count = excluded.play_count,
+                    last_played_at = excluded.last_played_at
+                ",
+                params![
+                    &track.id,
+                    &track.title,
+                    &track.artist,
+                    &track.album,
+                    &track.album_artist,
+                    &genres_json,
+                    track.track_number,
+                    track.disc_number,
+                    track.year,
+                    track.duration_seconds,
+                    &track.file_path,
+                    &track.file_name,
+                    &track.extension,
+                    track.modified_time,
+                    track.file_size,
+                    track.scanned_at,
+                    &track.cover_art_path,
+                    &track.lyrics_path,
+                    &track.lyrics_kind,
+                    track.is_favorite,
+                    track.play_count,
+                    track.last_played_at,
+                ],
+            )
+            .map_err(|error| format!("Could not update cached track: {error}"))?;
+
+        let genre_assignments = self.genre_assignments()?;
+        apply_genre_assignments(std::slice::from_mut(track), &genre_assignments);
+
+        Ok(())
+    }
+
     fn meta_value(&self, key: &str) -> Result<Option<String>, String> {
         self.connection
             .query_row(
@@ -5676,6 +5923,575 @@ fn apply_genre_assignments(tracks: &mut [Track], assignments: &GenreAssignmentMa
     }
 }
 
+struct TagWriteGuard<'a> {
+    state: &'a Mutex<TagWriteState>,
+    path: String,
+}
+
+impl<'a> TagWriteGuard<'a> {
+    fn new(state: &'a Mutex<TagWriteState>, path: String) -> Result<Self, String> {
+        let mut writes = state
+            .lock()
+            .map_err(|_| "Tag writer state is unavailable.".to_owned())?;
+
+        if !writes.active_paths.insert(path.clone()) {
+            return Err("This track is already being edited.".to_owned());
+        }
+
+        Ok(Self { state, path })
+    }
+}
+
+impl Drop for TagWriteGuard<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut writes) = self.state.lock() {
+            writes.active_paths.remove(&self.path);
+        }
+    }
+}
+
+fn validate_update_track_tags_request(request: &UpdateTrackTagsRequest) -> Result<(), String> {
+    if request.track_id.trim().is_empty() {
+        return Err("Track is not in the library cache.".to_owned());
+    }
+
+    if matches!(request.year, Some(0)) {
+        return Err("Year must be blank or a positive integer.".to_owned());
+    }
+
+    if matches!(request.track_number, Some(0)) {
+        return Err("Track number must be blank or an integer greater than or equal to 1.".to_owned());
+    }
+
+    if matches!(request.disc_number, Some(0)) {
+        return Err("Disc number must be blank or an integer greater than or equal to 1.".to_owned());
+    }
+
+    Ok(())
+}
+
+fn validated_cached_track_path(track: &Track, root_path: &Path) -> Result<PathBuf, String> {
+    let target_path = PathBuf::from(&track.file_path);
+
+    if target_path.is_dir() {
+        return Err("Selected track is a directory.".to_owned());
+    }
+
+    if !is_supported_audio_file(&target_path) {
+        return Err("Tag editing is not currently supported for this file format.".to_owned());
+    }
+
+    let canonical_root = root_path
+        .canonicalize()
+        .map_err(|error| format!("Could not verify library folder: {error}"))?;
+    let canonical_target = target_path
+        .canonicalize()
+        .map_err(|error| {
+            if error.kind() == io::ErrorKind::NotFound {
+                "Selected track no longer exists.".to_owned()
+            } else {
+                format!("Could not verify selected track: {error}")
+            }
+        })?;
+
+    if !canonical_target.starts_with(&canonical_root) {
+        return Err("Selected track is outside the active library folder.".to_owned());
+    }
+
+    let metadata = fs::metadata(&canonical_target)
+        .map_err(|error| format!("Could not read selected track: {error}"))?;
+
+    if !metadata.is_file() {
+        return Err("Selected track is not a file.".to_owned());
+    }
+
+    Ok(canonical_target)
+}
+
+fn read_tagged_file(path: &Path) -> Result<lofty::file::TaggedFile, String> {
+    Probe::open(path)
+        .and_then(|probe| probe.read())
+        .map_err(|error| format!("Could not read audio tags: {error}"))
+}
+
+fn tag_editing_supported(tagged_file: &lofty::file::TaggedFile) -> bool {
+    tagged_file
+        .tag_support(tagged_file.primary_tag_type())
+        .is_writable()
+}
+
+fn tag_editing_safely_validated_for_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("flac"))
+}
+
+fn track_tag_values_from_file(tagged_file: &lofty::file::TaggedFile) -> TrackTagValues {
+    let tag = tagged_file.primary_tag().or_else(|| tagged_file.first_tag());
+
+    TrackTagValues {
+        title: tag.and_then(|tag| clean_text(tag.title().map(|value| value.into_owned()))),
+        artist: tag.and_then(|tag| clean_text(tag.artist().map(|value| value.into_owned()))),
+        album: tag.and_then(|tag| clean_text(tag.album().map(|value| value.into_owned()))),
+        album_artist: tag.and_then(album_artist),
+        genre: raw_genres_for_editor(tagged_file),
+        year: tag.and_then(|tag| tag.date().map(|date| date.year)),
+        track_number: tag.and_then(Accessor::track),
+        disc_number: tag.and_then(Accessor::disk),
+    }
+}
+
+fn raw_genres_for_editor(tagged_file: &lofty::file::TaggedFile) -> Option<String> {
+    let genres = tagged_file
+        .primary_tag()
+        .into_iter()
+        .chain(tagged_file.tags().iter())
+        .flat_map(|tag| tag.get_strings(ItemKey::Genre))
+        .flat_map(split_genres)
+        .collect::<Vec<_>>();
+    let genres = normalize_genres_without_unknown(genres);
+
+    if genres.is_empty() {
+        None
+    } else {
+        Some(genres.join("; "))
+    }
+}
+
+fn normalize_genres_without_unknown(genres: Vec<String>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut normalized = Vec::new();
+
+    for genre in genres {
+        let Some(genre) = clean_text(Some(genre)) else {
+            continue;
+        };
+        let key = genre.to_lowercase();
+
+        if seen.insert(key) {
+            normalized.push(genre);
+        }
+    }
+
+    normalized
+}
+
+fn genre_override_active_for_values(
+    values: &TrackTagValues,
+    track: &Track,
+    assignments: &GenreAssignmentMaps,
+) -> bool {
+    let raw_track = Track {
+        genres: values
+            .genre
+            .as_deref()
+            .map(split_genres)
+            .unwrap_or_default(),
+        album: values.album.clone(),
+        album_artist: values.album_artist.clone(),
+        artist: values.artist.clone(),
+        ..track.clone()
+    };
+
+    assignments.albums.contains_key(&album_key_for_track(&raw_track))
+        || assignments.artists.contains_key(&artist_key_for_track(&raw_track))
+}
+
+fn update_track_tags_file(path: &Path, request: &UpdateTrackTagsRequest) -> Result<(), String> {
+    validate_update_track_tags_request(request)?;
+
+    if !tag_editing_safely_validated_for_path(path) {
+        return Err(UNVALIDATED_TAG_FORMAT_MESSAGE.to_owned());
+    }
+
+    safe_update_track_tags_with_hook(path, request, &mut |_| Ok(()))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TagWriteStage {
+    AfterTemporaryVerification,
+    AfterOriginalRenamed,
+    BeforeEditedFileBecomesFinal,
+    DuringFinalVerification,
+    BeforeBackupRestore,
+}
+
+fn safe_update_track_tags_with_hook<F>(
+    path: &Path,
+    request: &UpdateTrackTagsRequest,
+    hook: &mut F,
+) -> Result<(), String>
+where
+    F: FnMut(TagWriteStage) -> Result<(), String>,
+{
+    let original_metadata =
+        fs::metadata(path).map_err(|error| format!("Could not read selected track: {error}"))?;
+
+    if original_metadata.permissions().readonly() {
+        return Err("Selected track is read-only.".to_owned());
+    }
+
+    let temp_path = unique_sidecar_path(path, "tmp")?;
+    let backup_path = unique_sidecar_path(path, "backup")?;
+
+    if let Err(error) = fs::copy(path, &temp_path) {
+        cleanup_file(&temp_path);
+        return Err(format!("Could not create safe editing copy: {error}"));
+    }
+
+    if let Err(error) = fs::set_permissions(&temp_path, original_metadata.permissions()) {
+        cleanup_file(&temp_path);
+        return Err(format!("Could not preserve file permissions: {error}"));
+    }
+
+    if let Err(error) = write_tags_to_temp_file(&temp_path, request) {
+        cleanup_file(&temp_path);
+        return Err(error);
+    }
+
+    if let Err(error) = sync_file(&temp_path) {
+        cleanup_file(&temp_path);
+        return Err(format!("Could not flush edited tags: {error}"));
+    }
+
+    if let Err(error) = verify_tag_values(&temp_path, request) {
+        cleanup_file(&temp_path);
+        return Err(error);
+    }
+
+    if let Err(error) = hook(TagWriteStage::AfterTemporaryVerification) {
+        cleanup_file(&temp_path);
+        return Err(format!("Safe replacement stopped after temporary verification: {error}"));
+    }
+
+    replace_original_with_verified_temp(path, &temp_path, &backup_path, request, hook)
+}
+
+fn write_tags_to_temp_file(path: &Path, request: &UpdateTrackTagsRequest) -> Result<(), String> {
+    if !tag_editing_safely_validated_for_path(path) {
+        return Err(UNVALIDATED_TAG_FORMAT_MESSAGE.to_owned());
+    }
+
+    write_tags_to_flac(path, request)
+}
+
+fn write_tags_to_flac(path: &Path, request: &UpdateTrackTagsRequest) -> Result<(), String> {
+    let mut input = fs::File::open(path)
+        .map_err(|error| format!("Could not open FLAC for tag editing: {error}"))?;
+    let mut flac = FlacFile::read_from(&mut input, ParseOptions::new())
+        .map_err(|error| format!("Could not read FLAC tags: {error}"))?;
+    drop(input);
+
+    if flac.vorbis_comments().is_none() {
+        flac.set_vorbis_comments(VorbisComments::new());
+    }
+    let tag = flac
+        .vorbis_comments_mut()
+        .ok_or_else(|| "Could not prepare writable FLAC tag container.".to_owned())?;
+    apply_vorbis_tag_update_request(tag, request);
+    flac.save_to_path(path, WriteOptions::default())
+        .map_err(|error| format!("Could not write FLAC tags: {error}"))
+}
+
+fn apply_vorbis_tag_update_request(tag: &mut VorbisComments, request: &UpdateTrackTagsRequest) {
+    set_or_remove_vorbis_text(tag, "TITLE", request.title.as_deref());
+    set_or_remove_vorbis_text(tag, "ARTIST", request.artist.as_deref());
+    set_or_remove_vorbis_text(tag, "ALBUM", request.album.as_deref());
+    set_or_remove_vorbis_text(tag, "ALBUMARTIST", request.album_artist.as_deref());
+    drop(tag.remove("ALBUMARTISTS"));
+    set_or_remove_vorbis_text(tag, "GENRE", request.genre.as_deref());
+
+    if let Some(year) = request.year {
+        tag.set_date(Timestamp {
+            year,
+            ..Timestamp::default()
+        });
+    } else {
+        tag.remove_date();
+    }
+
+    if let Some(track_number) = request.track_number {
+        tag.set_track(track_number);
+    } else {
+        tag.remove_track();
+    }
+
+    if let Some(disc_number) = request.disc_number {
+        tag.set_disk(disc_number);
+    } else {
+        tag.remove_disk();
+    }
+}
+
+fn set_or_remove_vorbis_text(tag: &mut VorbisComments, key: &str, value: Option<&str>) {
+    if let Some(value) = normalized_request_text(value) {
+        tag.insert(key.to_owned(), value);
+    } else {
+        drop(tag.remove(key));
+    }
+}
+
+fn normalized_request_text(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+fn verify_tag_values(path: &Path, request: &UpdateTrackTagsRequest) -> Result<(), String> {
+    let tagged_file = read_tagged_file(path)?;
+    let actual = track_tag_values_from_file(&tagged_file);
+    let expected = TrackTagValues {
+        title: normalized_request_text(request.title.as_deref()),
+        artist: normalized_request_text(request.artist.as_deref()),
+        album: normalized_request_text(request.album.as_deref()),
+        album_artist: normalized_request_text(request.album_artist.as_deref()),
+        genre: normalized_request_text(request.genre.as_deref()),
+        year: request.year,
+        track_number: request.track_number,
+        disc_number: request.disc_number,
+    };
+
+    if tag_values_match(&actual, &expected) {
+        Ok(())
+    } else {
+        Err("Tag verification failed after writing.".to_owned())
+    }
+}
+
+fn tag_values_match(actual: &TrackTagValues, expected: &TrackTagValues) -> bool {
+    normalize_optional_text(actual.title.as_deref()) == normalize_optional_text(expected.title.as_deref())
+        && normalize_optional_text(actual.artist.as_deref()) == normalize_optional_text(expected.artist.as_deref())
+        && normalize_optional_text(actual.album.as_deref()) == normalize_optional_text(expected.album.as_deref())
+        && normalize_optional_text(actual.album_artist.as_deref()) == normalize_optional_text(expected.album_artist.as_deref())
+        && normalize_optional_genre(actual.genre.as_deref()) == normalize_optional_genre(expected.genre.as_deref())
+        && actual.year == expected.year
+        && actual.track_number == expected.track_number
+        && actual.disc_number == expected.disc_number
+}
+
+fn normalize_optional_text(value: Option<&str>) -> Option<String> {
+    normalized_request_text(value)
+}
+
+fn normalize_optional_genre(value: Option<&str>) -> Option<String> {
+    let genres = value
+        .map(split_genres)
+        .map(normalize_genres_without_unknown)
+        .unwrap_or_default();
+
+    if genres.is_empty() {
+        None
+    } else {
+        Some(genres.join("; "))
+    }
+}
+
+fn sync_file(path: &Path) -> io::Result<()> {
+    fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)?
+        .sync_all()
+}
+
+fn replace_original_with_verified_temp<F>(
+    original_path: &Path,
+    temp_path: &Path,
+    backup_path: &Path,
+    request: &UpdateTrackTagsRequest,
+    hook: &mut F,
+) -> Result<(), String>
+where
+    F: FnMut(TagWriteStage) -> Result<(), String>,
+{
+    if let Err(error) = fs::rename(original_path, backup_path) {
+        cleanup_file(temp_path);
+        return Err(format!("Could not prepare safe replacement: {error}"));
+    }
+
+    if let Err(error) = hook(TagWriteStage::AfterOriginalRenamed) {
+        return restore_backup_before_replacement(
+            original_path,
+            temp_path,
+            backup_path,
+            error,
+            hook,
+        );
+    }
+
+    if let Err(error) = hook(TagWriteStage::BeforeEditedFileBecomesFinal) {
+        return restore_backup_before_replacement(
+            original_path,
+            temp_path,
+            backup_path,
+            error,
+            hook,
+        );
+    }
+
+    if let Err(error) = fs::rename(temp_path, original_path) {
+        let restore_result = restore_backup_rename(backup_path, original_path, hook);
+        if restore_result.is_ok() {
+            cleanup_file(temp_path);
+        }
+        return match restore_result {
+            Ok(()) => Err(format!("Could not replace original file; original was restored: {error}")),
+            Err(restore_error) => Err(format!(
+                "Could not replace original file and automatic restore failed: {error}; restore error: {restore_error}; backup remains at {}; edited temporary file remains at {}",
+                backup_path.display(),
+                temp_path.display(),
+            )),
+        };
+    }
+
+    let final_verification = hook(TagWriteStage::DuringFinalVerification)
+        .and_then(|()| verify_tag_values(original_path, request));
+    if let Err(error) = final_verification {
+        return match restore_backup_after_failed_replacement(original_path, backup_path, hook) {
+            Ok(()) => Err(format!("Final tag verification failed; original was restored: {error}")),
+            Err(restore_error) => Err(format!(
+                "Final tag verification failed and automatic restore failed: {error}; restore error: {restore_error}"
+            )),
+        };
+    }
+
+    cleanup_file(backup_path);
+
+    Ok(())
+}
+
+fn restore_backup_before_replacement<F>(
+    original_path: &Path,
+    temp_path: &Path,
+    backup_path: &Path,
+    replacement_error: String,
+    hook: &mut F,
+) -> Result<(), String>
+where
+    F: FnMut(TagWriteStage) -> Result<(), String>,
+{
+    match restore_backup_rename(backup_path, original_path, hook) {
+        Ok(()) => {
+            cleanup_file(temp_path);
+            Err(format!(
+                "Safe replacement stopped; original was restored: {replacement_error}"
+            ))
+        }
+        Err(restore_error) => Err(format!(
+            "Safe replacement stopped and automatic restore failed: {replacement_error}; restore error: {restore_error}; backup remains at {}; edited temporary file remains at {}",
+            backup_path.display(),
+            temp_path.display(),
+        )),
+    }
+}
+
+fn restore_backup_rename<F>(
+    backup_path: &Path,
+    original_path: &Path,
+    hook: &mut F,
+) -> Result<(), String>
+where
+    F: FnMut(TagWriteStage) -> Result<(), String>,
+{
+    hook(TagWriteStage::BeforeBackupRestore)?;
+    fs::rename(backup_path, original_path).map_err(|error| error.to_string())
+}
+
+fn restore_backup_after_failed_replacement<F>(
+    original_path: &Path,
+    backup_path: &Path,
+    hook: &mut F,
+) -> Result<(), String>
+where
+    F: FnMut(TagWriteStage) -> Result<(), String>,
+{
+    let failed_path = unique_sidecar_path(original_path, "failed")?;
+
+    fs::rename(original_path, &failed_path).map_err(|error| {
+        format!(
+            "edited file remains at {}; backup remains at {}; could not move edited file aside: {error}",
+            original_path.display(),
+            backup_path.display()
+        )
+    })?;
+
+    if let Err(error) = restore_backup_rename(backup_path, original_path, hook) {
+        let restore_edited_result = fs::rename(&failed_path, original_path);
+        return match restore_edited_result {
+            Ok(()) => Err(format!(
+                "backup remains at {}; edited file was put back at {}; restore error: {error}",
+                backup_path.display(),
+                original_path.display()
+            )),
+            Err(edited_restore_error) => Err(format!(
+                "backup remains at {}; edited file remains at {}; restore error: {error}; edited file restore error: {edited_restore_error}",
+                backup_path.display(),
+                failed_path.display()
+            )),
+        };
+    }
+
+    cleanup_file(&failed_path);
+
+    Ok(())
+}
+
+fn unique_sidecar_path(original_path: &Path, kind: &str) -> Result<PathBuf, String> {
+    let parent = original_path
+        .parent()
+        .ok_or_else(|| "Selected track has no parent folder.".to_owned())?;
+    let file_name = original_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "Selected track filename is invalid.".to_owned())?;
+    let extension = original_path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or("audio");
+    let nonce = unique_timestamp_nanos();
+
+    for attempt in 0..1000 {
+        let candidate = parent.join(format!(
+            ".{file_name}.cassette-{nonce}-{attempt}.{kind}.{extension}"
+        ));
+
+        if !candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+
+    Err("Could not allocate a safe temporary filename.".to_owned())
+}
+
+fn cleanup_file(path: &Path) {
+    if path.exists() {
+        let _ = fs::remove_file(path);
+    }
+}
+
+fn rescan_single_track_after_tag_write(
+    path: &Path,
+    scanned_at: i64,
+    cover_art_dir: Option<PathBuf>,
+    previous_cover_art_path: Option<String>,
+) -> Result<Track, String> {
+    let Some((mut track, embedded_cover_art)) = track_from_path(path.to_path_buf(), scanned_at) else {
+        return Err("Tags were written, but Cassette could not rescan the updated file.".to_owned());
+    };
+    let album_art_key = album_art_key_for_track(&track, path);
+    track.cover_art_path = cover_art_candidate(
+        cover_art_dir.as_deref(),
+        &album_art_key,
+        path,
+        embedded_cover_art.as_ref(),
+    )
+    .map(|cover_art| cover_art.path)
+    .or(previous_cover_art_path);
+
+    Ok(track)
+}
+
 fn album_art_key_for_track(track: &Track, path: &Path) -> String {
     let folder = path
         .parent()
@@ -6498,11 +7314,716 @@ fn video_title_from_path(path: &Path) -> String {
         .unwrap_or_else(|| "Untitled Video".into())
 }
 
+#[cfg(test)]
+mod tag_editor_tests {
+    use super::*;
+    use lofty::ogg::OggPictureStorage;
+    use lofty::picture::PictureInformation;
+    use std::sync::{mpsc, Arc};
+    use std::thread;
+
+    const REAL_FLAC_ENV: &str = "CASSETTE_TAG_TEST_FLAC";
+
+    struct TestAudioFile {
+        directory: PathBuf,
+        path: PathBuf,
+    }
+
+    impl TestAudioFile {
+        fn new(label: &str) -> Self {
+            let source = std::env::var_os(REAL_FLAC_ENV).unwrap_or_else(|| {
+                panic!("{REAL_FLAC_ENV} must point to the disposable copied FLAC")
+            });
+            let source = PathBuf::from(source);
+            assert!(source.is_file(), "test FLAC does not exist: {}", source.display());
+            assert_eq!(
+                source.extension().and_then(|value| value.to_str()),
+                Some("flac"),
+                "test input must be a disposable FLAC copy"
+            );
+
+            let safe_label = label.replace(|character: char| !character.is_ascii_alphanumeric(), "_");
+            let directory = std::env::temp_dir().join(format!(
+                "Cassette Tag Editor Rust Test-{}-{}-{safe_label}",
+                std::process::id(),
+                unique_timestamp_nanos(),
+            ));
+            fs::create_dir(&directory).expect("create isolated test directory");
+            let path = directory.join("copied-track.flac");
+            fs::copy(&source, &path).expect("copy disposable FLAC into isolated test directory");
+
+            Self { directory, path }
+        }
+
+        fn sidecars(&self) -> Vec<PathBuf> {
+            let mut sidecars = fs::read_dir(&self.directory)
+                .expect("read test directory")
+                .filter_map(Result::ok)
+                .map(|entry| entry.path())
+                .filter(|path| {
+                    path.file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.contains(".cassette-"))
+                })
+                .collect::<Vec<_>>();
+            sidecars.sort();
+            sidecars
+        }
+    }
+
+    impl Drop for TestAudioFile {
+        fn drop(&mut self) {
+            if !thread::panicking() {
+                fs::remove_dir_all(&self.directory).expect("clean isolated test directory");
+            } else {
+                eprintln!(
+                    "preserving failed tag-editor test artifacts at {}",
+                    self.directory.display()
+                );
+            }
+        }
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct UnrelatedMetadataSnapshot {
+        items: Vec<String>,
+        raw_vorbis_items: Vec<(String, String)>,
+        pictures: Vec<(String, Picture)>,
+    }
+
+    fn request_for(path: &Path) -> UpdateTrackTagsRequest {
+        let tagged_file = read_tagged_file(path).expect("read test FLAC tags");
+        let values = track_tag_values_from_file(&tagged_file);
+
+        UpdateTrackTagsRequest {
+            track_id: path.to_string_lossy().into_owned(),
+            title: values.title,
+            artist: values.artist,
+            album: values.album,
+            album_artist: values.album_artist,
+            genre: values.genre,
+            year: values.year,
+            track_number: values.track_number,
+            disc_number: values.disc_number,
+        }
+    }
+
+    fn values_for(path: &Path) -> TrackTagValues {
+        track_tag_values_from_file(&read_tagged_file(path).expect("reopen test FLAC"))
+    }
+
+    fn unrelated_metadata(path: &Path) -> UnrelatedMetadataSnapshot {
+        let tagged_file = read_tagged_file(path).expect("read complete metadata snapshot");
+        let mut items = Vec::new();
+        let mut raw_vorbis_items = raw_vorbis_items(path)
+            .into_iter()
+            .filter(|(key, _)| !is_editable_vorbis_key(key))
+            .collect::<Vec<_>>();
+        let mut pictures = Vec::new();
+
+        for tag in tagged_file.tags() {
+            let tag_type = format!("{:?}", tag.tag_type());
+            for item in tag.items() {
+                if !is_editable_item_key(item.key()) {
+                    items.push(format!(
+                        "{tag_type}|{:?}|{}|{:?}",
+                        item.key(),
+                        item.description(),
+                        item.value(),
+                    ));
+                }
+            }
+            pictures.extend(
+                tag.pictures()
+                    .iter()
+                    .cloned()
+                    .map(|picture| (tag_type.clone(), picture)),
+            );
+        }
+
+        items.sort();
+        raw_vorbis_items.sort();
+        pictures.sort_by(|left, right| format!("{:?}", left).cmp(&format!("{:?}", right)));
+        UnrelatedMetadataSnapshot {
+            items,
+            raw_vorbis_items,
+            pictures,
+        }
+    }
+
+    fn raw_vorbis_items(path: &Path) -> Vec<(String, String)> {
+        let mut input = fs::File::open(path).expect("open FLAC for raw Vorbis snapshot");
+        let flac = FlacFile::read_from(&mut input, ParseOptions::new())
+            .expect("read format-specific FLAC metadata");
+        flac.vorbis_comments()
+            .map(|tag| {
+                tag.items()
+                    .map(|(key, value)| (key.to_owned(), value.to_owned()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn is_editable_vorbis_key(key: &str) -> bool {
+        matches!(
+            key.to_ascii_uppercase().as_str(),
+            "TITLE"
+                | "ARTIST"
+                | "ALBUM"
+                | "ALBUMARTIST"
+                | "ALBUMARTISTS"
+                | "GENRE"
+                | "DATE"
+                | "YEAR"
+                | "TRACKNUMBER"
+                | "TRACKNUM"
+                | "DISCNUMBER"
+        )
+    }
+
+    fn is_editable_item_key(key: ItemKey) -> bool {
+        matches!(
+            key,
+            ItemKey::TrackTitle
+                | ItemKey::TrackArtist
+                | ItemKey::AlbumTitle
+                | ItemKey::AlbumArtist
+                | ItemKey::AlbumArtists
+                | ItemKey::Genre
+                | ItemKey::RecordingDate
+                | ItemKey::Year
+                | ItemKey::TrackNumber
+                | ItemKey::DiscNumber
+        )
+    }
+
+    fn add_preservation_metadata(path: &Path) {
+        const TEST_PNG: &[u8] = &[
+            0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,
+            b'I', b'H', b'D', b'R', 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+            0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4, 0x89, 0x00, 0x00, 0x00,
+            0x0d, b'I', b'D', b'A', b'T', 0x08, 0xd7, 0x63, 0xf8, 0xcf, 0xc0, 0xf0,
+            0x1f, 0x00, 0x05, 0x00, 0x01, 0xff, 0x89, 0x99, 0x3d, 0x1d, 0x00, 0x00,
+            0x00, 0x00, b'I', b'E', b'N', b'D', 0xae, 0x42, 0x60, 0x82,
+        ];
+
+        let mut input = fs::File::open(path).expect("read FLAC to add preservation tags");
+        let mut flac = FlacFile::read_from(&mut input, ParseOptions::new())
+            .expect("read format-specific FLAC metadata");
+        drop(input);
+        let tag = flac.vorbis_comments_mut().expect("FLAC Vorbis comments");
+        tag.insert("COMMENT".to_owned(), "Cassette preservation comment".to_owned());
+        tag.insert("LYRICS".to_owned(), "Preserve these lyrics exactly".to_owned());
+        tag.insert("REPLAYGAIN_TRACK_GAIN".to_owned(), "-7.25 dB".to_owned());
+        tag.insert("REPLAYGAIN_TRACK_PEAK".to_owned(), "0.987654".to_owned());
+        tag.insert(
+            "MUSICBRAINZ_TRACKID".to_owned(),
+            "00000000-1111-2222-3333-444444444444".to_owned(),
+        );
+        tag.insert(
+            "MUSICBRAINZ_ALBUMID".to_owned(),
+            "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".to_owned(),
+        );
+        tag.insert(
+            "CASSETTE_CUSTOM_FIELD".to_owned(),
+            "preserve this unknown Vorbis field".to_owned(),
+        );
+        tag.insert_picture(
+            Picture::unchecked(TEST_PNG.to_vec())
+                .pic_type(PictureType::CoverFront)
+                .mime_type(MimeType::Png)
+                .description("Cassette preservation artwork")
+                .build(),
+            Some(PictureInformation::default()),
+        )
+        .expect("insert test picture");
+        flac
+            .save_to_path(path, WriteOptions::default())
+            .expect("save preservation metadata");
+
+        let reopened = read_tagged_file(path).expect("reopen preservation metadata");
+        let tag = reopened.primary_tag().expect("reopened FLAC tag");
+        assert_eq!(tag.get_string(ItemKey::Lyrics), Some("Preserve these lyrics exactly"));
+        assert_eq!(tag.get_string(ItemKey::ReplayGainTrackGain), Some("-7.25 dB"));
+        assert_eq!(
+            tag.get_string(ItemKey::MusicBrainzRecordingId),
+            Some("00000000-1111-2222-3333-444444444444")
+        );
+        assert!(raw_vorbis_items(path).contains(&(
+            "CASSETTE_CUSTOM_FIELD".to_owned(),
+            "preserve this unknown Vorbis field".to_owned(),
+        )));
+        assert_eq!(tag.pictures().len(), 1);
+    }
+
+    fn assert_no_sidecars(test_file: &TestAudioFile) {
+        assert_eq!(test_file.sidecars(), Vec::<PathBuf>::new());
+    }
+
+    fn assert_decodable(path: &Path) {
+        let status = Command::new("flac")
+            .args(["--silent", "--test"])
+            .arg(path)
+            .status()
+            .expect("run installed flac decoder");
+        assert!(status.success(), "flac -t rejected {}", path.display());
+    }
+
+    #[test]
+    fn only_flac_is_enabled_and_other_formats_are_rejected_before_writing() {
+        assert!(tag_editing_safely_validated_for_path(Path::new("track.flac")));
+        assert!(tag_editing_safely_validated_for_path(Path::new("track.FLAC")));
+
+        let directory = std::env::temp_dir().join(format!(
+            "Cassette Tag Format Gate Test-{}-{}",
+            std::process::id(),
+            unique_timestamp_nanos(),
+        ));
+        fs::create_dir(&directory).expect("create format-gate test directory");
+        let request = UpdateTrackTagsRequest {
+            track_id: "format-gate-test".to_owned(),
+            title: Some("must not be written".to_owned()),
+            artist: None,
+            album: None,
+            album_artist: None,
+            genre: None,
+            year: None,
+            track_number: None,
+            disc_number: None,
+        };
+
+        for extension in ["mp3", "ogg", "opus", "wav", "m4a"] {
+            let path = directory.join(format!("track.{extension}"));
+            let original = format!("not parsed or modified: {extension}").into_bytes();
+            fs::write(&path, &original).expect("create format-gate sentinel file");
+            assert!(!tag_editing_safely_validated_for_path(&path));
+            assert_eq!(
+                update_track_tags_file(&path, &request).expect_err("format must be rejected"),
+                UNVALIDATED_TAG_FORMAT_MESSAGE,
+            );
+            assert_eq!(fs::read(&path).expect("read rejected sentinel"), original);
+        }
+
+        assert!(fs::read_dir(&directory)
+            .expect("read format-gate directory")
+            .filter_map(Result::ok)
+            .all(|entry| !entry.file_name().to_string_lossy().contains(".cassette-")));
+        fs::remove_dir_all(directory).expect("clean format-gate test directory");
+    }
+
+    #[test]
+    #[ignore = "requires CASSETTE_TAG_TEST_FLAC pointing to a disposable real FLAC copy"]
+    fn real_copied_flac_baseline_is_readable_and_reported() {
+        let test_file = TestAudioFile::new("baseline");
+        let tagged_file = read_tagged_file(&test_file.path).expect("read copied real FLAC");
+        let values = track_tag_values_from_file(&tagged_file);
+        let metadata = unrelated_metadata(&test_file.path);
+
+        eprintln!("copied FLAC: {}", test_file.path.display());
+        eprintln!("editable values: {values:#?}");
+        eprintln!("all Lofty-visible unrelated items: {:#?}", metadata.items);
+        eprintln!("picture count: {}", metadata.pictures.len());
+        assert!(tagged_file.properties().duration() > Duration::ZERO);
+        assert_decodable(&test_file.path);
+    }
+
+    #[test]
+    #[ignore = "requires CASSETTE_TAG_TEST_FLAC pointing to a disposable real FLAC copy"]
+    fn single_field_update_preserves_every_unrelated_lofty_item() {
+        let test_file = TestAudioFile::new("single_field");
+        let original_values = values_for(&test_file.path);
+        let original_unrelated = unrelated_metadata(&test_file.path);
+        let mut request = request_for(&test_file.path);
+        request.title = Some("Cassette automated title".to_owned());
+
+        update_track_tags_file(&test_file.path, &request).expect("single-field safe update");
+
+        let actual = values_for(&test_file.path);
+        assert_eq!(actual.title.as_deref(), Some("Cassette automated title"));
+        assert_eq!(actual.artist, original_values.artist);
+        assert_eq!(actual.album, original_values.album);
+        assert_eq!(actual.album_artist, original_values.album_artist);
+        assert_eq!(actual.genre, original_values.genre);
+        assert_eq!(actual.year, original_values.year);
+        assert_eq!(actual.track_number, original_values.track_number);
+        assert_eq!(actual.disc_number, original_values.disc_number);
+        assert_eq!(unrelated_metadata(&test_file.path), original_unrelated);
+        assert_decodable(&test_file.path);
+        assert_no_sidecars(&test_file);
+    }
+
+    #[test]
+    #[ignore = "requires CASSETTE_TAG_TEST_FLAC pointing to a disposable real FLAC copy"]
+    fn full_supported_field_update_round_trips() {
+        let test_file = TestAudioFile::new("all_fields");
+        let request = UpdateTrackTagsRequest {
+            track_id: test_file.path.to_string_lossy().into_owned(),
+            title: Some("Full field title".to_owned()),
+            artist: Some("Full field artist".to_owned()),
+            album: Some("Full field album".to_owned()),
+            album_artist: Some("Full field album artist".to_owned()),
+            genre: Some("Electronic; Test Genre".to_owned()),
+            year: Some(2031),
+            track_number: Some(17),
+            disc_number: Some(3),
+        };
+
+        update_track_tags_file(&test_file.path, &request).expect("full-field safe update");
+
+        assert!(tag_values_match(
+            &values_for(&test_file.path),
+            &TrackTagValues {
+                title: request.title,
+                artist: request.artist,
+                album: request.album,
+                album_artist: request.album_artist,
+                genre: request.genre,
+                year: request.year,
+                track_number: request.track_number,
+                disc_number: request.disc_number,
+            }
+        ));
+        assert_decodable(&test_file.path);
+        assert_no_sidecars(&test_file);
+    }
+
+    #[test]
+    #[ignore = "requires CASSETTE_TAG_TEST_FLAC pointing to a disposable real FLAC copy"]
+    fn unicode_values_round_trip_exactly() {
+        let test_file = TestAudioFile::new("unicode");
+        let mut request = request_for(&test_file.path);
+        request.title = Some("テスト曲 ♫".to_owned());
+        request.artist = Some("Beyoncé — 米津玄師".to_owned());
+        request.album = Some("Crème brûlée № 7 ✨".to_owned());
+        request.album_artist = Some("Álvaro + 宇多田ヒカル".to_owned());
+        request.genre = Some("Électronique; 日本語; ♫".to_owned());
+
+        update_track_tags_file(&test_file.path, &request).expect("Unicode safe update");
+
+        let actual = values_for(&test_file.path);
+        assert_eq!(actual.title, request.title);
+        assert_eq!(actual.artist, request.artist);
+        assert_eq!(actual.album, request.album);
+        assert_eq!(actual.album_artist, request.album_artist);
+        assert_eq!(actual.genre, request.genre);
+        assert_decodable(&test_file.path);
+        assert_no_sidecars(&test_file);
+    }
+
+    #[test]
+    #[ignore = "requires CASSETTE_TAG_TEST_FLAC pointing to a disposable real FLAC copy"]
+    fn blank_optional_field_is_removed_without_collateral_changes() {
+        let test_file = TestAudioFile::new("blank_removal");
+        let original_unrelated = unrelated_metadata(&test_file.path);
+        let mut request = request_for(&test_file.path);
+        request.album_artist = None;
+
+        update_track_tags_file(&test_file.path, &request).expect("clear album artist");
+
+        assert_eq!(values_for(&test_file.path).album_artist, None);
+        assert_eq!(unrelated_metadata(&test_file.path), original_unrelated);
+        assert_decodable(&test_file.path);
+        assert_no_sidecars(&test_file);
+    }
+
+    #[test]
+    #[ignore = "requires CASSETTE_TAG_TEST_FLAC pointing to a disposable real FLAC copy"]
+    fn artwork_lyrics_comments_replaygain_musicbrainz_and_custom_fields_survive() {
+        let test_file = TestAudioFile::new("preservation");
+        add_preservation_metadata(&test_file.path);
+        let original_unrelated = unrelated_metadata(&test_file.path);
+        let mut request = request_for(&test_file.path);
+        request.title = Some("Preservation edit".to_owned());
+        request.genre = Some("Preserved Genre".to_owned());
+
+        update_track_tags_file(&test_file.path, &request).expect("metadata preservation update");
+
+        assert_eq!(unrelated_metadata(&test_file.path), original_unrelated);
+        let tagged_file = read_tagged_file(&test_file.path).expect("reopen preserved metadata");
+        let tag = tagged_file.primary_tag().expect("preserved primary tag");
+        assert_eq!(tag.get_string(ItemKey::Comment), Some("Cassette preservation comment"));
+        assert_eq!(tag.get_string(ItemKey::Lyrics), Some("Preserve these lyrics exactly"));
+        assert_eq!(tag.get_string(ItemKey::ReplayGainTrackGain), Some("-7.25 dB"));
+        assert_eq!(tag.get_string(ItemKey::ReplayGainTrackPeak), Some("0.987654"));
+        assert_eq!(
+            tag.get_string(ItemKey::MusicBrainzReleaseId),
+            Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+        );
+        assert!(raw_vorbis_items(&test_file.path).contains(&(
+            "CASSETTE_CUSTOM_FIELD".to_owned(),
+            "preserve this unknown Vorbis field".to_owned(),
+        )));
+        assert_eq!(tag.pictures().len(), 1);
+        assert_decodable(&test_file.path);
+        assert_no_sidecars(&test_file);
+    }
+
+    #[test]
+    #[ignore = "requires CASSETTE_TAG_TEST_FLAC pointing to a disposable real FLAC copy"]
+    fn invalid_requests_are_rejected_before_file_modification() {
+        let test_file = TestAudioFile::new("invalid");
+        let original = fs::read(&test_file.path).expect("read baseline bytes");
+
+        for invalid_request in [
+            UpdateTrackTagsRequest { year: Some(0), ..request_for(&test_file.path) },
+            UpdateTrackTagsRequest { track_number: Some(0), ..request_for(&test_file.path) },
+            UpdateTrackTagsRequest { disc_number: Some(0), ..request_for(&test_file.path) },
+            UpdateTrackTagsRequest { track_id: "  ".to_owned(), ..request_for(&test_file.path) },
+        ] {
+            assert!(update_track_tags_file(&test_file.path, &invalid_request).is_err());
+            assert_eq!(fs::read(&test_file.path).expect("read rejected file"), original);
+        }
+
+        for invalid_json in [
+            serde_json::json!({ "trackId": "track", "year": "not-a-year" }),
+            serde_json::json!({ "trackId": "track", "discNumber": -2 }),
+            serde_json::json!({ "trackId": "track", "trackNumber": 4.5 }),
+        ] {
+            assert!(serde_json::from_value::<UpdateTrackTagsRequest>(invalid_json).is_err());
+        }
+
+        assert_no_sidecars(&test_file);
+    }
+
+    #[test]
+    #[ignore = "requires CASSETTE_TAG_TEST_FLAC pointing to a disposable real FLAC copy"]
+    fn read_only_file_fails_intact_and_leaves_no_sidecars() {
+        let test_file = TestAudioFile::new("readonly");
+        let original = fs::read(&test_file.path).expect("read baseline bytes");
+        let mut permissions = fs::metadata(&test_file.path).expect("read permissions").permissions();
+        let mut request = request_for(&test_file.path);
+        request.title = Some("must not be written".to_owned());
+        permissions.set_readonly(true);
+        fs::set_permissions(&test_file.path, permissions).expect("make disposable FLAC read-only");
+
+        let result = update_track_tags_file(&test_file.path, &request);
+
+        let mut restored_permissions = fs::metadata(&test_file.path)
+            .expect("read read-only permissions")
+            .permissions();
+        restored_permissions.set_readonly(false);
+        fs::set_permissions(&test_file.path, restored_permissions)
+            .expect("restore disposable FLAC permissions");
+        assert!(result.expect_err("read-only write must fail").contains("read-only"));
+        assert_eq!(fs::read(&test_file.path).expect("read intact file"), original);
+        assert_no_sidecars(&test_file);
+    }
+
+    #[test]
+    #[ignore = "requires CASSETTE_TAG_TEST_FLAC pointing to a disposable real FLAC copy"]
+    fn replacement_failpoints_restore_original_and_clean_sidecars() {
+        for stage in [
+            TagWriteStage::AfterTemporaryVerification,
+            TagWriteStage::AfterOriginalRenamed,
+            TagWriteStage::BeforeEditedFileBecomesFinal,
+            TagWriteStage::DuringFinalVerification,
+        ] {
+            let test_file = TestAudioFile::new(&format!("failpoint_{stage:?}"));
+            let original = fs::read(&test_file.path).expect("read failpoint baseline");
+            let mut request = request_for(&test_file.path);
+            request.title = Some(format!("must roll back at {stage:?}"));
+            let mut hook = |current_stage| {
+                if current_stage == stage {
+                    Err(format!("simulated {stage:?}"))
+                } else {
+                    Ok(())
+                }
+            };
+
+            let error = safe_update_track_tags_with_hook(&test_file.path, &request, &mut hook)
+                .expect_err("simulated replacement failure must be returned");
+
+            assert!(error.contains("simulated"));
+            assert_eq!(fs::read(&test_file.path).expect("read restored original"), original);
+            read_tagged_file(&test_file.path).expect("restored original is readable");
+            assert_decodable(&test_file.path);
+            assert_no_sidecars(&test_file);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires CASSETTE_TAG_TEST_FLAC pointing to a disposable real FLAC copy"]
+    fn simulated_restore_failure_preserves_both_recovery_files() {
+        let test_file = TestAudioFile::new("restore_failure");
+        let original = fs::read(&test_file.path).expect("read restoration baseline");
+        let mut request = request_for(&test_file.path);
+        request.title = Some("edited recovery candidate".to_owned());
+        let mut hook = |stage| {
+            if matches!(
+                stage,
+                TagWriteStage::BeforeEditedFileBecomesFinal | TagWriteStage::BeforeBackupRestore
+            ) {
+                Err(format!("simulated {stage:?}"))
+            } else {
+                Ok(())
+            }
+        };
+
+        let error = safe_update_track_tags_with_hook(&test_file.path, &request, &mut hook)
+            .expect_err("simulated restoration failure must be returned");
+        assert!(error.contains("automatic restore failed"));
+        assert!(!test_file.path.exists());
+        let sidecars = test_file.sidecars();
+        assert_eq!(sidecars.len(), 2, "backup and edited temporary copy must survive");
+        let backup = sidecars
+            .iter()
+            .find(|path| path.to_string_lossy().contains(".backup.flac"))
+            .expect("preserved backup")
+            .clone();
+        let edited_temp = sidecars
+            .iter()
+            .find(|path| path.to_string_lossy().contains(".tmp.flac"))
+            .expect("preserved edited temporary copy")
+            .clone();
+        assert_eq!(fs::read(&backup).expect("read preserved backup"), original);
+        assert_eq!(values_for(&edited_temp).title, request.title);
+        assert_decodable(&backup);
+        assert_decodable(&edited_temp);
+
+        fs::rename(&backup, &test_file.path).expect("manually recover original from backup");
+        fs::remove_file(&edited_temp).expect("remove disposable edited recovery candidate");
+        assert_eq!(fs::read(&test_file.path).expect("read manually restored file"), original);
+        assert_no_sidecars(&test_file);
+    }
+
+    #[test]
+    #[ignore = "requires CASSETTE_TAG_TEST_FLAC pointing to a disposable real FLAC copy"]
+    fn concurrent_write_guard_rejects_second_update_to_same_path() {
+        let test_file = TestAudioFile::new("concurrent");
+        let write_state = Arc::new(Mutex::new(TagWriteState::default()));
+        let path_key = test_file.path.to_string_lossy().into_owned();
+        let path = test_file.path.clone();
+        let mut first_request = request_for(&path);
+        first_request.title = Some("first guarded update".to_owned());
+        let thread_state = Arc::clone(&write_state);
+        let thread_key = path_key.clone();
+        let (locked_sender, locked_receiver) = mpsc::sync_channel(0);
+        let (continue_sender, continue_receiver) = mpsc::sync_channel(0);
+
+        let first = thread::spawn(move || {
+            let _guard = TagWriteGuard::new(&thread_state, thread_key).expect("first writer guard");
+            locked_sender.send(()).expect("announce first guard");
+            continue_receiver.recv().expect("wait for concurrent attempt");
+            update_track_tags_file(&path, &first_request)
+        });
+        locked_receiver.recv().expect("wait for first guard");
+
+        let second_error = TagWriteGuard::new(&write_state, path_key)
+            .err()
+            .expect("second writer must be rejected");
+        assert!(second_error.contains("already being edited"));
+        continue_sender.send(()).expect("release first writer");
+        first.join().expect("first writer thread").expect("first update succeeds");
+        assert_eq!(values_for(&test_file.path).title.as_deref(), Some("first guarded update"));
+        assert_no_sidecars(&test_file);
+    }
+
+    #[test]
+    #[ignore = "requires CASSETTE_TAG_TEST_FLAC pointing to a disposable real FLAC copy"]
+    fn unvalidated_formats_are_rejected_without_modification() {
+        let test_file = TestAudioFile::new("unsupported");
+        let mut request = request_for(&test_file.path);
+        request.title = Some("must not be written".to_owned());
+
+        for extension in ["mp3", "ogg", "opus", "wav", "m4a"] {
+            let unsupported_path = test_file
+                .directory
+                .join(format!("copied-track.{extension}"));
+            fs::copy(&test_file.path, &unsupported_path)
+                .expect("create unvalidated disposable copy");
+            let original = fs::read(&unsupported_path).expect("read unvalidated baseline");
+            let error = update_track_tags_file(&unsupported_path, &request)
+                .expect_err("unvalidated format must fail");
+
+            assert_eq!(error, UNVALIDATED_TAG_FORMAT_MESSAGE);
+            assert_eq!(
+                fs::read(&unsupported_path).expect("read rejected file"),
+                original
+            );
+        }
+        assert_no_sidecars(&test_file);
+    }
+
+    #[test]
+    #[ignore = "requires CASSETTE_TAG_TEST_FLAC pointing to a disposable real FLAC copy"]
+    fn successful_rescan_updates_one_cache_row_and_returns_new_metadata() {
+        let test_file = TestAudioFile::new("cache");
+        let database_path = test_file.directory.join("temporary-library.sqlite3");
+        let mut database = LibraryDatabase::open(database_path).expect("open temporary database");
+        let scanned_at = 1_700_000_000;
+        let (track, _) = track_from_path(test_file.path.clone(), scanned_at).expect("scan fixture");
+        let original_path = track.file_path.clone();
+        let original_id = track.id.clone();
+        let mut initial_tracks = vec![track];
+        database
+            .replace_library(&test_file.directory, &mut initial_tracks, scanned_at)
+            .expect("seed temporary cache");
+        let mut request = request_for(&test_file.path);
+        request.title = Some("Cache updated title".to_owned());
+        request.artist = Some("Cache updated artist".to_owned());
+        request.album = Some("Cache updated album".to_owned());
+        request.album_artist = Some("Cache updated album artist".to_owned());
+        request.genre = Some("Cache Genre".to_owned());
+
+        update_track_tags_file(&test_file.path, &request).expect("write cache test tags");
+        let mut returned_track = rescan_single_track_after_tag_write(
+            &test_file.path,
+            scanned_at + 1,
+            None,
+            None,
+        )
+        .expect("rescan updated track");
+        database
+            .update_cached_track(&mut returned_track)
+            .expect("update temporary cache row");
+
+        let row_count: i64 = database
+            .connection
+            .query_row("SELECT COUNT(*) FROM tracks", [], |row| row.get(0))
+            .expect("count temporary rows");
+        let path_count: i64 = database
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM tracks WHERE file_path = ?1",
+                [&original_path],
+                |row| row.get(0),
+            )
+            .expect("count rows for unchanged path");
+        let cached = database
+            .track_by_id(&original_id)
+            .expect("read updated cached track")
+            .expect("updated track remains cached");
+
+        assert_eq!(row_count, 1);
+        assert_eq!(path_count, 1);
+        assert_eq!(returned_track.id, original_id);
+        assert_eq!(returned_track.file_path, original_path);
+        assert_eq!(returned_track.title, "Cache updated title");
+        assert_eq!(returned_track.artist.as_deref(), Some("Cache updated artist"));
+        assert_eq!(returned_track.album.as_deref(), Some("Cache updated album"));
+        assert_eq!(
+            returned_track.album_artist.as_deref(),
+            Some("Cache updated album artist")
+        );
+        assert_eq!(returned_track.genres, vec!["Cache Genre"]);
+        assert_eq!(cached.title, returned_track.title);
+        assert_eq!(cached.artist, returned_track.artist);
+        assert_eq!(cached.album, returned_track.album);
+        assert_eq!(cached.album_artist, returned_track.album_artist);
+        assert_eq!(cached.genres, returned_track.genres);
+        assert_eq!(cached.file_path, original_path);
+        assert_decodable(&test_file.path);
+        assert_no_sidecars(&test_file);
+    }
+
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .manage(Mutex::new(PlaybackState::default()))
         .manage(Mutex::new(VideoPlaybackState::default()))
+        .manage(Mutex::new(TagWriteState::default()))
         .setup(|app| {
             let db_path = app
                 .path()
@@ -6549,6 +8070,8 @@ pub fn run() {
             scan_dvd_titles,
             import_dvd_title,
             scan_library,
+            get_track_tag_editor_data,
+            update_track_tags,
             toggle_track_favorite,
             record_track_play,
             set_album_genres,

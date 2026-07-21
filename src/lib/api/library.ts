@@ -15,7 +15,9 @@ import type {
   LrclibLyricsResult,
   Playlist,
   Track,
+  TrackTagEditorData,
   TrackLyrics,
+  UpdateTrackTagsRequest,
   VideoEntry,
   VideoInfoUpdate,
   VideoLibrary,
@@ -143,6 +145,14 @@ export async function toggleTrackFavorite(id: string): Promise<boolean> {
 
 export async function recordTrackPlay(id: string): Promise<Track> {
   return invoke<Track>("record_track_play", { id });
+}
+
+export async function getTrackTagEditorData(trackId: string): Promise<TrackTagEditorData> {
+  return invoke<TrackTagEditorData>("get_track_tag_editor_data", { trackId });
+}
+
+export async function updateTrackTags(request: UpdateTrackTagsRequest): Promise<Track> {
+  return invoke<Track>("update_track_tags", { request });
 }
 
 export async function setAlbumGenres(albumId: string, genres: string[]): Promise<Track[]> {
