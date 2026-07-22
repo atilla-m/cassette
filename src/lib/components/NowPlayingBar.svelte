@@ -347,7 +347,7 @@
     >
       Shuffle
     </button>
-    <button type="button" aria-label="Previous track" disabled={!canPlayPrevious} onclick={onPrevious}>&lt;&lt;</button>
+    <button type="button" aria-label="Previous track" disabled={!canPlayPrevious} onclick={onPrevious}>{interfaceMode === "modern" ? "‹" : "<<"}</button>
     <button
       class="play"
       type="button"
@@ -355,9 +355,9 @@
       disabled={!track}
       onclick={onTogglePlayback}
     >
-      {isPlaying ? "||" : ">"}
+      {interfaceMode === "modern" ? isPlaying ? "Ⅱ" : "▶" : isPlaying ? "||" : ">"}
     </button>
-    <button type="button" aria-label="Next track" disabled={!canPlayNext} onclick={onNext}>&gt;&gt;</button>
+    <button type="button" aria-label="Next track" disabled={!canPlayNext} onclick={onNext}>{interfaceMode === "modern" ? "›" : ">>"}</button>
     <button
       class:active={repeatMode !== "off"}
       class="mode-button"
@@ -817,6 +817,221 @@
     background: var(--accent);
   }
 
+  .player.modern:not(.compact) {
+    grid-template-areas:
+      "track transport volume"
+      "track progress volume";
+    grid-template-columns: minmax(250px, 1.05fr) minmax(410px, 1.35fr) minmax(250px, 0.9fr);
+    gap: 4px clamp(20px, 2.4vw, 42px);
+    min-height: 98px;
+    border-top: 1px solid var(--modern-player-border, var(--border));
+    background:
+      linear-gradient(180deg, color-mix(in srgb, var(--text) 1.5%, transparent), transparent 44%),
+      var(--modern-player-background, var(--panel));
+    box-shadow: 0 -16px 40px color-mix(in srgb, var(--modern-shadow, var(--shadow)) 48%, transparent);
+    padding: 12px clamp(20px, 2.4vw, 36px);
+  }
+
+  .player.modern:not(.compact) .track {
+    gap: 15px;
+  }
+
+  .player.modern:not(.compact) .cover {
+    width: 64px;
+    height: 64px;
+    border-radius: 3px;
+    background:
+      linear-gradient(145deg, color-mix(in srgb, var(--accent) 16%, var(--panel-strong)), var(--panel));
+    box-shadow: 0 10px 24px rgba(0, 0, 0, 0.32);
+  }
+
+  .player.modern:not(.compact) .track-copy > span {
+    margin-bottom: 5px;
+    color: var(--text);
+    font-size: 0.95rem;
+    font-weight: 630;
+    letter-spacing: -0.015em;
+  }
+
+  .player.modern:not(.compact) .track-copy small {
+    color: var(--text-soft);
+    font-size: 0.72rem;
+    font-weight: 520;
+  }
+
+  .player.modern:not(.compact) button:not(.track-open) {
+    border: 0;
+    border-radius: 50%;
+    background: transparent;
+    color: var(--text-muted);
+  }
+
+  .player.modern:not(.compact) button:not(.track-open):hover,
+  .player.modern:not(.compact) button:not(.track-open):focus-visible {
+    background: var(--panel-hover);
+    color: var(--text);
+    outline: 2px solid color-mix(in srgb, var(--focus-ring) 76%, transparent);
+    outline-offset: 2px;
+  }
+
+  .player.modern:not(.compact) button:not(.track-open):disabled {
+    background: transparent;
+    color: var(--text-dim);
+    opacity: 0.48;
+  }
+
+  .player.modern:not(.compact) button.favorite {
+    width: 32px;
+    height: 32px;
+    color: var(--text-soft);
+  }
+
+  .player.modern:not(.compact) button.favorite.active,
+  .player.modern:not(.compact) button.favorite:hover,
+  .player.modern:not(.compact) button.favorite:focus-visible {
+    background: transparent;
+    color: var(--warning);
+  }
+
+  .player.modern:not(.compact) .transport {
+    gap: 10px;
+  }
+
+  .player.modern:not(.compact) .transport > button:not(.mode-button):not(.play) {
+    width: 38px;
+    height: 38px;
+    color: var(--text-secondary, var(--text-muted));
+    font-size: 1.7rem;
+    font-weight: 350;
+    line-height: 1;
+  }
+
+  .player.modern:not(.compact) button.play {
+    width: 52px;
+    height: 52px;
+    border-radius: 50%;
+    background: var(--text);
+    box-shadow: 0 7px 20px rgba(0, 0, 0, 0.3);
+    color: var(--accent-contrast);
+    font-size: 0.78rem;
+    transition: background 120ms ease, transform 120ms ease;
+  }
+
+  .player.modern:not(.compact) button.play:hover,
+  .player.modern:not(.compact) button.play:focus-visible {
+    background: var(--accent-hover);
+    color: var(--accent-contrast);
+    transform: translateY(-1px);
+  }
+
+  .player.modern:not(.compact) button.play:disabled {
+    background: var(--panel-strong);
+    box-shadow: none;
+    color: var(--text-dim);
+    transform: none;
+  }
+
+  .player.modern:not(.compact) button.mode-button {
+    position: relative;
+    width: auto;
+    min-width: 52px;
+    height: 32px;
+    border-radius: 0;
+    color: var(--text-dim);
+    font-size: 0.64rem;
+    font-weight: 560;
+    padding: 0 5px;
+  }
+
+  .player.modern:not(.compact) button.mode-button.active {
+    background: transparent;
+    color: var(--accent-text);
+  }
+
+  .player.modern:not(.compact) button.mode-button.active::after {
+    position: absolute;
+    bottom: 1px;
+    left: 50%;
+    width: 4px;
+    height: 4px;
+    border-radius: 50%;
+    background: var(--accent);
+    content: "";
+    transform: translateX(-50%);
+  }
+
+  .player.modern:not(.compact) .progress-area {
+    gap: 9px;
+  }
+
+  .player.modern:not(.compact) .progress-area span {
+    min-width: 34px;
+    color: var(--text-dim);
+    font-size: 0.65rem;
+    font-variant-numeric: tabular-nums;
+    font-weight: 520;
+  }
+
+  .player.modern:not(.compact) .progress,
+  .player.modern:not(.compact) .volume-bar {
+    height: 4px;
+    background:
+      linear-gradient(
+        to right,
+        var(--accent) 0%,
+        var(--accent) var(--range-fill, 0%),
+        var(--range-empty) var(--range-fill, 0%),
+        var(--range-empty) 100%
+      );
+  }
+
+  .player.modern:not(.compact) .volume {
+    gap: 8px;
+  }
+
+  .player.modern:not(.compact) .volume > span {
+    color: var(--text-dim);
+    font-size: 0.62rem;
+    font-weight: 620;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .player.modern:not(.compact) button.queue-button,
+  .player.modern:not(.compact) button.lyrics-button {
+    width: auto;
+    min-width: 58px;
+    height: 34px;
+    border-radius: 0;
+    color: var(--text-soft);
+    font-size: 0.68rem;
+    font-weight: 580;
+    padding: 0 5px;
+  }
+
+  .player.modern:not(.compact) button.queue-button.active,
+  .player.modern:not(.compact) button.queue-button:hover,
+  .player.modern:not(.compact) button.queue-button:focus-visible,
+  .player.modern:not(.compact) button.lyrics-button:hover,
+  .player.modern:not(.compact) button.lyrics-button:focus-visible {
+    background: transparent;
+    color: var(--accent-text);
+    text-decoration: underline;
+    text-underline-offset: 5px;
+  }
+
+  @media (max-width: 1180px) {
+    .player.modern:not(.compact) {
+      grid-template-columns: minmax(210px, 0.9fr) minmax(390px, 1.25fr) minmax(200px, 0.75fr);
+      column-gap: 18px;
+      padding-inline: 20px;
+    }
+
+    .player.modern:not(.compact) .volume-bar {
+      max-width: 84px;
+    }
+  }
+
   @media (max-width: 920px) {
     .player,
     .player.compact {
@@ -868,6 +1083,12 @@
         "volume";
       grid-template-columns: minmax(0, 1fr);
       min-height: 220px;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .player.modern:not(.compact) button.play {
+      transition: none;
     }
   }
 </style>

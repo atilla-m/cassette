@@ -62,6 +62,7 @@
   import ContextMenu from "$lib/components/ContextMenu.svelte";
   import LibrarySection from "$lib/components/LibrarySection.svelte";
   import ModernAlbumsPage from "$lib/components/modern/ModernAlbumsPage.svelte";
+  import ModernGenresPage from "$lib/components/modern/ModernGenresPage.svelte";
   import ModernSidebar from "$lib/components/modern/ModernSidebar.svelte";
   import ModernTopbar from "$lib/components/modern/ModernTopbar.svelte";
   import NowPlayingBar from "$lib/components/NowPlayingBar.svelte";
@@ -6275,7 +6276,7 @@
         </section>
       {:else if activeView === "Albums"}
         {#if selectedAlbum}
-          <section class="detail-view" aria-labelledby="album-detail-title">
+          <section class="detail-view" style={`--album-local-source: ${selectedAlbum.color}`} aria-labelledby="album-detail-title">
             <button class="back-button album-detail-back" type="button" onclick={handleAlbumDetailBack}>{albumBackLabel()}</button>
             <div class="album-detail-header" style={`--item-color: ${selectedAlbum.color}`}>
               {#if selectedAlbum.coverArtPath}
@@ -6389,9 +6390,11 @@
                         </span>
                         <div class="track-title">
                           <span class="track-name">{track.title}</span>
-                          <button class="track-link" type="button" onclick={(event) => { event.stopPropagation(); handleTrackArtistSelect(track); }}>
-                            {track.artist ?? "Unknown Artist"}
-                          </button>
+                          {#if interfaceMode === "legacy" || (track.artist ?? "Unknown Artist") !== selectedAlbum.artist}
+                            <button class="track-link" type="button" onclick={(event) => { event.stopPropagation(); handleTrackArtistSelect(track); }}>
+                              {track.artist ?? "Unknown Artist"}
+                            </button>
+                          {/if}
                         </div>
                         <span class="album-track-duration">{track.durationSeconds === null ? "" : formatTrackDuration(track.durationSeconds)}</span>
                         <button
@@ -6404,6 +6407,16 @@
                           {track.isFavorite ? "★" : "☆"}
                         </button>
                         <span class="album-track-format">{track.extension.toUpperCase()}</span>
+                        {#if interfaceMode === "modern"}
+                          <button
+                            class="album-track-menu"
+                            type="button"
+                            aria-label={`Open actions for ${track.title}`}
+                            onclick={(event) => { event.stopPropagation(); openAlbumTrackContextMenu(event, track); }}
+                          >
+                            •••
+                          </button>
+                        {/if}
                       </div>
                     {/each}
                   {/each}
@@ -6733,7 +6746,22 @@
 
           </section>
         {:else}
-          <LibrarySection title="All Genres" viewAllLabel={`${visibleGenres.length} total`}>
+          {#if interfaceMode === "modern"}
+            <ModernGenresPage
+              genres={visibleGenres}
+              albums={displayAlbums}
+              {tracks}
+              {currentAlbumId}
+              hasSearchQuery={normalizedSearchQuery.length > 0}
+              sort={genreSort}
+              sortDirectionLabel={sortDirectionLabel(genreSortDirection)}
+              onSortChange={(value) => genreSort = value}
+              onToggleSortDirection={() => genreSortDirection = nextSortDirection(genreSortDirection)}
+              onOpenGenre={handleGenreSelect}
+              onOpenContextMenu={openGenreContextMenu}
+            />
+          {:else}
+            <LibrarySection title="All Genres" viewAllLabel={`${visibleGenres.length} total`}>
             <div class="control-bar">
               <label>
                 <span>Sort</span>
@@ -6773,7 +6801,8 @@
                 {/each}
               </div>
             {/if}
-          </LibrarySection>
+            </LibrarySection>
+          {/if}
         {/if}
       {:else if activeView === "Songs"}
         <LibrarySection title="All Songs" viewAllLabel={`${visibleSongTracks.length} ${visibleSongTracks.length === 1 ? "song" : "songs"}`}>
@@ -8883,52 +8912,52 @@
     color-scheme: dark;
 
     /* Modern Default semantic palette. */
-    --modern-application-background: #0d0f13;
-    --modern-sidebar-background: #0f1318;
-    --modern-surface-primary: #12161c;
-    --modern-surface-elevated: #171c23;
-    --modern-surface-soft: #151a21;
-    --modern-surface-subtle: #111317;
-    --modern-surface-hover: #1b2027;
-    --modern-surface-selected: #1a2528;
-    --modern-border: #242b35;
-    --modern-border-strong: #303844;
-    --modern-text-primary: #f4f7fb;
-    --modern-text-secondary: #b9c3cf;
-    --modern-text-muted: #8f9aa8;
-    --modern-text-dim: #626c79;
-    --modern-accent: #2f8f83;
-    --modern-accent-hover: #38a497;
-    --modern-accent-soft: #17332f;
-    --modern-accent-border: #35544f;
-    --modern-accent-text: #d8fffa;
-    --modern-accent-contrast: #07110f;
-    --modern-focus-ring: rgba(47, 143, 131, 0.55);
-    --modern-player-background: #101419;
-    --modern-player-border: rgba(48, 56, 68, 0.72);
-    --modern-overlay-background: rgba(9, 11, 14, 0.82);
-    --modern-modal-backdrop: rgba(5, 7, 10, 0.72);
-    --modern-shadow-subtle: rgba(0, 0, 0, 0.34);
-    --modern-glow-subtle: rgba(47, 143, 131, 0.16);
-    --modern-input-background: rgba(23, 28, 35, 0.88);
-    --modern-input-border: rgba(48, 56, 68, 0.74);
-    --modern-control-background: rgba(26, 32, 40, 0.78);
-    --modern-control-hover: #1b2027;
-    --modern-current-playing: rgba(27, 32, 39, 0.88);
-    --modern-scrollbar-color: rgba(124, 139, 156, 0.24);
-    --modern-scrollbar-thumb: rgba(124, 139, 156, 0.28);
+    --modern-application-background: #0a0908;
+    --modern-sidebar-background: #0f0e0c;
+    --modern-surface-primary: #131210;
+    --modern-surface-elevated: #1a1815;
+    --modern-surface-soft: #171512;
+    --modern-surface-subtle: #0f0e0d;
+    --modern-surface-hover: #211e1a;
+    --modern-surface-selected: #241f19;
+    --modern-border: #27231e;
+    --modern-border-strong: #3a332b;
+    --modern-text-primary: #f2ece1;
+    --modern-text-secondary: #c5bbae;
+    --modern-text-muted: #948b7f;
+    --modern-text-dim: #7f776c;
+    --modern-accent: #b87743;
+    --modern-accent-hover: #ca8952;
+    --modern-accent-soft: #2c2017;
+    --modern-accent-border: #745038;
+    --modern-accent-text: #f2cda8;
+    --modern-accent-contrast: #170d06;
+    --modern-focus-ring: rgba(202, 137, 82, 0.58);
+    --modern-player-background: #0e0d0b;
+    --modern-player-border: rgba(58, 51, 43, 0.78);
+    --modern-overlay-background: rgba(10, 8, 7, 0.86);
+    --modern-modal-backdrop: rgba(5, 4, 3, 0.78);
+    --modern-shadow-subtle: rgba(0, 0, 0, 0.38);
+    --modern-glow-subtle: rgba(184, 119, 67, 0.14);
+    --modern-input-background: rgba(25, 23, 20, 0.86);
+    --modern-input-border: rgba(58, 51, 43, 0.72);
+    --modern-control-background: rgba(28, 25, 22, 0.74);
+    --modern-control-hover: #211e1a;
+    --modern-current-playing: rgba(36, 31, 25, 0.9);
+    --modern-scrollbar-color: rgba(148, 139, 127, 0.24);
+    --modern-scrollbar-thumb: rgba(148, 139, 127, 0.3);
     --modern-scrollbar-track: transparent;
-    --modern-danger: #ffcbc8;
-    --modern-danger-soft: #2a1718;
-    --modern-warning: #f0c85a;
-    --modern-range-empty: #2a313c;
+    --modern-danger: #f0b6ad;
+    --modern-danger-soft: #2d1917;
+    --modern-warning: #d5a34e;
+    --modern-range-empty: #302b25;
 
     /* Shared components inherit the active interface's semantic values. */
     --bg: var(--modern-application-background);
     --bg-soft: var(--modern-surface-subtle);
     --panel: var(--modern-surface-primary);
     --panel-soft: var(--modern-surface-soft);
-    --panel-strong: #1a2028;
+    --panel-strong: var(--modern-surface-elevated);
     --panel-hover: var(--modern-surface-hover);
     --border: var(--modern-border);
     --border-strong: var(--modern-border-strong);
@@ -14185,13 +14214,30 @@
 
   .app-shell.modern {
     background:
-      radial-gradient(circle at 82% -12%, color-mix(in srgb, var(--accent) 11%, transparent), transparent 34rem),
+      linear-gradient(135deg, color-mix(in srgb, var(--text) 1.2%, transparent), transparent 38rem),
       var(--bg);
   }
 
   .home.modern {
     --content-bottom-padding: 30px;
-    padding: 22px clamp(22px, 2.6vw, 46px) var(--content-bottom-padding);
+    padding: 24px clamp(28px, 3vw, 58px) var(--content-bottom-padding);
+    scrollbar-color: var(--modern-scrollbar-thumb) var(--modern-scrollbar-track);
+    scrollbar-width: thin;
+  }
+
+  .home.modern::-webkit-scrollbar {
+    width: 9px;
+  }
+
+  .home.modern::-webkit-scrollbar-track {
+    background: var(--modern-scrollbar-track);
+  }
+
+  .home.modern::-webkit-scrollbar-thumb {
+    border: 3px solid transparent;
+    border-radius: 999px;
+    background: var(--modern-scrollbar-thumb);
+    background-clip: padding-box;
   }
 
   .home.modern.albums-landing-view,
@@ -14200,13 +14246,388 @@
     padding-top: 22px;
   }
 
+  .home.modern.album-detail-view {
+    padding-top: 20px;
+  }
+
+  .home.modern.album-detail-view .detail-view {
+    --album-safe-accent: color-mix(in srgb, var(--album-local-source) 24%, var(--accent));
+    gap: 28px;
+  }
+
+  .home.modern.album-detail-view .album-detail-back {
+    min-height: 32px;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    color: var(--text-muted);
+    font-size: 0.78rem;
+    font-weight: 560;
+    padding: 0;
+  }
+
+  .home.modern.album-detail-view .album-detail-back:hover,
+  .home.modern.album-detail-view .album-detail-back:focus-visible {
+    background: transparent;
+    color: var(--accent-text);
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 4px;
+  }
+
+  .home.modern.album-detail-view .album-detail-header {
+    grid-template-columns: minmax(250px, 330px) minmax(0, 1fr);
+    gap: clamp(30px, 4.2vw, 68px);
+    min-height: min(44vh, 460px);
+    overflow: hidden;
+    border: 0;
+    border-bottom: 1px solid color-mix(in srgb, var(--album-safe-accent) 30%, var(--border));
+    border-radius: 0;
+    background:
+      linear-gradient(90deg, rgba(10, 9, 8, 0.52), rgba(10, 9, 8, 0.86) 48%, var(--bg) 88%),
+      linear-gradient(180deg, color-mix(in srgb, var(--album-safe-accent) 18%, var(--panel)), var(--bg));
+    box-shadow: none;
+    padding: clamp(26px, 3vw, 44px) clamp(10px, 3.2vw, 52px);
+  }
+
+  .home.modern.album-detail-view .album-detail-header::before {
+    background:
+      radial-gradient(circle at 20% 42%, color-mix(in srgb, var(--album-safe-accent) 32%, transparent), transparent 38%),
+      linear-gradient(90deg, color-mix(in srgb, var(--text) 3%, transparent), transparent 44%);
+    opacity: 0.72;
+  }
+
+  .home.modern.album-detail-view .album-detail-header::after {
+    height: 54%;
+    background: linear-gradient(0deg, var(--bg), transparent);
+    opacity: 0.48;
+  }
+
+  .home.modern.album-detail-view .album-detail-ambient {
+    inset: -38% auto -38% -16%;
+    width: 64%;
+    height: 176%;
+    filter: blur(46px) saturate(0.62) brightness(0.68);
+    opacity: 0.24;
+    transform: scale(1.12);
+  }
+
+  .home.modern.album-detail-view .album-detail-cover-shell {
+    align-self: center;
+  }
+
+  .home.modern.album-detail-view .album-detail-header .detail-cover {
+    width: min(100%, 330px);
+    max-width: 330px;
+    border-radius: 4px;
+    box-shadow:
+      0 28px 54px rgba(0, 0, 0, 0.38),
+      0 0 0 1px color-mix(in srgb, var(--text) 12%, transparent);
+  }
+
+  .home.modern.album-detail-view .album-detail-copy {
+    gap: 14px;
+  }
+
+  .home.modern.album-detail-view .album-detail-copy .eyebrow {
+    color: var(--text-dim);
+    font-size: 0.64rem;
+    font-weight: 650;
+    letter-spacing: 0.16em;
+  }
+
+  .home.modern.album-detail-view .album-detail-copy h3 {
+    max-width: 900px;
+    color: var(--text);
+    font-size: clamp(2.7rem, 5.4vw, 5.4rem);
+    font-weight: 680;
+    letter-spacing: -0.055em;
+    line-height: 0.93;
+  }
+
+  .home.modern.album-detail-view .album-detail-artist {
+    color: var(--text-muted) !important;
+    font-size: 1.04rem;
+    font-weight: 560;
+  }
+
+  .home.modern.album-detail-view .album-detail-meta,
+  .home.modern.album-detail-view .album-genre-chip-list {
+    gap: 6px 0;
+  }
+
+  .home.modern.album-detail-view .album-detail-meta span,
+  .home.modern.album-detail-view .album-genre-chip-list span {
+    min-height: 0;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    color: var(--text-soft);
+    font-size: 0.75rem;
+    font-weight: 540;
+    line-height: 1.4;
+    padding: 0;
+  }
+
+  .home.modern.album-detail-view .album-detail-meta span + span::before,
+  .home.modern.album-detail-view .album-genre-chip-list span + span::before {
+    margin: 0 10px;
+    color: var(--text-dim);
+    content: "·";
+  }
+
+  .home.modern.album-detail-view .album-genre-chip-list span {
+    color: var(--text-muted);
+  }
+
+  .home.modern.album-detail-view .album-detail-actions {
+    gap: 18px;
+    align-items: center;
+    margin-top: 6px;
+  }
+
+  .home.modern.album-detail-view .album-detail-actions button {
+    min-height: 38px;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    color: var(--text-muted);
+    font-size: 0.8rem;
+    font-weight: 620;
+    padding: 0 2px;
+    backdrop-filter: none;
+  }
+
+  .home.modern.album-detail-view .album-detail-actions button:first-child {
+    min-height: 46px;
+    border-radius: 999px;
+    background: var(--text);
+    color: var(--accent-contrast);
+    font-weight: 740;
+    padding: 0 22px;
+  }
+
+  .home.modern.album-detail-view .album-detail-actions button:hover,
+  .home.modern.album-detail-view .album-detail-actions button:focus-visible {
+    border: 0;
+    background: transparent;
+    color: var(--accent-text);
+    outline: 2px solid color-mix(in srgb, var(--focus-ring) 84%, transparent);
+    outline-offset: 4px;
+  }
+
+  .home.modern.album-detail-view .album-detail-actions button:first-child:hover,
+  .home.modern.album-detail-view .album-detail-actions button:first-child:focus-visible {
+    background: color-mix(in srgb, var(--album-safe-accent) 48%, var(--text));
+    color: var(--accent-contrast);
+  }
+
+  .home.modern.album-detail-view .album-detail-actions button:disabled {
+    border: 0;
+    background: transparent;
+    color: var(--text-dim);
+    opacity: 0.58;
+  }
+
+  .home.modern.album-detail-view :global(.library-section) {
+    gap: 12px;
+  }
+
+  .home.modern.album-detail-view :global(.section-header) {
+    border-bottom: 1px solid color-mix(in srgb, var(--border) 56%, transparent);
+    padding: 0 6px 12px;
+  }
+
+  .home.modern.album-detail-view :global(.section-header h2) {
+    font-size: 0.82rem;
+    font-weight: 620;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .home.modern.album-detail-view :global(.section-label) {
+    min-height: 0;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    color: var(--text-dim);
+    font-size: 0.68rem;
+    font-weight: 540;
+    padding: 0;
+  }
+
+  .home.modern.album-detail-view .album-track-list {
+    gap: 0;
+  }
+
+  .home.modern.album-detail-view .album-track-list h4 {
+    margin: 18px 8px 4px;
+    color: var(--text-dim);
+    font-size: 0.66rem;
+    font-weight: 620;
+    letter-spacing: 0.12em;
+  }
+
+  .home.modern.album-detail-view .album-track-row {
+    grid-template-columns: 34px minmax(180px, 1fr) 58px 34px 44px 34px;
+    gap: 12px;
+    min-height: 55px;
+    border: 0;
+    border-bottom: 1px solid color-mix(in srgb, var(--border) 52%, transparent);
+    border-radius: 0;
+    background: transparent;
+    padding: 8px 7px;
+    transition: background 110ms ease, box-shadow 110ms ease;
+  }
+
+  .home.modern.album-detail-view .album-track-row:hover,
+  .home.modern.album-detail-view .album-track-row:focus-visible {
+    border-color: color-mix(in srgb, var(--border) 52%, transparent);
+    background: linear-gradient(90deg, color-mix(in srgb, var(--panel-hover) 78%, transparent), transparent 92%);
+    box-shadow: inset 2px 0 0 color-mix(in srgb, var(--album-safe-accent) 70%, transparent);
+  }
+
+  .home.modern.album-detail-view .album-track-row.active {
+    border-color: color-mix(in srgb, var(--border) 52%, transparent);
+    background: linear-gradient(90deg, color-mix(in srgb, var(--album-safe-accent) 15%, var(--panel)), transparent 90%);
+    box-shadow: inset 2px 0 0 var(--album-safe-accent);
+  }
+
+  .home.modern.album-detail-view .album-track-number {
+    color: var(--text-dim);
+    font-size: 0.76rem;
+    font-weight: 560;
+  }
+
+  .home.modern.album-detail-view .track-name {
+    font-size: 0.93rem;
+    font-weight: 590;
+  }
+
+  .home.modern.album-detail-view .track-link {
+    margin-top: 2px;
+    color: var(--text-dim);
+    font-size: 0.73rem;
+    font-weight: 520;
+  }
+
+  .home.modern.album-detail-view .album-track-duration,
+  .home.modern.album-detail-view .album-track-format {
+    color: var(--text-dim);
+    font-size: 0.7rem;
+    font-weight: 540;
+  }
+
+  .home.modern.album-detail-view .album-track-format {
+    min-width: 0;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    padding: 0;
+    text-align: right;
+  }
+
+  .home.modern.album-detail-view .favorite-button,
+  .home.modern.album-detail-view .album-track-menu {
+    display: grid;
+    width: 32px;
+    height: 32px;
+    place-items: center;
+    border: 0;
+    border-radius: 50%;
+    background: transparent;
+    color: var(--text-soft);
+    cursor: default;
+    font: inherit;
+  }
+
+  .home.modern.album-detail-view .favorite-button:hover,
+  .home.modern.album-detail-view .favorite-button:focus-visible,
+  .home.modern.album-detail-view .favorite-button.active,
+  .home.modern.album-detail-view .album-track-menu:hover,
+  .home.modern.album-detail-view .album-track-menu:focus-visible {
+    border: 0;
+    background: var(--panel-hover);
+    color: var(--accent-text);
+    outline: 2px solid color-mix(in srgb, var(--focus-ring) 76%, transparent);
+    outline-offset: 2px;
+  }
+
+  .home.modern.album-detail-view .album-track-menu {
+    font-size: 0.68rem;
+    letter-spacing: -0.12em;
+  }
+
+  @media (max-width: 1500px) {
+    .home.modern.album-detail-view .album-detail-header {
+      grid-template-columns: minmax(220px, 270px) minmax(0, 1fr);
+      gap: 42px;
+      min-height: 320px;
+      padding: 22px 28px;
+    }
+
+    .home.modern.album-detail-view .album-detail-header .detail-cover {
+      max-width: 260px;
+    }
+
+    .home.modern.album-detail-view .album-detail-copy h3 {
+      font-size: clamp(2.5rem, 4.4vw, 4.1rem);
+    }
+  }
+
+  @media (max-width: 1120px) {
+    .home.modern.album-detail-view .album-detail-header {
+      grid-template-columns: minmax(210px, 270px) minmax(0, 1fr);
+      gap: 34px;
+      min-height: 300px;
+      padding-inline: 18px;
+    }
+
+    .home.modern.album-detail-view .album-detail-copy h3 {
+      font-size: clamp(2.3rem, 5vw, 4.2rem);
+    }
+  }
+
+  @media (max-width: 760px) {
+    .home.modern.album-detail-view .album-detail-header {
+      grid-template-columns: minmax(150px, 220px) minmax(0, 1fr);
+      gap: 24px;
+      min-height: 310px;
+      padding: 20px 4px;
+    }
+
+    .home.modern.album-detail-view .album-detail-cover-shell {
+      width: 100%;
+    }
+
+    .home.modern.album-detail-view .album-detail-header .detail-cover {
+      width: 100%;
+      max-width: 220px;
+    }
+
+    .home.modern.album-detail-view .album-detail-copy h3 {
+      font-size: clamp(2rem, 6vw, 3.2rem);
+    }
+
+    .home.modern.album-detail-view .album-detail-meta span:nth-child(n + 4) {
+      display: none;
+    }
+
+    .home.modern.album-detail-view .album-track-row {
+      grid-template-columns: 30px minmax(0, 1fr) 48px 32px 32px;
+    }
+
+    .home.modern.album-detail-view .album-track-format {
+      display: none;
+    }
+  }
+
   .app-shell.modern .queue-backdrop {
-    bottom: 108px;
+    bottom: 98px;
   }
 
   .app-shell.modern .queue-panel {
-    bottom: 122px;
-    border-radius: 10px;
+    bottom: 112px;
+    border-radius: 6px;
     background: var(--modern-elevated, var(--panel));
     box-shadow: 0 24px 70px var(--modern-shadow, rgba(0, 0, 0, 0.42));
   }
