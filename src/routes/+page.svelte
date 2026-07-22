@@ -73,6 +73,12 @@
     resolveInterfaceMode,
     type InterfaceMode,
   } from "$lib/app/interfaceMode";
+  import {
+    DEFAULT_MODERN_APPEARANCE,
+    MODERN_APPEARANCE_SETTING_KEY,
+    resolveModernAppearance,
+    type ModernAppearance,
+  } from "$lib/app/modernAppearance";
   import { buildAlbums, buildArtists, buildGenres } from "$lib/data/libraryViews";
   import { albums as mockAlbums, artists as mockArtists, genres as mockGenres, navItems } from "$lib/data/mockLibrary";
   import { ENABLE_EXPERIMENTAL_VIDEOS } from "$lib/featureFlags";
@@ -478,6 +484,7 @@
   let autoFindLyricsEnabled = $state(true);
   let selectedTheme = $state<ThemeId>(DEFAULT_THEME);
   let interfaceMode = $state<InterfaceMode>(DEFAULT_INTERFACE_MODE);
+  let modernAppearance = $state<ModernAppearance>(DEFAULT_MODERN_APPEARANCE);
   let isLoadingLyrics = $state(false);
   let isAutoFindingLyrics = $state(false);
   let isSavingLyricsSelection = $state(false);
@@ -718,6 +725,12 @@
     }
   }
 
+  function applyModernAppearance(appearance: ModernAppearance) {
+    if (typeof document !== "undefined") {
+      document.documentElement.dataset.modernAppearance = appearance;
+    }
+  }
+
   function handleInterfaceModeSelect(mode: InterfaceMode) {
     interfaceMode = mode;
     applyInterfaceMode(mode);
@@ -764,6 +777,12 @@
     applyInterfaceMode(interfaceMode);
     if (!resolvedInterfaceMode.hasOverride && storedInterfaceMode !== interfaceMode) {
       window.localStorage.setItem(INTERFACE_MODE_SETTING_KEY, interfaceMode);
+    }
+    const storedModernAppearance = window.localStorage.getItem(MODERN_APPEARANCE_SETTING_KEY);
+    modernAppearance = resolveModernAppearance(storedModernAppearance);
+    applyModernAppearance(modernAppearance);
+    if (storedModernAppearance !== modernAppearance) {
+      window.localStorage.setItem(MODERN_APPEARANCE_SETTING_KEY, modernAppearance);
     }
     autoFindLyricsEnabled = window.localStorage.getItem(AUTO_LYRICS_SETTING_KEY) !== "off";
     trackNotificationsEnabled = window.localStorage.getItem(TRACK_NOTIFICATIONS_SETTING_KEY) === "on";
@@ -8233,7 +8252,11 @@
                   <p class="eyebrow">Appearance</p>
                   <h4 id="settings-interface-title">Display preferences</h4>
                 </div>
-                <span class="settings-pill">{themePresets.find((theme) => theme.id === selectedTheme)?.name ?? "Cassette Teal"}</span>
+                <span class="settings-pill">
+                  {interfaceMode === "modern"
+                    ? "Modern Default"
+                    : themePresets.find((theme) => theme.id === selectedTheme)?.name ?? "Cassette Teal"}
+                </span>
               </div>
 
               <div class="interface-mode-setting">
@@ -8263,24 +8286,51 @@
                 </div>
               </div>
 
-              <div class="theme-preset-grid" aria-label="Theme presets">
-                {#each themePresets as theme}
-                  <button
-                    class:selected={selectedTheme === theme.id}
-                    type="button"
-                    aria-pressed={selectedTheme === theme.id}
-                    onclick={() => handleThemeSelect(theme.id)}
+              {#if interfaceMode === "legacy"}
+                <div class="theme-preset-grid" aria-label="Theme presets">
+                  {#each themePresets as theme}
+                    <button
+                      class:selected={selectedTheme === theme.id}
+                      type="button"
+                      aria-pressed={selectedTheme === theme.id}
+                      onclick={() => handleThemeSelect(theme.id)}
+                    >
+                      <span class="theme-swatch-row" aria-hidden="true">
+                        {#each theme.swatches as swatch}
+                          <span style={`--swatch-color: ${swatch}`}></span>
+                        {/each}
+                      </span>
+                      <strong>{theme.name}</strong>
+                      <small>{theme.description}</small>
+                    </button>
+                  {/each}
+                </div>
+              {:else}
+                <div class="modern-appearance-setting" aria-labelledby="modern-appearance-title">
+                  <div class="modern-appearance-heading">
+                    <strong id="modern-appearance-title">Modern Appearance</strong>
+                    <small>Legacy theme choices are preserved and restored when you switch back.</small>
+                  </div>
+                  <div
+                    class="modern-appearance-card selected"
+                    aria-current="true"
+                    aria-label="Modern Default appearance, selected"
+                    data-appearance={modernAppearance}
                   >
-                    <span class="theme-swatch-row" aria-hidden="true">
-                      {#each theme.swatches as swatch}
-                        <span style={`--swatch-color: ${swatch}`}></span>
-                      {/each}
+                    <span class="modern-appearance-preview" aria-hidden="true">
+                      <span></span>
+                      <span></span>
+                      <span></span>
                     </span>
-                    <strong>{theme.name}</strong>
-                    <small>{theme.description}</small>
-                  </button>
-                {/each}
-              </div>
+                    <strong>Modern Default</strong>
+                    <small>Modern uses its own artwork-focused visual system.</small>
+                    <span class="modern-appearance-selected">
+                      <span aria-hidden="true">✓</span>
+                      Selected
+                    </span>
+                  </div>
+                </div>
+              {/if}
 
               <div class="settings-control-list">
                 <div>
@@ -8827,6 +8877,81 @@
     --modern-player: #09131c;
     --modern-selected: #183043;
     --modern-shadow: rgba(0, 0, 0, 0.38);
+  }
+
+  :global(:root[data-interface="modern"][data-modern-appearance="default"]) {
+    color-scheme: dark;
+
+    /* Modern Default semantic palette. */
+    --modern-application-background: #0d0f13;
+    --modern-sidebar-background: #0f1318;
+    --modern-surface-primary: #12161c;
+    --modern-surface-elevated: #171c23;
+    --modern-surface-soft: #151a21;
+    --modern-surface-subtle: #111317;
+    --modern-surface-hover: #1b2027;
+    --modern-surface-selected: #1a2528;
+    --modern-border: #242b35;
+    --modern-border-strong: #303844;
+    --modern-text-primary: #f4f7fb;
+    --modern-text-secondary: #b9c3cf;
+    --modern-text-muted: #8f9aa8;
+    --modern-text-dim: #626c79;
+    --modern-accent: #2f8f83;
+    --modern-accent-hover: #38a497;
+    --modern-accent-soft: #17332f;
+    --modern-accent-border: #35544f;
+    --modern-accent-text: #d8fffa;
+    --modern-accent-contrast: #07110f;
+    --modern-focus-ring: rgba(47, 143, 131, 0.55);
+    --modern-player-background: #101419;
+    --modern-player-border: rgba(48, 56, 68, 0.72);
+    --modern-overlay-background: rgba(9, 11, 14, 0.82);
+    --modern-modal-backdrop: rgba(5, 7, 10, 0.72);
+    --modern-shadow-subtle: rgba(0, 0, 0, 0.34);
+    --modern-glow-subtle: rgba(47, 143, 131, 0.16);
+    --modern-input-background: rgba(23, 28, 35, 0.88);
+    --modern-input-border: rgba(48, 56, 68, 0.74);
+    --modern-control-background: rgba(26, 32, 40, 0.78);
+    --modern-control-hover: #1b2027;
+    --modern-current-playing: rgba(27, 32, 39, 0.88);
+    --modern-scrollbar-color: rgba(124, 139, 156, 0.24);
+    --modern-scrollbar-thumb: rgba(124, 139, 156, 0.28);
+    --modern-scrollbar-track: transparent;
+    --modern-danger: #ffcbc8;
+    --modern-danger-soft: #2a1718;
+    --modern-warning: #f0c85a;
+    --modern-range-empty: #2a313c;
+
+    /* Shared components inherit the active interface's semantic values. */
+    --bg: var(--modern-application-background);
+    --bg-soft: var(--modern-surface-subtle);
+    --panel: var(--modern-surface-primary);
+    --panel-soft: var(--modern-surface-soft);
+    --panel-strong: #1a2028;
+    --panel-hover: var(--modern-surface-hover);
+    --border: var(--modern-border);
+    --border-strong: var(--modern-border-strong);
+    --text: var(--modern-text-primary);
+    --text-muted: var(--modern-text-secondary);
+    --text-soft: var(--modern-text-muted);
+    --text-dim: var(--modern-text-dim);
+    --accent: var(--modern-accent);
+    --accent-soft: var(--modern-accent-soft);
+    --accent-strong: var(--modern-accent-border);
+    --accent-text: var(--modern-accent-text);
+    --accent-contrast: var(--modern-accent-contrast);
+    --danger: var(--modern-danger);
+    --danger-soft: var(--modern-danger-soft);
+    --warning: var(--modern-warning);
+    --shadow: rgba(0, 0, 0, 0.22);
+    --focus-ring: var(--modern-focus-ring);
+    --range-empty: var(--modern-range-empty);
+    --modern-sidebar: var(--modern-sidebar-background);
+    --modern-elevated: var(--modern-surface-elevated);
+    --modern-player: var(--modern-player-background);
+    --modern-selected: var(--modern-surface-selected);
+    --modern-shadow: var(--modern-shadow-subtle);
   }
 
   :global(*) {
@@ -10337,7 +10462,7 @@
   .synced-lyrics:focus-within,
   .plain-lyrics:hover,
   .plain-lyrics:focus {
-    scrollbar-color: rgba(124, 139, 156, 0.24) transparent;
+    scrollbar-color: var(--modern-scrollbar-color, rgba(124, 139, 156, 0.24)) var(--modern-scrollbar-track, transparent);
   }
 
   .synced-lyrics::-webkit-scrollbar,
@@ -10362,7 +10487,7 @@
   .synced-lyrics:focus-within::-webkit-scrollbar-thumb,
   .plain-lyrics:hover::-webkit-scrollbar-thumb,
   .plain-lyrics:focus::-webkit-scrollbar-thumb {
-    background-color: rgba(124, 139, 156, 0.28);
+    background-color: var(--modern-scrollbar-thumb, rgba(124, 139, 156, 0.28));
   }
 
   .synced-lyrics button {
@@ -12624,6 +12749,112 @@
     box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.18);
   }
 
+  .modern-appearance-setting {
+    display: grid;
+    gap: 10px;
+  }
+
+  .modern-appearance-heading strong,
+  .modern-appearance-heading small {
+    display: block;
+  }
+
+  .modern-appearance-heading strong {
+    color: var(--text);
+    font-size: 0.94rem;
+    font-weight: 850;
+  }
+
+  .modern-appearance-heading small {
+    margin-top: 3px;
+    color: var(--text-soft);
+    font-size: 0.78rem;
+    font-weight: 700;
+  }
+
+  .modern-appearance-card {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-rows: auto auto;
+    align-items: center;
+    gap: 3px 12px;
+    width: min(100%, 520px);
+    min-width: 0;
+    border: 1px solid var(--accent-strong);
+    border-radius: 8px;
+    background: var(--panel-hover);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 36%, transparent);
+    color: inherit;
+    padding: 14px;
+  }
+
+  .modern-appearance-card > strong {
+    color: var(--text);
+    font-size: 0.94rem;
+    font-weight: 850;
+    line-height: 1.2;
+  }
+
+  .modern-appearance-card > small {
+    grid-column: 2 / -1;
+    color: var(--text-soft);
+    font-size: 0.78rem;
+    font-weight: 720;
+    line-height: 1.35;
+  }
+
+  .modern-appearance-preview {
+    display: grid;
+    grid-row: 1 / 3;
+    grid-template-columns: repeat(3, 12px);
+    gap: 4px;
+    align-self: stretch;
+    min-height: 42px;
+    border: 1px solid var(--border-strong);
+    border-radius: 7px;
+    background: var(--bg);
+    padding: 5px;
+  }
+
+  .modern-appearance-preview span {
+    border-radius: 4px;
+  }
+
+  .modern-appearance-preview span:first-child {
+    background: var(--modern-sidebar-background);
+  }
+
+  .modern-appearance-preview span:nth-child(2) {
+    background: var(--modern-surface-elevated);
+  }
+
+  .modern-appearance-preview span:last-child {
+    background: var(--accent);
+  }
+
+  .modern-appearance-selected {
+    display: inline-flex;
+    grid-column: 3;
+    grid-row: 1;
+    align-items: center;
+    gap: 5px;
+    color: var(--accent-text);
+    font-size: 0.72rem;
+    font-weight: 850;
+    white-space: nowrap;
+  }
+
+  .modern-appearance-selected > span {
+    display: grid;
+    width: 17px;
+    height: 17px;
+    place-items: center;
+    border-radius: 999px;
+    background: var(--accent);
+    color: var(--accent-contrast);
+    font-size: 0.68rem;
+  }
+
   .settings-actions {
     display: flex;
     flex-wrap: wrap;
@@ -13055,7 +13286,7 @@
     display: grid;
     place-items: center;
     overflow: auto;
-    background: rgba(5, 7, 10, 0.72);
+    background: var(--modern-modal-backdrop, rgba(5, 7, 10, 0.72));
     padding: 24px;
   }
 
@@ -13807,6 +14038,7 @@
   }
 
   .queue-row.active {
+    background: var(--modern-current-playing, color-mix(in srgb, var(--panel-hover) 88%, transparent));
     box-shadow: inset 3px 0 0 var(--accent);
   }
 

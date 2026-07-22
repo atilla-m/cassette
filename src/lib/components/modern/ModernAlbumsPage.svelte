@@ -347,8 +347,8 @@
     flex: 1;
     border: 1px solid rgba(255, 255, 255, 0.22);
     border-radius: 7px;
-    background: rgba(9, 11, 14, 0.82);
-    color: #f7f9fc;
+    background: var(--modern-overlay-background, rgba(9, 11, 14, 0.82));
+    color: var(--modern-text-primary, #f7f9fc);
     font: inherit;
     font-size: 0.68rem;
     font-weight: 820;

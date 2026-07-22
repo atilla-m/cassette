@@ -148,9 +148,9 @@
     min-height: 40px;
     align-items: center;
     gap: 8px;
-    border: 1px solid color-mix(in srgb, var(--border-strong) 74%, transparent);
+    border: 1px solid var(--modern-input-border, color-mix(in srgb, var(--border-strong) 74%, transparent));
     border-radius: 8px;
-    background: color-mix(in srgb, var(--modern-elevated, var(--panel-soft)) 88%, transparent);
+    background: var(--modern-input-background, color-mix(in srgb, var(--modern-elevated, var(--panel-soft)) 88%, transparent));
     color: var(--text-soft);
     padding: 0 10px;
   }
@@ -193,7 +193,7 @@
     min-height: 40px;
     border: 1px solid color-mix(in srgb, var(--border-strong) 72%, transparent);
     border-radius: 8px;
-    background: color-mix(in srgb, var(--panel-strong) 78%, transparent);
+    background: var(--modern-control-background, color-mix(in srgb, var(--panel-strong) 78%, transparent));
     color: var(--text-muted);
     cursor: default;
     font: inherit;
@@ -205,7 +205,7 @@
   .modern-topbar-actions button:hover:not(:disabled),
   .modern-topbar-actions button:focus-visible:not(:disabled) {
     border-color: var(--accent-strong);
-    background: var(--panel-hover);
+    background: var(--modern-control-hover, var(--panel-hover));
     color: var(--text);
     outline: none;
   }

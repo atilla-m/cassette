@@ -460,8 +460,8 @@
     grid-template-rows: auto auto;
     gap: 7px clamp(20px, 2.2vw, 38px);
     min-height: 108px;
-    border-top-color: color-mix(in srgb, var(--border-strong) 72%, transparent);
-    background: var(--modern-player, var(--panel));
+    border-top-color: var(--modern-player-border, color-mix(in srgb, var(--border-strong) 72%, transparent));
+    background: var(--modern-player-background, var(--modern-player, var(--panel)));
     box-shadow: 0 -14px 36px color-mix(in srgb, var(--modern-shadow, var(--shadow)) 54%, transparent);
     padding: 13px clamp(18px, 2vw, 30px);
   }
