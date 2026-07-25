@@ -62,7 +62,6 @@
   import ContextMenu from "$lib/components/ContextMenu.svelte";
   import LibrarySection from "$lib/components/LibrarySection.svelte";
   import ModernAlbumsPage from "$lib/components/modern/ModernAlbumsPage.svelte";
-  import ModernGenresPage from "$lib/components/modern/ModernGenresPage.svelte";
   import ModernSidebar from "$lib/components/modern/ModernSidebar.svelte";
   import ModernTopbar from "$lib/components/modern/ModernTopbar.svelte";
   import NowPlayingBar from "$lib/components/NowPlayingBar.svelte";
@@ -74,12 +73,6 @@
     resolveInterfaceMode,
     type InterfaceMode,
   } from "$lib/app/interfaceMode";
-  import {
-    DEFAULT_MODERN_APPEARANCE,
-    MODERN_APPEARANCE_SETTING_KEY,
-    resolveModernAppearance,
-    type ModernAppearance,
-  } from "$lib/app/modernAppearance";
   import { buildAlbums, buildArtists, buildGenres } from "$lib/data/libraryViews";
   import { albums as mockAlbums, artists as mockArtists, genres as mockGenres, navItems } from "$lib/data/mockLibrary";
   import { ENABLE_EXPERIMENTAL_VIDEOS } from "$lib/featureFlags";
@@ -485,7 +478,7 @@
   let autoFindLyricsEnabled = $state(true);
   let selectedTheme = $state<ThemeId>(DEFAULT_THEME);
   let interfaceMode = $state<InterfaceMode>(DEFAULT_INTERFACE_MODE);
-  let modernAppearance = $state<ModernAppearance>(DEFAULT_MODERN_APPEARANCE);
+  let modernFallbackMessage = $state<string | null>(null);
   let isLoadingLyrics = $state(false);
   let isAutoFindingLyrics = $state(false);
   let isSavingLyricsSelection = $state(false);
@@ -726,16 +719,18 @@
     }
   }
 
-  function applyModernAppearance(appearance: ModernAppearance) {
-    if (typeof document !== "undefined") {
-      document.documentElement.dataset.modernAppearance = appearance;
-    }
-  }
-
   function handleInterfaceModeSelect(mode: InterfaceMode) {
+    modernFallbackMessage = null;
     interfaceMode = mode;
     applyInterfaceMode(mode);
     window.localStorage.setItem(INTERFACE_MODE_SETTING_KEY, mode);
+  }
+
+  function handleModernRenderError(error: unknown) {
+    console.error("Modern interface failed to render; using Legacy for this session.", error);
+    modernFallbackMessage = "Modern could not start. Cassette opened the Legacy interface for this session.";
+    interfaceMode = DEFAULT_INTERFACE_MODE;
+    applyInterfaceMode(DEFAULT_INTERFACE_MODE);
   }
 
   $effect(() => {
@@ -778,12 +773,6 @@
     applyInterfaceMode(interfaceMode);
     if (!resolvedInterfaceMode.hasOverride && storedInterfaceMode !== interfaceMode) {
       window.localStorage.setItem(INTERFACE_MODE_SETTING_KEY, interfaceMode);
-    }
-    const storedModernAppearance = window.localStorage.getItem(MODERN_APPEARANCE_SETTING_KEY);
-    modernAppearance = resolveModernAppearance(storedModernAppearance);
-    applyModernAppearance(modernAppearance);
-    if (storedModernAppearance !== modernAppearance) {
-      window.localStorage.setItem(MODERN_APPEARANCE_SETTING_KEY, modernAppearance);
     }
     autoFindLyricsEnabled = window.localStorage.getItem(AUTO_LYRICS_SETTING_KEY) !== "off";
     trackNotificationsEnabled = window.localStorage.getItem(TRACK_NOTIFICATIONS_SETTING_KEY) === "on";
@@ -5749,7 +5738,9 @@
   <div class:lyrics-mode={activeView === "Now Playing"} class:modern={interfaceMode === "modern"} class="workspace">
     {#if activeView !== "Now Playing"}
       {#if interfaceMode === "modern"}
-        <ModernSidebar items={visibleNavItems} active={activeView} onNavigate={handleNavigate} />
+        <svelte:boundary onerror={handleModernRenderError}>
+          <ModernSidebar items={visibleNavItems} active={activeView} onNavigate={handleNavigate} />
+        </svelte:boundary>
       {:else}
         <Sidebar items={visibleNavItems} active={activeView} onNavigate={handleNavigate} />
       {/if}
@@ -5770,29 +5761,31 @@
     >
       {#if activeView !== "Now Playing" && !isAlbumDetailView && !isArtistDetailView && !isGenreDetailView && !isPlaylistDetailView}
         {#if interfaceMode === "modern"}
-          <ModernTopbar
-            eyebrow={viewEyebrow()}
-            title={viewTitle()}
-            status={viewStatus()}
-            searchValue={searchQuery}
-            searchPlaceholder={searchPlaceholder() || "Search Cassette..."}
-            showSearch={isSearchAvailable()}
-            isAlbumsLanding={activeView === "Albums" && !selectedAlbum}
-            hasTracks={tracks.length > 0}
-            hasAlbums={displayAlbums.length > 0}
-            isScanning={ENABLE_EXPERIMENTAL_VIDEOS && activeView === "Videos" ? isScanningVideos : isScanning}
-            scanLabel={ENABLE_EXPERIMENTAL_VIDEOS && activeView === "Videos"
-              ? isScanningVideos ? "Scanning..." : videoFolder ? "Rescan Videos" : "Add Video Folder"
-              : isScanning ? "Scanning..." : "Scan Library"}
-            onSearchInput={(value) => searchQuery = value}
-            onSearchKeydown={handleSearchKeydown}
-            onClearSearch={clearSearch}
-            onShuffleLibrary={() => void handleShuffleLibrary()}
-            onRandomAlbum={handleRandomAlbum}
-            onScanLibrary={() => void (ENABLE_EXPERIMENTAL_VIDEOS && activeView === "Videos"
-              ? videoFolder ? handleRescanVideos() : handleAddVideoFolder()
-              : handleScanLibrary())}
-          />
+          <svelte:boundary onerror={handleModernRenderError}>
+            <ModernTopbar
+              eyebrow={viewEyebrow()}
+              title={viewTitle()}
+              status={viewStatus()}
+              searchValue={searchQuery}
+              searchPlaceholder={searchPlaceholder() || "Search Cassette..."}
+              showSearch={isSearchAvailable()}
+              isAlbumsLanding={activeView === "Albums" && !selectedAlbum}
+              hasTracks={tracks.length > 0}
+              hasAlbums={displayAlbums.length > 0}
+              isScanning={ENABLE_EXPERIMENTAL_VIDEOS && activeView === "Videos" ? isScanningVideos : isScanning}
+              scanLabel={ENABLE_EXPERIMENTAL_VIDEOS && activeView === "Videos"
+                ? isScanningVideos ? "Scanning..." : videoFolder ? "Rescan Videos" : "Add Video Folder"
+                : isScanning ? "Scanning..." : "Scan Library"}
+              onSearchInput={(value) => searchQuery = value}
+              onSearchKeydown={handleSearchKeydown}
+              onClearSearch={clearSearch}
+              onShuffleLibrary={() => void handleShuffleLibrary()}
+              onRandomAlbum={handleRandomAlbum}
+              onScanLibrary={() => void (ENABLE_EXPERIMENTAL_VIDEOS && activeView === "Videos"
+                ? videoFolder ? handleRescanVideos() : handleAddVideoFolder()
+                : handleScanLibrary())}
+            />
+          </svelte:boundary>
         {:else}
           <header class="home-header">
             <div>
@@ -5836,6 +5829,10 @@
             <button type="button" aria-label="Clear search" onclick={clearSearch}>Clear</button>
           {/if}
         </div>
+      {/if}
+
+      {#if modernFallbackMessage}
+        <div class="scan-error status-message" role="status">{modernFallbackMessage}</div>
       {/if}
 
       {#if scanError}
@@ -6426,19 +6423,21 @@
           </section>
         {:else}
           {#if interfaceMode === "modern"}
-            <ModernAlbumsPage
-              albums={visibleAlbums}
-              {currentAlbumId}
-              hasSearchQuery={normalizedSearchQuery.length > 0}
-              sort={albumSort}
-              sortDirectionLabel={sortDirectionLabel(albumSortDirection)}
-              onSortChange={(value) => albumSort = value}
-              onToggleSortDirection={() => albumSortDirection = nextSortDirection(albumSortDirection)}
-              onOpenAlbum={handleAlbumSelect}
-              onPlayAlbum={(album, shouldShuffle) => void playTrackSet(tracksForAlbum(album), shouldShuffle)}
-              onQueueAlbum={(album) => appendTracksToQueue(tracksForAlbum(album))}
-              onOpenContextMenu={openAlbumContextMenu}
-            />
+            <svelte:boundary onerror={handleModernRenderError}>
+              <ModernAlbumsPage
+                albums={visibleAlbums}
+                {currentAlbumId}
+                hasSearchQuery={normalizedSearchQuery.length > 0}
+                sort={albumSort}
+                sortDirectionLabel={sortDirectionLabel(albumSortDirection)}
+                onSortChange={(value) => albumSort = value}
+                onToggleSortDirection={() => albumSortDirection = nextSortDirection(albumSortDirection)}
+                onOpenAlbum={handleAlbumSelect}
+                onPlayAlbum={(album, shouldShuffle) => void playTrackSet(tracksForAlbum(album), shouldShuffle)}
+                onQueueAlbum={(album) => appendTracksToQueue(tracksForAlbum(album))}
+                onOpenContextMenu={openAlbumContextMenu}
+              />
+            </svelte:boundary>
           {:else}
             <div class="albums-landing">
               <LibrarySection title="All Albums" viewAllLabel={`${visibleAlbums.length} total`}>
@@ -6746,22 +6745,7 @@
 
           </section>
         {:else}
-          {#if interfaceMode === "modern"}
-            <ModernGenresPage
-              genres={visibleGenres}
-              albums={displayAlbums}
-              {tracks}
-              {currentAlbumId}
-              hasSearchQuery={normalizedSearchQuery.length > 0}
-              sort={genreSort}
-              sortDirectionLabel={sortDirectionLabel(genreSortDirection)}
-              onSortChange={(value) => genreSort = value}
-              onToggleSortDirection={() => genreSortDirection = nextSortDirection(genreSortDirection)}
-              onOpenGenre={handleGenreSelect}
-              onOpenContextMenu={openGenreContextMenu}
-            />
-          {:else}
-            <LibrarySection title="All Genres" viewAllLabel={`${visibleGenres.length} total`}>
+          <LibrarySection title="All Genres" viewAllLabel={`${visibleGenres.length} total`}>
             <div class="control-bar">
               <label>
                 <span>Sort</span>
@@ -6801,8 +6785,7 @@
                 {/each}
               </div>
             {/if}
-            </LibrarySection>
-          {/if}
+          </LibrarySection>
         {/if}
       {:else if activeView === "Songs"}
         <LibrarySection title="All Songs" viewAllLabel={`${visibleSongTracks.length} ${visibleSongTracks.length === 1 ? "song" : "songs"}`}>
@@ -8282,9 +8265,7 @@
                   <h4 id="settings-interface-title">Display preferences</h4>
                 </div>
                 <span class="settings-pill">
-                  {interfaceMode === "modern"
-                    ? "Modern Default"
-                    : themePresets.find((theme) => theme.id === selectedTheme)?.name ?? "Cassette Teal"}
+                  {interfaceMode === "modern" ? "Modern" : "Legacy"} · {themePresets.find((theme) => theme.id === selectedTheme)?.name ?? "Cassette Teal"}
                 </span>
               </div>
 
@@ -8315,51 +8296,24 @@
                 </div>
               </div>
 
-              {#if interfaceMode === "legacy"}
-                <div class="theme-preset-grid" aria-label="Theme presets">
-                  {#each themePresets as theme}
-                    <button
-                      class:selected={selectedTheme === theme.id}
-                      type="button"
-                      aria-pressed={selectedTheme === theme.id}
-                      onclick={() => handleThemeSelect(theme.id)}
-                    >
-                      <span class="theme-swatch-row" aria-hidden="true">
-                        {#each theme.swatches as swatch}
-                          <span style={`--swatch-color: ${swatch}`}></span>
-                        {/each}
-                      </span>
-                      <strong>{theme.name}</strong>
-                      <small>{theme.description}</small>
-                    </button>
-                  {/each}
-                </div>
-              {:else}
-                <div class="modern-appearance-setting" aria-labelledby="modern-appearance-title">
-                  <div class="modern-appearance-heading">
-                    <strong id="modern-appearance-title">Modern Appearance</strong>
-                    <small>Legacy theme choices are preserved and restored when you switch back.</small>
-                  </div>
-                  <div
-                    class="modern-appearance-card selected"
-                    aria-current="true"
-                    aria-label="Modern Default appearance, selected"
-                    data-appearance={modernAppearance}
+              <div class="theme-preset-grid" aria-label="Theme presets">
+                {#each themePresets as theme}
+                  <button
+                    class:selected={selectedTheme === theme.id}
+                    type="button"
+                    aria-pressed={selectedTheme === theme.id}
+                    onclick={() => handleThemeSelect(theme.id)}
                   >
-                    <span class="modern-appearance-preview" aria-hidden="true">
-                      <span></span>
-                      <span></span>
-                      <span></span>
+                    <span class="theme-swatch-row" aria-hidden="true">
+                      {#each theme.swatches as swatch}
+                        <span style={`--swatch-color: ${swatch}`}></span>
+                      {/each}
                     </span>
-                    <strong>Modern Default</strong>
-                    <small>Modern uses its own artwork-focused visual system.</small>
-                    <span class="modern-appearance-selected">
-                      <span aria-hidden="true">✓</span>
-                      Selected
-                    </span>
-                  </div>
-                </div>
-              {/if}
+                    <strong>{theme.name}</strong>
+                    <small>{theme.description}</small>
+                  </button>
+                {/each}
+              </div>
 
               <div class="settings-control-list">
                 <div>
@@ -8779,6 +8733,7 @@
     --text-soft: #8f9aa8;
     --text-dim: #626c79;
     --accent: #2f8f83;
+    --accent-hover: color-mix(in srgb, var(--accent) 82%, var(--text));
     --accent-soft: #17332f;
     --accent-strong: #35544f;
     --accent-text: #d8fffa;
@@ -8794,6 +8749,41 @@
     --modern-player: #101419;
     --modern-selected: #1a2528;
     --modern-shadow: rgba(0, 0, 0, 0.34);
+    --modern-application-background: var(--bg);
+    --modern-sidebar-background: var(--modern-sidebar, var(--bg-soft));
+    --modern-surface-primary: var(--panel);
+    --modern-surface-elevated: var(--modern-elevated, var(--panel-strong));
+    --modern-surface-soft: var(--panel-soft);
+    --modern-surface-subtle: var(--bg-soft);
+    --modern-surface-hover: var(--panel-hover);
+    --modern-surface-selected: var(--modern-selected, var(--panel-hover));
+    --modern-border: var(--border);
+    --modern-border-strong: var(--border-strong);
+    --modern-text-primary: var(--text);
+    --modern-text-secondary: var(--text-muted);
+    --modern-text-muted: var(--text-soft);
+    --modern-text-dim: var(--text-dim);
+    --modern-accent: var(--accent);
+    --modern-accent-hover: color-mix(in srgb, var(--accent) 82%, var(--text));
+    --modern-accent-soft: var(--accent-soft);
+    --modern-accent-border: var(--accent-strong);
+    --modern-accent-text: var(--accent-text);
+    --modern-accent-contrast: var(--accent-contrast);
+    --modern-focus-ring: var(--focus-ring);
+    --modern-player-background: var(--modern-player, var(--panel));
+    --modern-player-border: color-mix(in srgb, var(--border-strong) 76%, transparent);
+    --modern-overlay-background: color-mix(in srgb, var(--bg) 88%, transparent);
+    --modern-modal-backdrop: color-mix(in srgb, var(--bg) 78%, transparent);
+    --modern-shadow-subtle: var(--modern-shadow, var(--shadow));
+    --modern-glow-subtle: color-mix(in srgb, var(--accent) 14%, transparent);
+    --modern-input-background: color-mix(in srgb, var(--panel-soft) 86%, transparent);
+    --modern-input-border: color-mix(in srgb, var(--border-strong) 72%, transparent);
+    --modern-control-background: color-mix(in srgb, var(--panel-strong) 74%, transparent);
+    --modern-control-hover: var(--panel-hover);
+    --modern-current-playing: color-mix(in srgb, var(--modern-selected) 88%, transparent);
+    --modern-scrollbar-color: color-mix(in srgb, var(--text-soft) 24%, transparent);
+    --modern-scrollbar-thumb: color-mix(in srgb, var(--text-soft) 30%, transparent);
+    --modern-scrollbar-track: transparent;
   }
 
   :global(:root[data-theme="rose-noir"]) {
@@ -8906,81 +8896,6 @@
     --modern-player: #09131c;
     --modern-selected: #183043;
     --modern-shadow: rgba(0, 0, 0, 0.38);
-  }
-
-  :global(:root[data-interface="modern"][data-modern-appearance="default"]) {
-    color-scheme: dark;
-
-    /* Modern Default semantic palette. */
-    --modern-application-background: #0a0908;
-    --modern-sidebar-background: #0f0e0c;
-    --modern-surface-primary: #131210;
-    --modern-surface-elevated: #1a1815;
-    --modern-surface-soft: #171512;
-    --modern-surface-subtle: #0f0e0d;
-    --modern-surface-hover: #211e1a;
-    --modern-surface-selected: #241f19;
-    --modern-border: #27231e;
-    --modern-border-strong: #3a332b;
-    --modern-text-primary: #f2ece1;
-    --modern-text-secondary: #c5bbae;
-    --modern-text-muted: #948b7f;
-    --modern-text-dim: #7f776c;
-    --modern-accent: #b87743;
-    --modern-accent-hover: #ca8952;
-    --modern-accent-soft: #2c2017;
-    --modern-accent-border: #745038;
-    --modern-accent-text: #f2cda8;
-    --modern-accent-contrast: #170d06;
-    --modern-focus-ring: rgba(202, 137, 82, 0.58);
-    --modern-player-background: #0e0d0b;
-    --modern-player-border: rgba(58, 51, 43, 0.78);
-    --modern-overlay-background: rgba(10, 8, 7, 0.86);
-    --modern-modal-backdrop: rgba(5, 4, 3, 0.78);
-    --modern-shadow-subtle: rgba(0, 0, 0, 0.38);
-    --modern-glow-subtle: rgba(184, 119, 67, 0.14);
-    --modern-input-background: rgba(25, 23, 20, 0.86);
-    --modern-input-border: rgba(58, 51, 43, 0.72);
-    --modern-control-background: rgba(28, 25, 22, 0.74);
-    --modern-control-hover: #211e1a;
-    --modern-current-playing: rgba(36, 31, 25, 0.9);
-    --modern-scrollbar-color: rgba(148, 139, 127, 0.24);
-    --modern-scrollbar-thumb: rgba(148, 139, 127, 0.3);
-    --modern-scrollbar-track: transparent;
-    --modern-danger: #f0b6ad;
-    --modern-danger-soft: #2d1917;
-    --modern-warning: #d5a34e;
-    --modern-range-empty: #302b25;
-
-    /* Shared components inherit the active interface's semantic values. */
-    --bg: var(--modern-application-background);
-    --bg-soft: var(--modern-surface-subtle);
-    --panel: var(--modern-surface-primary);
-    --panel-soft: var(--modern-surface-soft);
-    --panel-strong: var(--modern-surface-elevated);
-    --panel-hover: var(--modern-surface-hover);
-    --border: var(--modern-border);
-    --border-strong: var(--modern-border-strong);
-    --text: var(--modern-text-primary);
-    --text-muted: var(--modern-text-secondary);
-    --text-soft: var(--modern-text-muted);
-    --text-dim: var(--modern-text-dim);
-    --accent: var(--modern-accent);
-    --accent-soft: var(--modern-accent-soft);
-    --accent-strong: var(--modern-accent-border);
-    --accent-text: var(--modern-accent-text);
-    --accent-contrast: var(--modern-accent-contrast);
-    --danger: var(--modern-danger);
-    --danger-soft: var(--modern-danger-soft);
-    --warning: var(--modern-warning);
-    --shadow: rgba(0, 0, 0, 0.22);
-    --focus-ring: var(--modern-focus-ring);
-    --range-empty: var(--modern-range-empty);
-    --modern-sidebar: var(--modern-sidebar-background);
-    --modern-elevated: var(--modern-surface-elevated);
-    --modern-player: var(--modern-player-background);
-    --modern-selected: var(--modern-surface-selected);
-    --modern-shadow: var(--modern-shadow-subtle);
   }
 
   :global(*) {
@@ -12776,112 +12691,6 @@
     border-radius: 999px;
     background: var(--swatch-color);
     box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.18);
-  }
-
-  .modern-appearance-setting {
-    display: grid;
-    gap: 10px;
-  }
-
-  .modern-appearance-heading strong,
-  .modern-appearance-heading small {
-    display: block;
-  }
-
-  .modern-appearance-heading strong {
-    color: var(--text);
-    font-size: 0.94rem;
-    font-weight: 850;
-  }
-
-  .modern-appearance-heading small {
-    margin-top: 3px;
-    color: var(--text-soft);
-    font-size: 0.78rem;
-    font-weight: 700;
-  }
-
-  .modern-appearance-card {
-    display: grid;
-    grid-template-columns: auto minmax(0, 1fr) auto;
-    grid-template-rows: auto auto;
-    align-items: center;
-    gap: 3px 12px;
-    width: min(100%, 520px);
-    min-width: 0;
-    border: 1px solid var(--accent-strong);
-    border-radius: 8px;
-    background: var(--panel-hover);
-    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 36%, transparent);
-    color: inherit;
-    padding: 14px;
-  }
-
-  .modern-appearance-card > strong {
-    color: var(--text);
-    font-size: 0.94rem;
-    font-weight: 850;
-    line-height: 1.2;
-  }
-
-  .modern-appearance-card > small {
-    grid-column: 2 / -1;
-    color: var(--text-soft);
-    font-size: 0.78rem;
-    font-weight: 720;
-    line-height: 1.35;
-  }
-
-  .modern-appearance-preview {
-    display: grid;
-    grid-row: 1 / 3;
-    grid-template-columns: repeat(3, 12px);
-    gap: 4px;
-    align-self: stretch;
-    min-height: 42px;
-    border: 1px solid var(--border-strong);
-    border-radius: 7px;
-    background: var(--bg);
-    padding: 5px;
-  }
-
-  .modern-appearance-preview span {
-    border-radius: 4px;
-  }
-
-  .modern-appearance-preview span:first-child {
-    background: var(--modern-sidebar-background);
-  }
-
-  .modern-appearance-preview span:nth-child(2) {
-    background: var(--modern-surface-elevated);
-  }
-
-  .modern-appearance-preview span:last-child {
-    background: var(--accent);
-  }
-
-  .modern-appearance-selected {
-    display: inline-flex;
-    grid-column: 3;
-    grid-row: 1;
-    align-items: center;
-    gap: 5px;
-    color: var(--accent-text);
-    font-size: 0.72rem;
-    font-weight: 850;
-    white-space: nowrap;
-  }
-
-  .modern-appearance-selected > span {
-    display: grid;
-    width: 17px;
-    height: 17px;
-    place-items: center;
-    border-radius: 999px;
-    background: var(--accent);
-    color: var(--accent-contrast);
-    font-size: 0.68rem;
   }
 
   .settings-actions {

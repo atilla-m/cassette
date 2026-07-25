@@ -452,67 +452,6 @@
     background: color-mix(in srgb, var(--bg) 90%, transparent);
   }
 
-  .player.modern:not(.compact) {
-    grid-template-areas:
-      "track transport volume"
-      "track progress volume";
-    grid-template-columns: minmax(230px, 1fr) minmax(390px, 1.5fr) minmax(250px, 0.95fr);
-    grid-template-rows: auto auto;
-    gap: 7px clamp(20px, 2.2vw, 38px);
-    min-height: 108px;
-    border-top-color: var(--modern-player-border, color-mix(in srgb, var(--border-strong) 72%, transparent));
-    background: var(--modern-player-background, var(--modern-player, var(--panel)));
-    box-shadow: 0 -14px 36px color-mix(in srgb, var(--modern-shadow, var(--shadow)) 54%, transparent);
-    padding: 13px clamp(18px, 2vw, 30px);
-  }
-
-  .player.modern:not(.compact) .track {
-    grid-area: track;
-  }
-
-  .player.modern:not(.compact) .transport {
-    grid-area: transport;
-    align-self: end;
-  }
-
-  .player.modern:not(.compact) .progress-area {
-    grid-area: progress;
-    align-self: start;
-  }
-
-  .player.modern:not(.compact) .volume {
-    grid-area: volume;
-    justify-content: flex-end;
-  }
-
-  .player.modern:not(.compact) .cover {
-    width: 68px;
-    height: 68px;
-    border-radius: 9px;
-    box-shadow: 0 8px 24px var(--modern-shadow, var(--shadow));
-  }
-
-  .player.modern:not(.compact) .track-copy > span {
-    font-size: 0.94rem;
-    font-weight: 790;
-  }
-
-  .player.modern:not(.compact) .track-copy small {
-    font-size: 0.76rem;
-  }
-
-  .player.modern:not(.compact) button.play {
-    width: 48px;
-    height: 48px;
-    border-radius: 50%;
-    box-shadow: 0 6px 20px color-mix(in srgb, var(--accent) 22%, transparent);
-  }
-
-  .player.modern:not(.compact) .progress,
-  .player.modern:not(.compact) .volume-bar {
-    height: 6px;
-  }
-
   .track {
     display: flex;
     align-items: center;
@@ -830,6 +769,25 @@
       var(--modern-player-background, var(--panel));
     box-shadow: 0 -16px 40px color-mix(in srgb, var(--modern-shadow, var(--shadow)) 48%, transparent);
     padding: 12px clamp(20px, 2.4vw, 36px);
+  }
+
+  .player.modern:not(.compact) .track {
+    grid-area: track;
+  }
+
+  .player.modern:not(.compact) .transport {
+    grid-area: transport;
+    align-self: end;
+  }
+
+  .player.modern:not(.compact) .progress-area {
+    grid-area: progress;
+    align-self: start;
+  }
+
+  .player.modern:not(.compact) .volume {
+    grid-area: volume;
+    justify-content: flex-end;
   }
 
   .player.modern:not(.compact) .track {
