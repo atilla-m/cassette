@@ -486,7 +486,6 @@
   let selectedTheme = $state<ThemeId>(DEFAULT_THEME);
   let interfaceMode = $state<InterfaceMode>(DEFAULT_INTERFACE_MODE);
   let modernAppearance = $state<ModernAppearance>(DEFAULT_MODERN_APPEARANCE);
-  let modernFallbackMessage = $state<string | null>(null);
   let isLoadingLyrics = $state(false);
   let isAutoFindingLyrics = $state(false);
   let isSavingLyricsSelection = $state(false);
@@ -734,17 +733,9 @@
   }
 
   function handleInterfaceModeSelect(mode: InterfaceMode) {
-    modernFallbackMessage = null;
     interfaceMode = mode;
     applyInterfaceMode(mode);
     window.localStorage.setItem(INTERFACE_MODE_SETTING_KEY, mode);
-  }
-
-  function handleModernRenderError(error: unknown) {
-    console.error("Modern interface failed to render; using Legacy for this session.", error);
-    modernFallbackMessage = "Modern could not start. Cassette opened the Legacy interface for this session.";
-    interfaceMode = DEFAULT_INTERFACE_MODE;
-    applyInterfaceMode(DEFAULT_INTERFACE_MODE);
   }
 
   $effect(() => {
@@ -5758,9 +5749,7 @@
   <div class:lyrics-mode={activeView === "Now Playing"} class:modern={interfaceMode === "modern"} class="workspace">
     {#if activeView !== "Now Playing"}
       {#if interfaceMode === "modern"}
-        <svelte:boundary onerror={handleModernRenderError}>
-          <ModernSidebar items={visibleNavItems} active={activeView} onNavigate={handleNavigate} />
-        </svelte:boundary>
+        <ModernSidebar items={visibleNavItems} active={activeView} onNavigate={handleNavigate} />
       {:else}
         <Sidebar items={visibleNavItems} active={activeView} onNavigate={handleNavigate} />
       {/if}
@@ -5781,31 +5770,29 @@
     >
       {#if activeView !== "Now Playing" && !isAlbumDetailView && !isArtistDetailView && !isGenreDetailView && !isPlaylistDetailView}
         {#if interfaceMode === "modern"}
-          <svelte:boundary onerror={handleModernRenderError}>
-            <ModernTopbar
-              eyebrow={viewEyebrow()}
-              title={viewTitle()}
-              status={viewStatus()}
-              searchValue={searchQuery}
-              searchPlaceholder={searchPlaceholder() || "Search Cassette..."}
-              showSearch={isSearchAvailable()}
-              isAlbumsLanding={activeView === "Albums" && !selectedAlbum}
-              hasTracks={tracks.length > 0}
-              hasAlbums={displayAlbums.length > 0}
-              isScanning={ENABLE_EXPERIMENTAL_VIDEOS && activeView === "Videos" ? isScanningVideos : isScanning}
-              scanLabel={ENABLE_EXPERIMENTAL_VIDEOS && activeView === "Videos"
-                ? isScanningVideos ? "Scanning..." : videoFolder ? "Rescan Videos" : "Add Video Folder"
-                : isScanning ? "Scanning..." : "Scan Library"}
-              onSearchInput={(value) => searchQuery = value}
-              onSearchKeydown={handleSearchKeydown}
-              onClearSearch={clearSearch}
-              onShuffleLibrary={() => void handleShuffleLibrary()}
-              onRandomAlbum={handleRandomAlbum}
-              onScanLibrary={() => void (ENABLE_EXPERIMENTAL_VIDEOS && activeView === "Videos"
-                ? videoFolder ? handleRescanVideos() : handleAddVideoFolder()
-                : handleScanLibrary())}
-            />
-          </svelte:boundary>
+          <ModernTopbar
+            eyebrow={viewEyebrow()}
+            title={viewTitle()}
+            status={viewStatus()}
+            searchValue={searchQuery}
+            searchPlaceholder={searchPlaceholder() || "Search Cassette..."}
+            showSearch={isSearchAvailable()}
+            isAlbumsLanding={activeView === "Albums" && !selectedAlbum}
+            hasTracks={tracks.length > 0}
+            hasAlbums={displayAlbums.length > 0}
+            isScanning={ENABLE_EXPERIMENTAL_VIDEOS && activeView === "Videos" ? isScanningVideos : isScanning}
+            scanLabel={ENABLE_EXPERIMENTAL_VIDEOS && activeView === "Videos"
+              ? isScanningVideos ? "Scanning..." : videoFolder ? "Rescan Videos" : "Add Video Folder"
+              : isScanning ? "Scanning..." : "Scan Library"}
+            onSearchInput={(value) => searchQuery = value}
+            onSearchKeydown={handleSearchKeydown}
+            onClearSearch={clearSearch}
+            onShuffleLibrary={() => void handleShuffleLibrary()}
+            onRandomAlbum={handleRandomAlbum}
+            onScanLibrary={() => void (ENABLE_EXPERIMENTAL_VIDEOS && activeView === "Videos"
+              ? videoFolder ? handleRescanVideos() : handleAddVideoFolder()
+              : handleScanLibrary())}
+          />
         {:else}
           <header class="home-header">
             <div>
@@ -5849,10 +5836,6 @@
             <button type="button" aria-label="Clear search" onclick={clearSearch}>Clear</button>
           {/if}
         </div>
-      {/if}
-
-      {#if modernFallbackMessage}
-        <div class="scan-error status-message" role="status">{modernFallbackMessage}</div>
       {/if}
 
       {#if scanError}
@@ -6443,21 +6426,19 @@
           </section>
         {:else}
           {#if interfaceMode === "modern"}
-            <svelte:boundary onerror={handleModernRenderError}>
-              <ModernAlbumsPage
-                albums={visibleAlbums}
-                {currentAlbumId}
-                hasSearchQuery={normalizedSearchQuery.length > 0}
-                sort={albumSort}
-                sortDirectionLabel={sortDirectionLabel(albumSortDirection)}
-                onSortChange={(value) => albumSort = value}
-                onToggleSortDirection={() => albumSortDirection = nextSortDirection(albumSortDirection)}
-                onOpenAlbum={handleAlbumSelect}
-                onPlayAlbum={(album, shouldShuffle) => void playTrackSet(tracksForAlbum(album), shouldShuffle)}
-                onQueueAlbum={(album) => appendTracksToQueue(tracksForAlbum(album))}
-                onOpenContextMenu={openAlbumContextMenu}
-              />
-            </svelte:boundary>
+            <ModernAlbumsPage
+              albums={visibleAlbums}
+              {currentAlbumId}
+              hasSearchQuery={normalizedSearchQuery.length > 0}
+              sort={albumSort}
+              sortDirectionLabel={sortDirectionLabel(albumSortDirection)}
+              onSortChange={(value) => albumSort = value}
+              onToggleSortDirection={() => albumSortDirection = nextSortDirection(albumSortDirection)}
+              onOpenAlbum={handleAlbumSelect}
+              onPlayAlbum={(album, shouldShuffle) => void playTrackSet(tracksForAlbum(album), shouldShuffle)}
+              onQueueAlbum={(album) => appendTracksToQueue(tracksForAlbum(album))}
+              onOpenContextMenu={openAlbumContextMenu}
+            />
           {:else}
             <div class="albums-landing">
               <LibrarySection title="All Albums" viewAllLabel={`${visibleAlbums.length} total`}>
@@ -8798,7 +8779,6 @@
     --text-soft: #8f9aa8;
     --text-dim: #626c79;
     --accent: #2f8f83;
-    --accent-hover: color-mix(in srgb, var(--accent) 82%, var(--text));
     --accent-soft: #17332f;
     --accent-strong: #35544f;
     --accent-text: #d8fffa;
@@ -8986,7 +8966,6 @@
     --text-soft: var(--modern-text-muted);
     --text-dim: var(--modern-text-dim);
     --accent: var(--modern-accent);
-    --accent-hover: var(--modern-accent-hover);
     --accent-soft: var(--modern-accent-soft);
     --accent-strong: var(--modern-accent-border);
     --accent-text: var(--modern-accent-text);
