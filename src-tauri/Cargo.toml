@@ -1,9 +1,12 @@
 [package]
 name = "cassette"
 version = "0.1.0"
-description = "A Tauri App"
-authors = ["you"]
+description = "A private, local-first desktop music library and player"
+authors = ["Cassette contributors"]
 edition = "2021"
+homepage = "https://github.com/atilla-m/cassette"
+repository = "https://github.com/atilla-m/cassette"
+categories = ["multimedia::audio"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -24,10 +27,10 @@ tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 lofty = "0.24"
-libloading = "0.8"
 gstreamer = "0.25"
 rusqlite = { version = "0.40", features = ["bundled"] }
 reqwest = { version = "0.13.4", features = ["json"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+libloading = "0.8"
 zbus = "5.16.0"

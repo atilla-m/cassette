@@ -1,0 +1,134 @@
+name: Draft release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x86_64
+            os: ubuntu-22.04
+            bundles: appimage,deb,rpm
+            artifact: linux-x86_64-[bundle]
+          - name: Windows x86_64
+            os: windows-latest
+            bundles: nsis,msi
+            artifact: windows-x86_64-[bundle]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Install Linux native dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libgstreamer1.0-dev \
+            libgstreamer-plugins-base1.0-dev \
+            gstreamer1.0-plugins-base \
+            gstreamer1.0-plugins-good \
+            gstreamer1.0-plugins-bad \
+            gstreamer1.0-plugins-ugly \
+            gstreamer1.0-libav \
+            libnotify-bin \
+            libdiscid-dev \
+            rpm
+
+      - name: Install official GStreamer MSVC x86_64 packages
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/install-gstreamer-windows.ps1
+
+      - run: npm ci
+      - run: npm run build
+      - run: npm run check
+      - run: cargo test --manifest-path src-tauri/Cargo.toml
+      - run: cargo check --manifest-path src-tauri/Cargo.toml
+
+      - name: Build installers
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          args: --bundles ${{ matrix.bundles }}
+          uploadWorkflowArtifacts: true
+          workflowArtifactNamePattern: ${{ matrix.artifact }}
+
+  draft-release:
+    name: Create one draft release
+    if: github.event_name == 'push'
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Select and verify release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir selected-assets
+
+          find release-assets -type f \( \
+            -name '*.AppImage' -o \
+            -name '*.deb' -o \
+            -name '*.rpm' -o \
+            -name '*setup.exe' -o \
+            -name '*.msi' \
+          \) -exec cp '{}' selected-assets/ \;
+
+          test "$(find selected-assets -maxdepth 1 -type f -name '*.AppImage' | wc -l)" -ge 1
+          test "$(find selected-assets -maxdepth 1 -type f -name '*.deb' | wc -l)" -ge 1
+          test "$(find selected-assets -maxdepth 1 -type f -name '*.rpm' | wc -l)" -ge 1
+          test "$(find selected-assets -maxdepth 1 -type f -name '*setup.exe' | wc -l)" -ge 1
+          test "$(find selected-assets -maxdepth 1 -type f -name '*.msi' | wc -l)" -ge 1
+
+          find selected-assets -maxdepth 1 -type f -printf '%f\n' | sort
+
+      - name: Create draft and upload assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+            is_draft="$(gh api "repos/${GH_REPO}/releases/tags/${tag}" --jq '.draft')"
+            test "$is_draft" = "true"
+          else
+            gh release create "$tag" \
+              --draft \
+              --verify-tag \
+              --title "Cassette ${tag#v}" \
+              --notes "Draft build. Complete docs/RELEASING.md before publishing."
+          fi
+
+          gh release upload "$tag" selected-assets/* --clobber

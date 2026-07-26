@@ -1,0 +1,102 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: Linux (Ubuntu 22.04)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libgstreamer1.0-dev \
+            libgstreamer-plugins-base1.0-dev \
+            gstreamer1.0-plugins-base \
+            gstreamer1.0-plugins-good \
+            gstreamer1.0-plugins-bad \
+            gstreamer1.0-plugins-ugly \
+            gstreamer1.0-libav \
+            libnotify-bin \
+            libdiscid-dev
+
+      - run: npm ci
+      - run: npm run build
+      - run: npm run check
+      - run: cargo test --manifest-path src-tauri/Cargo.toml
+      - run: cargo check --manifest-path src-tauri/Cargo.toml
+      - run: npm run tauri build -- --no-bundle
+
+  windows:
+    name: Windows (MSVC x86_64)
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Install official GStreamer MSVC x86_64 packages
+        shell: pwsh
+        run: ./scripts/install-gstreamer-windows.ps1
+
+      - name: Verify required GStreamer runtime elements
+        shell: pwsh
+        run: |
+          $elements = @(
+            "playbin", "uridecodebin", "decodebin3", "filesrc", "typefind",
+            "audioconvert", "audioresample", "autoaudiosink",
+            "flacdec", "oggdemux", "vorbisdec", "opusdec", "wavparse", "qtdemux"
+          )
+          foreach ($element in $elements) {
+            gst-inspect-1.0.exe $element
+            if ($LASTEXITCODE -ne 0) {
+              throw "Required GStreamer element is unavailable: $element"
+            }
+          }
+
+          $mp3Decoders = @("mpg123audiodec", "avdec_mp3")
+          if (-not ($mp3Decoders | Where-Object {
+            & gst-inspect-1.0.exe $_ *> $null
+            $LASTEXITCODE -eq 0
+          })) {
+            throw "No supported MP3 decoder is installed."
+          }
+
+          $aacDecoders = @("faad", "avdec_aac")
+          if (-not ($aacDecoders | Where-Object {
+            & gst-inspect-1.0.exe $_ *> $null
+            $LASTEXITCODE -eq 0
+          })) {
+            throw "No supported AAC decoder is installed."
+          }
+
+      - run: npm ci
+      - run: npm run build
+      - run: npm run check
+      - run: cargo test --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc
+      - run: cargo check --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc
+      - run: npm run tauri build -- --target x86_64-pc-windows-msvc --no-bundle

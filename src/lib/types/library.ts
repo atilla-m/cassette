@@ -23,6 +23,14 @@ export type Track = {
   lastPlayedAt: number | null;
 };
 
+export type PlatformCapabilities = {
+  os: string;
+  linuxNotifications: boolean;
+  mpris: boolean;
+  cdRipping: boolean;
+  dvdVideo: boolean;
+};
+
 export type TrackTagValues = {
   title: string | null;
   artist: string | null;

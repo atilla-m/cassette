@@ -1,7 +1,16 @@
 {
   "name": "cassette",
   "version": "0.1.0",
-  "description": "",
+  "description": "A private, local-first desktop music library and player.",
+  "private": true,
+  "homepage": "https://github.com/atilla-m/cassette",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/atilla-m/cassette.git"
+  },
+  "bugs": {
+    "url": "https://github.com/atilla-m/cassette/issues"
+  },
   "type": "module",
   "scripts": {
     "dev": "vite dev",
@@ -11,7 +20,7 @@
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
     "tauri": "tauri"
   },
-  "license": "MIT",
+  "license": "UNLICENSED",
   "dependencies": {
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-dialog": "^2.7.1",

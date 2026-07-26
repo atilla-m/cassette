@@ -13,6 +13,7 @@
     detectAudioCd,
     detectDvd,
     getLibraryCache,
+    getPlatformCapabilities,
     getTrackTagEditorData,
     getVideoLibrary,
     importDvdTitle,
@@ -86,6 +87,7 @@
     DvdTitleScanResult,
     Genre,
     LrclibLyricsResult,
+    PlatformCapabilities,
     PlaybackStatus,
     Playlist,
     Track,
@@ -411,6 +413,7 @@
   let shuffledQueueOrder = $state<number[]>([]);
   let repeatMode = $state<RepeatMode>("off");
   let isHandlingTrackEnd = $state(false);
+  let platformCapabilities = $state<PlatformCapabilities | null>(null);
   let trackNotificationsEnabled = $state(false);
   let trackNotificationStatus = $state<string | null>(null);
   let trackNotificationStatusIsError = $state(false);
@@ -497,7 +500,11 @@
   let displayAlbums = $derived(!hasLoadedCache ? mockAlbums : buildAlbums(tracks));
   let displayArtists = $derived(!hasLoadedCache ? mockArtists : buildArtists(tracks));
   let displayGenres = $derived(!hasLoadedCache ? mockGenres : buildGenres(tracks));
-  let visibleNavItems = $derived(navItems.filter((item) => item.label !== "Home" && (ENABLE_EXPERIMENTAL_VIDEOS || item.label !== "Videos")));
+  let visibleNavItems = $derived(navItems.filter((item) =>
+    item.label !== "Home"
+      && (ENABLE_EXPERIMENTAL_VIDEOS || item.label !== "Videos")
+      && (platformCapabilities?.cdRipping !== false || item.label !== "CD Rip")
+  ));
   let favoriteTracks = $derived(tracks.filter((track) => track.isFavorite));
   let availableFormats = $derived(availableTrackFormats(tracks));
   let sortedSongTracks = $derived(sortTracks(tracks, songSort, songSortDirection));
@@ -737,6 +744,7 @@
     }
     autoFindLyricsEnabled = window.localStorage.getItem(AUTO_LYRICS_SETTING_KEY) !== "off";
     trackNotificationsEnabled = window.localStorage.getItem(TRACK_NOTIFICATIONS_SETTING_KEY) === "on";
+    void loadPlatformCapabilities();
     void loadLibraryCache();
     if (ENABLE_EXPERIMENTAL_VIDEOS) {
       void loadVideoLibrary();
@@ -883,6 +891,19 @@
       }
     };
   });
+
+  async function loadPlatformCapabilities() {
+    try {
+      platformCapabilities = await getPlatformCapabilities();
+
+      if (!platformCapabilities.linuxNotifications) {
+        trackNotificationsEnabled = false;
+        window.localStorage.setItem(TRACK_NOTIFICATIONS_SETTING_KEY, "off");
+      }
+    } catch {
+      // Older backends do not expose capabilities. Keep the established Linux UI.
+    }
+  }
 
   async function loadLibraryCache() {
     try {
@@ -8087,23 +8108,31 @@
               </div>
 
               <div class="settings-control-list">
-                <label class="settings-toggle-row">
-                  <span>Track change notifications</span>
-                  <input
-                    type="checkbox"
-                    checked={trackNotificationsEnabled}
-                    onchange={handleTrackNotificationsSettingChange}
-                  />
-                  <strong>{trackNotificationsEnabled ? "On" : "Off"}</strong>
-                </label>
-                <div>
-                  <span>Notification support</span>
-                  <strong>Linux only</strong>
-                  <small>Uses the system notify-send command.</small>
-                </div>
+                {#if platformCapabilities?.linuxNotifications !== false}
+                  <label class="settings-toggle-row">
+                    <span>Track change notifications</span>
+                    <input
+                      type="checkbox"
+                      checked={trackNotificationsEnabled}
+                      onchange={handleTrackNotificationsSettingChange}
+                    />
+                    <strong>{trackNotificationsEnabled ? "On" : "Off"}</strong>
+                  </label>
+                  <div>
+                    <span>Notification support</span>
+                    <strong>Linux only</strong>
+                    <small>Uses the system notify-send command.</small>
+                  </div>
+                {:else}
+                  <div>
+                    <span>Track change notifications</span>
+                    <strong>Unavailable</strong>
+                    <small>Linux-only in Cassette 0.1.0.</small>
+                  </div>
+                {/if}
               </div>
 
-              {#if trackNotificationsEnabled}
+              {#if platformCapabilities?.linuxNotifications !== false && trackNotificationsEnabled}
                 <div class="settings-actions">
                   <button type="button" onclick={handleTestTrackNotification}>
                     Test Notification

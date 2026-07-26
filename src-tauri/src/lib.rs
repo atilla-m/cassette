@@ -1,5 +1,6 @@
 use gst::prelude::*;
 use gstreamer as gst;
+#[cfg(target_os = "linux")]
 use libloading::Library;
 use lofty::config::{ParseOptions, WriteOptions};
 use lofty::file::{AudioFile, TaggedFileExt};
@@ -12,12 +13,14 @@ use lofty::tag::{Accessor, ItemKey, Tag, TagType};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+#[cfg(target_os = "linux")]
 use std::ffi::CStr;
 use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Write};
+#[cfg(target_os = "linux")]
+use std::os::raw::{c_char, c_int, c_uint, c_void};
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
-use std::os::raw::{c_char, c_int, c_uint, c_void};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::Mutex;
@@ -561,6 +564,29 @@ struct ImportedDvdVideo {
     output_path: String,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PlatformCapabilities {
+    os: &'static str,
+    linux_notifications: bool,
+    mpris: bool,
+    cd_ripping: bool,
+    dvd_video: bool,
+}
+
+#[tauri::command]
+fn get_platform_capabilities() -> PlatformCapabilities {
+    let is_linux = cfg!(target_os = "linux");
+
+    PlatformCapabilities {
+        os: std::env::consts::OS,
+        linux_notifications: is_linux,
+        mpris: is_linux,
+        cd_ripping: is_linux,
+        dvd_video: is_linux,
+    }
+}
+
 #[tauri::command]
 fn get_library_cache(library: State<'_, Mutex<LibraryDatabase>>) -> Result<LibraryCache, String> {
     let library = library
@@ -572,35 +598,44 @@ fn get_library_cache(library: State<'_, Mutex<LibraryDatabase>>) -> Result<Libra
 
 #[tauri::command]
 fn send_linux_notification(title: String, body: String) -> Result<(), String> {
-    let output = Command::new("notify-send")
-        .arg("--app-name=Cassette")
-        .arg(title)
-        .arg(body)
-        .output()
-        .map_err(|error| {
-            if error.kind() == io::ErrorKind::NotFound {
-                "notify-send is unavailable.".to_owned()
-            } else {
-                format!("Could not run notify-send: {error}")
-            }
-        })?;
+    #[cfg(target_os = "linux")]
+    {
+        let output = Command::new("notify-send")
+            .arg("--app-name=Cassette")
+            .arg(title)
+            .arg(body)
+            .output()
+            .map_err(|error| {
+                if error.kind() == io::ErrorKind::NotFound {
+                    "notify-send is unavailable.".to_owned()
+                } else {
+                    format!("Could not run notify-send: {error}")
+                }
+            })?;
 
-    if output.status.success() {
-        return Ok(());
+        if output.status.success() {
+            return Ok(());
+        }
+
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+
+        if stderr.is_empty() {
+            Err(format!(
+                "notify-send exited unsuccessfully with status {}.",
+                output
+                    .status
+                    .code()
+                    .map_or_else(|| "unknown".to_owned(), |code| code.to_string())
+            ))
+        } else {
+            Err(format!("notify-send failed: {stderr}"))
+        }
     }
 
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-
-    if stderr.is_empty() {
-        Err(format!(
-            "notify-send exited unsuccessfully with status {}.",
-            output
-                .status
-                .code()
-                .map_or_else(|| "unknown".to_owned(), |code| code.to_string())
-        ))
-    } else {
-        Err(format!("notify-send failed: {stderr}"))
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (title, body);
+        Err("Desktop notifications are available only on Linux in Cassette 0.1.0.".to_owned())
     }
 }
 
@@ -630,7 +665,11 @@ async fn scan_video_folder(
     }
 
     let scan_root = root_path.clone();
-    let thumbnail_dir = app.path().app_data_dir().ok().map(|path| path.join("video-thumbnails"));
+    let thumbnail_dir = app
+        .path()
+        .app_data_dir()
+        .ok()
+        .map(|path| path.join("video-thumbnails"));
     let scanned_at = unix_timestamp();
     let mut videos = tauri::async_runtime::spawn_blocking(move || {
         scan_video_directory_root(&scan_root, scanned_at, thumbnail_dir.as_deref())
@@ -848,16 +887,31 @@ fn get_video_codec_info(
 
 #[tauri::command]
 async fn detect_dvd() -> Result<DvdDetectResult, String> {
-    tauri::async_runtime::spawn_blocking(detect_dvd_blocking)
-        .await
-        .map_err(|error| format!("Could not detect DVD: {error}"))
+    #[cfg(target_os = "linux")]
+    {
+        return tauri::async_runtime::spawn_blocking(detect_dvd_blocking)
+            .await
+            .map_err(|error| format!("Could not detect DVD: {error}"));
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    Err("DVD detection and import are available only on Linux in Cassette 0.1.0.".to_owned())
 }
 
 #[tauri::command]
 async fn scan_dvd_titles(source: String) -> Result<DvdTitleScanResult, String> {
-    tauri::async_runtime::spawn_blocking(move || scan_dvd_titles_blocking(source))
-        .await
-        .map_err(|error| format!("Could not scan DVD titles: {error}"))?
+    #[cfg(target_os = "linux")]
+    {
+        return tauri::async_runtime::spawn_blocking(move || scan_dvd_titles_blocking(source))
+            .await
+            .map_err(|error| format!("Could not scan DVD titles: {error}"))?;
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = source;
+        Err("DVD detection and import are available only on Linux in Cassette 0.1.0.".to_owned())
+    }
 }
 
 #[tauri::command]
@@ -869,22 +923,31 @@ async fn import_dvd_title(
     app: AppHandle,
     library: State<'_, Mutex<LibraryDatabase>>,
 ) -> Result<DvdImportResult, String> {
-    let imported = tauri::async_runtime::spawn_blocking(move || {
-        import_dvd_title_blocking(source, title_number, output_folder, metadata, app)
-    })
-    .await
-    .map_err(|error| format!("Could not import DVD title: {error}"))??;
+    #[cfg(target_os = "linux")]
+    {
+        let imported = tauri::async_runtime::spawn_blocking(move || {
+            import_dvd_title_blocking(source, title_number, output_folder, metadata, app)
+        })
+        .await
+        .map_err(|error| format!("Could not import DVD title: {error}"))??;
 
-    let mut library = library
-        .lock()
-        .map_err(|_| "Library cache is unavailable.".to_owned())?;
-    let video = library.upsert_video(imported.video)?;
+        let mut library = library
+            .lock()
+            .map_err(|_| "Library cache is unavailable.".to_owned())?;
+        let video = library.upsert_video(imported.video)?;
 
-    Ok(DvdImportResult {
-        video,
-        output_folder: imported.output_folder,
-        output_path: imported.output_path,
-    })
+        return Ok(DvdImportResult {
+            video,
+            output_folder: imported.output_folder,
+            output_path: imported.output_path,
+        });
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (source, title_number, output_folder, metadata, app, library);
+        Err("DVD detection and import are available only on Linux in Cassette 0.1.0.".to_owned())
+    }
 }
 
 #[tauri::command]
@@ -955,11 +1018,8 @@ fn get_track_tag_editor_data(
     } else {
         Some("Tag editing is not currently supported for this file format.".to_owned())
     };
-    let genre_override_active = genre_override_active_for_values(
-        &file_values,
-        &track,
-        &genre_assignments,
-    );
+    let genre_override_active =
+        genre_override_active_for_values(&file_values, &track, &genre_assignments);
 
     Ok(TrackTagEditorData {
         track,
@@ -1003,7 +1063,10 @@ fn update_track_tags(
     let mut updated_track = rescan_single_track_after_tag_write(
         &PathBuf::from(&cached_track.file_path),
         scanned_at,
-        app.path().app_data_dir().ok().map(|path| path.join("cover-art")),
+        app.path()
+            .app_data_dir()
+            .ok()
+            .map(|path| path.join("cover-art")),
         cached_track.cover_art_path.clone(),
     )?;
 
@@ -1014,16 +1077,18 @@ fn update_track_tags(
         library.update_cached_track(&mut updated_track)?;
     }
 
-    let current_status = playback
-        .lock()
-        .ok()
-        .map(|playback| playback.status());
+    let current_status = playback.lock().ok().map(|playback| playback.status());
     if current_status
         .as_ref()
         .and_then(|status| status.file_path.as_deref())
         == Some(updated_track.file_path.as_str())
     {
-        mpris.update_track(Some(MprisTrack::from(&updated_track)), current_status.map(|status| status.is_playing).unwrap_or(false));
+        mpris.update_track(
+            Some(MprisTrack::from(&updated_track)),
+            current_status
+                .map(|status| status.is_playing)
+                .unwrap_or(false),
+        );
     }
 
     Ok(updated_track)
@@ -1388,18 +1453,30 @@ fn set_track_lyrics_offset(
 
 #[tauri::command]
 async fn detect_audio_cd() -> Result<CdDetectResult, String> {
-    tauri::async_runtime::spawn_blocking(run_cdparanoia_query)
-        .await
-        .map_err(|error| format!("Could not detect audio CD: {error}"))?
+    #[cfg(target_os = "linux")]
+    {
+        return tauri::async_runtime::spawn_blocking(run_cdparanoia_query)
+            .await
+            .map_err(|error| format!("Could not detect audio CD: {error}"))?;
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    Err("Audio CD detection and ripping are available only on Linux in Cassette 0.1.0.".to_owned())
 }
 
 #[tauri::command]
 async fn lookup_cd_metadata() -> Result<CdMetadataLookupResult, String> {
-    let disc_info = tauri::async_runtime::spawn_blocking(read_musicbrainz_disc)
-        .await
-        .map_err(|error| format!("Could not read CD Disc ID: {error}"))??;
+    #[cfg(target_os = "linux")]
+    {
+        let disc_info = tauri::async_runtime::spawn_blocking(read_musicbrainz_disc)
+            .await
+            .map_err(|error| format!("Could not read CD Disc ID: {error}"))??;
 
-    lookup_musicbrainz_disc(&disc_info).await
+        return lookup_musicbrainz_disc(&disc_info).await;
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    Err("Audio CD metadata lookup is available only on Linux in Cassette 0.1.0.".to_owned())
 }
 
 #[tauri::command]
@@ -1420,11 +1497,23 @@ async fn rip_cd_to_flac(
     metadata: Option<CdRipMetadata>,
     app: AppHandle,
 ) -> Result<CdRipResult, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        rip_cd_to_flac_blocking(output_folder, metadata, app)
-    })
+    #[cfg(target_os = "linux")]
+    {
+        return tauri::async_runtime::spawn_blocking(move || {
+            rip_cd_to_flac_blocking(output_folder, metadata, app)
+        })
         .await
-        .map_err(|error| format!("Could not rip audio CD: {error}"))?
+        .map_err(|error| format!("Could not rip audio CD: {error}"))?;
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (output_folder, metadata, app);
+        Err(
+            "Audio CD detection and ripping are available only on Linux in Cassette 0.1.0."
+                .to_owned(),
+        )
+    }
 }
 
 #[derive(Debug)]
@@ -1433,6 +1522,7 @@ struct MusicBrainzDisc {
     toc: String,
 }
 
+#[cfg(target_os = "linux")]
 fn read_musicbrainz_disc() -> Result<MusicBrainzDisc, String> {
     unsafe {
         let library = load_libdiscid()?;
@@ -1453,16 +1543,12 @@ fn read_musicbrainz_disc() -> Result<MusicBrainzDisc, String> {
             .get::<unsafe extern "C" fn(*mut c_void) -> *const c_char>(b"discid_get_id\0")
             .map_err(|error| format!("Installed libdiscid is missing discid_get_id: {error}"))?;
         let discid_get_toc_string = library
-            .get::<unsafe extern "C" fn(*mut c_void) -> *const c_char>(
-                b"discid_get_toc_string\0",
-            )
+            .get::<unsafe extern "C" fn(*mut c_void) -> *const c_char>(b"discid_get_toc_string\0")
             .map_err(|error| {
                 format!("Installed libdiscid is missing discid_get_toc_string: {error}")
             })?;
         let discid_get_error_msg = library
-            .get::<unsafe extern "C" fn(*mut c_void) -> *const c_char>(
-                b"discid_get_error_msg\0",
-            )
+            .get::<unsafe extern "C" fn(*mut c_void) -> *const c_char>(b"discid_get_error_msg\0")
             .map_err(|error| {
                 format!("Installed libdiscid is missing discid_get_error_msg: {error}")
             })?;
@@ -1491,6 +1577,7 @@ fn read_musicbrainz_disc() -> Result<MusicBrainzDisc, String> {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn load_libdiscid() -> Result<Library, String> {
     for name in ["libdiscid.so.0", "libdiscid.so"] {
         if let Ok(library) = unsafe { Library::new(name) } {
@@ -1501,15 +1588,13 @@ fn load_libdiscid() -> Result<Library, String> {
     Err("libdiscid is not installed. Install libdiscid and try metadata lookup again.".to_owned())
 }
 
+#[cfg(target_os = "linux")]
 unsafe fn c_string_from_ptr(value: *const c_char) -> Option<String> {
     if value.is_null() {
         return None;
     }
 
-    CStr::from_ptr(value)
-        .to_str()
-        .ok()
-        .map(str::to_owned)
+    CStr::from_ptr(value).to_str().ok().map(str::to_owned)
 }
 
 async fn lookup_musicbrainz_disc(disc: &MusicBrainzDisc) -> Result<CdMetadataLookupResult, String> {
@@ -1664,11 +1749,7 @@ fn musicbrainz_medium_for_disc(
                         })
                         .unwrap_or_else(|| format!("Track {number:02}"));
                     let artist = musicbrainz_artist_credit(track)
-                        .or_else(|| {
-                            track
-                                .get("recording")
-                                .and_then(musicbrainz_artist_credit)
-                        })
+                        .or_else(|| track.get("recording").and_then(musicbrainz_artist_credit))
                         .unwrap_or_default();
 
                     CdRipMetadataTrack {
@@ -1914,6 +1995,7 @@ fn cover_mime_and_extension(data: &[u8], content_type: Option<&str>) -> Option<(
     }
 }
 
+#[cfg(target_os = "linux")]
 fn run_cdparanoia_query() -> Result<CdDetectResult, String> {
     let output = match Command::new("cdparanoia").arg("-Q").output() {
         Ok(output) => output,
@@ -2027,6 +2109,7 @@ fn cdparanoia_query_error(lower_output: &str) -> Option<String> {
     Some("No audio CD tracks were found. Insert an audio CD and try again.".to_owned())
 }
 
+#[cfg(target_os = "linux")]
 fn rip_cd_to_flac_blocking(
     output_folder: String,
     metadata: Option<CdRipMetadata>,
@@ -2081,9 +2164,12 @@ fn rip_cd_to_flac_blocking(
     let mut ripped_tracks = Vec::with_capacity(detection.tracks.len());
 
     for detected_track in detection.tracks {
-        let metadata_track = metadata
-            .as_ref()
-            .and_then(|metadata| metadata.tracks.iter().find(|track| track.number == detected_track.number));
+        let metadata_track = metadata.as_ref().and_then(|metadata| {
+            metadata
+                .tracks
+                .iter()
+                .find(|track| track.number == detected_track.number)
+        });
         let (output_filename, filename_warning) =
             cd_track_filename_from_metadata(detected_track.number, metadata_track);
         let output_path = rip_folder.join(&output_filename);
@@ -2178,6 +2264,7 @@ fn rip_cd_to_flac_blocking(
     })
 }
 
+#[cfg(target_os = "linux")]
 fn rip_single_track_to_flac(
     track_number: u32,
     wav_path: &Path,
@@ -2225,11 +2312,11 @@ fn rip_single_track_to_flac(
         None
     };
 
-    Ok(tag_warning.map(|error| {
-        format!("Rip succeeded, but metadata tags could not be written: {error}")
-    }))
+    Ok(tag_warning
+        .map(|error| format!("Rip succeeded, but metadata tags could not be written: {error}")))
 }
 
+#[cfg(target_os = "linux")]
 fn ensure_command_available(command: &str, missing_message: &str) -> Result<(), String> {
     match Command::new(command).arg("--version").output() {
         Ok(_) => Ok(()),
@@ -2255,6 +2342,7 @@ fn short_command_error(output: &Output) -> String {
         .to_owned()
 }
 
+#[cfg(target_os = "linux")]
 fn detect_dvd_blocking() -> DvdDetectResult {
     for device_path in ["/dev/dvd", "/dev/sr0", "/dev/cdrom"] {
         let path = Path::new(device_path);
@@ -2279,6 +2367,7 @@ fn detect_dvd_blocking() -> DvdDetectResult {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn scan_dvd_titles_blocking(source: String) -> Result<DvdTitleScanResult, String> {
     ensure_command_available(
         "lsdvd",
@@ -2298,15 +2387,18 @@ fn scan_dvd_titles_blocking(source: String) -> Result<DvdTitleScanResult, String
             source_path: source_path.to_string_lossy().into_owned(),
             titles: Vec::new(),
             raw_output: Some(raw_output.clone()),
-            error: Some(dvd_tool_error(&raw_output, "Could not scan DVD titles with lsdvd.")),
+            error: Some(dvd_tool_error(
+                &raw_output,
+                "Could not scan DVD titles with lsdvd.",
+            )),
         });
     }
 
     let mut titles = parse_lsdvd_titles(&raw_output);
     mark_likely_main_title(&mut titles);
-    let error = titles
-        .is_empty()
-        .then(|| "No DVD titles were found. The source may not be a readable video DVD.".to_owned());
+    let error = titles.is_empty().then(|| {
+        "No DVD titles were found. The source may not be a readable video DVD.".to_owned()
+    });
 
     Ok(DvdTitleScanResult {
         source_type,
@@ -2317,6 +2409,7 @@ fn scan_dvd_titles_blocking(source: String) -> Result<DvdTitleScanResult, String
     })
 }
 
+#[cfg(target_os = "linux")]
 fn import_dvd_title_blocking(
     source: String,
     title_number: u32,
@@ -2345,7 +2438,8 @@ fn import_dvd_title_blocking(
         return Err("Selected DVD import output path is not a folder.".to_owned());
     }
 
-    let title = clean_text(Some(metadata.title)).unwrap_or_else(|| format!("DVD Title {title_number:02}"));
+    let title =
+        clean_text(Some(metadata.title)).unwrap_or_else(|| format!("DVD Title {title_number:02}"));
     let artist = clean_text(Some(metadata.artist)).unwrap_or_else(|| "Unknown Artist".to_owned());
     let video_type = normalize_video_type(&metadata.video_type);
     let fallback_folder = format!("DVD Import {}", rip_folder_timestamp());
@@ -2417,7 +2511,9 @@ fn import_dvd_title_blocking(
             return Err(message);
         }
 
-        if let Err(encode_error) = run_dvd_ffmpeg_import(&source_path, title_number, &output_path, false) {
+        if let Err(encode_error) =
+            run_dvd_ffmpeg_import(&source_path, title_number, &output_path, false)
+        {
             let message = dvd_tool_error(&encode_error, "DVD import failed.");
             let _ = app.emit(
                 "dvd-import-error",
@@ -2438,7 +2534,9 @@ fn import_dvd_title_blocking(
         .app_data_dir()
         .ok()
         .map(|path| path.join("video-thumbnails"))
-        .and_then(|thumbnail_dir| generate_video_thumbnail(&output_path, duration_seconds, &thumbnail_dir));
+        .and_then(|thumbnail_dir| {
+            generate_video_thumbnail(&output_path, duration_seconds, &thumbnail_dir)
+        });
     let now = unix_timestamp();
     let file_name = output_path
         .file_name()
@@ -2484,6 +2582,7 @@ fn import_dvd_title_blocking(
     })
 }
 
+#[cfg(target_os = "linux")]
 fn run_dvd_ffmpeg_import(
     source_path: &Path,
     title_number: u32,
@@ -2492,7 +2591,15 @@ fn run_dvd_ffmpeg_import(
 ) -> Result<(), String> {
     let mut command = Command::new("ffmpeg");
     command
-        .args(["-y", "-hide_banner", "-loglevel", "info", "-f", "dvdvideo", "-title"])
+        .args([
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "info",
+            "-f",
+            "dvdvideo",
+            "-title",
+        ])
         .arg(title_number.to_string())
         .arg("-i")
         .arg(source_path)
@@ -2501,7 +2608,9 @@ fn run_dvd_ffmpeg_import(
     if stream_copy {
         command.args(["-c", "copy"]);
     } else {
-        command.args(["-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-c:a", "aac", "-b:a", "192k"]);
+        command.args([
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-c:a", "aac", "-b:a", "192k",
+        ]);
     }
 
     let output = command
@@ -2553,8 +2662,8 @@ fn parse_lsdvd_titles(raw_output: &str) -> Vec<DvdTitle> {
         };
         let duration = parse_lsdvd_field(line, "Length:");
         let duration_seconds = duration.as_deref().and_then(parse_dvd_duration_seconds);
-        let chapters = parse_lsdvd_field(line, "Chapters:")
-            .and_then(|value| value.parse::<u32>().ok());
+        let chapters =
+            parse_lsdvd_field(line, "Chapters:").and_then(|value| value.parse::<u32>().ok());
 
         titles.push(DvdTitle {
             number,
@@ -2635,7 +2744,8 @@ fn is_dvd_unsupported_error(output: &str) -> bool {
 
 fn dvd_tool_error(output: &str, fallback: &str) -> String {
     if is_dvd_unsupported_error(output) {
-        return "This DVD is not readable by system tools. Cassette does not bypass DVD DRM.".to_owned();
+        return "This DVD is not readable by system tools. Cassette does not bypass DVD DRM."
+            .to_owned();
     }
 
     output
@@ -2683,7 +2793,10 @@ fn cd_rip_folder_name(metadata: Option<&CdRipMetadata>) -> (String, Option<Strin
         format!("{artist} - {album} ({year})")
     };
 
-    sanitize_path_component(&raw_name, &format!("Cassette Rip {}", rip_folder_timestamp()))
+    sanitize_path_component(
+        &raw_name,
+        &format!("Cassette Rip {}", rip_folder_timestamp()),
+    )
 }
 
 fn unique_child_folder(parent: &Path, folder_name: &str) -> PathBuf {
@@ -2715,7 +2828,9 @@ fn prepare_cd_cover(
         Err(error) => {
             return (
                 None,
-                Some(format!("Cover image could not be read and was not embedded: {error}")),
+                Some(format!(
+                    "Cover image could not be read and was not embedded: {error}"
+                )),
             );
         }
     };
@@ -2730,13 +2845,7 @@ fn prepare_cd_cover(
         .err()
         .map(|error| format!("Cover image could not be saved in the rip folder: {error}"));
 
-    (
-        Some(PreparedCdCover {
-            data,
-            mime_type,
-        }),
-        save_warning,
-    )
+    (Some(PreparedCdCover { data, mime_type }), save_warning)
 }
 
 fn merge_warnings(left: Option<String>, right: Option<String>) -> Option<String> {
@@ -2777,9 +2886,8 @@ fn sanitize_path_component(raw: &str, fallback: &str) -> (String, Option<String>
         );
     }
 
-    let warning = (safe != raw.trim()).then(|| {
-        format!("Filename characters were sanitized for {raw:?}.")
-    });
+    let warning =
+        (safe != raw.trim()).then(|| format!("Filename characters were sanitized for {raw:?}."));
 
     (safe, warning)
 }
@@ -2810,7 +2918,10 @@ fn write_flac_tags(
     }
 
     if !metadata.album_artist.trim().is_empty() {
-        tag.insert_text(ItemKey::AlbumArtist, metadata.album_artist.trim().to_owned());
+        tag.insert_text(
+            ItemKey::AlbumArtist,
+            metadata.album_artist.trim().to_owned(),
+        );
     }
 
     if !metadata.year.trim().is_empty() {
@@ -3049,8 +3160,10 @@ impl LibraryDatabase {
         }
 
         if !self.has_column("videos", "release_or_collection")? {
-            self.connection
-                .execute("ALTER TABLE videos ADD COLUMN release_or_collection TEXT", [])?;
+            self.connection.execute(
+                "ALTER TABLE videos ADD COLUMN release_or_collection TEXT",
+                [],
+            )?;
             if self.has_column("videos", "album_or_release")? {
                 self.connection.execute(
                     "
@@ -3066,8 +3179,10 @@ impl LibraryDatabase {
         }
 
         if !self.has_column("videos", "description_or_notes")? {
-            self.connection
-                .execute("ALTER TABLE videos ADD COLUMN description_or_notes TEXT", [])?;
+            self.connection.execute(
+                "ALTER TABLE videos ADD COLUMN description_or_notes TEXT",
+                [],
+            )?;
         }
 
         Ok(())
@@ -3321,8 +3436,12 @@ impl LibraryDatabase {
             &root_path.to_string_lossy(),
         )
         .map_err(|error| format!("Could not cache video folder: {error}"))?;
-        upsert_meta(&transaction, "last_video_scanned_at", &scanned_at.to_string())
-            .map_err(|error| format!("Could not cache video scan time: {error}"))?;
+        upsert_meta(
+            &transaction,
+            "last_video_scanned_at",
+            &scanned_at.to_string(),
+        )
+        .map_err(|error| format!("Could not cache video scan time: {error}"))?;
 
         transaction
             .commit()
@@ -4278,7 +4397,8 @@ impl LibraryDatabase {
         Ok(existing_playlists
             .iter()
             .any(|(existing_id, existing_name)| {
-                existing_id != playlist_id && normalize_playlist_name(existing_name) == normalized_name
+                existing_id != playlist_id
+                    && normalize_playlist_name(existing_name) == normalized_name
             }))
     }
 
@@ -4614,6 +4734,7 @@ impl PlaybackState {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl VideoPlaybackState {
     fn play(
         &mut self,
@@ -4654,15 +4775,22 @@ impl VideoPlaybackState {
             .arg("--autofit-smaller=960x540")
             .arg("--geometry=50%:50%")
             .arg(format!("--start={start_position:.3}"))
-            .arg(format!("--volume={}", (self.volume_or_default() * 100.0).round()))
+            .arg(format!(
+                "--volume={}",
+                (self.volume_or_default() * 100.0).round()
+            ))
             .arg(&video.file_path)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
 
-        let mut child = command
-            .spawn()
-            .map_err(|error| video_playback_error("mpv", &video.file_path, &format!("Could not start mpv: {error}")))?;
+        let mut child = command.spawn().map_err(|error| {
+            video_playback_error(
+                "mpv",
+                &video.file_path,
+                &format!("Could not start mpv: {error}"),
+            )
+        })?;
 
         wait_for_mpv_ipc(&mut child, &ipc_path, &log_path, &video.file_path)?;
 
@@ -4742,7 +4870,12 @@ impl VideoPlaybackState {
             .filter(|duration| *duration > 0.0)
             .unwrap_or(position_seconds.max(0.0));
         let clamped_position_seconds = position_seconds.clamp(0.0, duration);
-        self.mpv_command(serde_json::json!(["seek", clamped_position_seconds, "absolute", "exact"]))?;
+        self.mpv_command(serde_json::json!([
+            "seek",
+            clamped_position_seconds,
+            "absolute",
+            "exact"
+        ]))?;
         self.has_ended = false;
         self.position_seconds = clamped_position_seconds.floor() as u64;
         self.update_from_mpv()?;
@@ -4755,7 +4888,11 @@ impl VideoPlaybackState {
         self.volume = volume;
 
         if self.child.is_some() {
-            self.mpv_command(serde_json::json!(["set_property", "volume", volume * 100.0]))?;
+            self.mpv_command(serde_json::json!([
+                "set_property",
+                "volume",
+                volume * 100.0
+            ]))?;
             self.update_from_mpv()?;
         }
 
@@ -4764,7 +4901,11 @@ impl VideoPlaybackState {
 
     fn bring_to_front(&mut self) -> Result<VideoPlaybackStatus, String> {
         if self.child.is_some() {
-            let _ = self.mpv_command(serde_json::json!(["set_property", "window-minimized", false]));
+            let _ = self.mpv_command(serde_json::json!([
+                "set_property",
+                "window-minimized",
+                false
+            ]));
             let _ = self.mpv_command(serde_json::json!(["set_property", "ontop", true]));
             let _ = self.mpv_command(serde_json::json!(["set_property", "ontop", false]));
             self.update_from_mpv()?;
@@ -4776,7 +4917,11 @@ impl VideoPlaybackState {
     fn toggle_fullscreen(&mut self) -> Result<VideoPlaybackStatus, String> {
         if self.child.is_some() {
             let next_fullscreen = !self.is_fullscreen;
-            self.mpv_command(serde_json::json!(["set_property", "fullscreen", next_fullscreen]))?;
+            self.mpv_command(serde_json::json!([
+                "set_property",
+                "fullscreen",
+                next_fullscreen
+            ]))?;
             self.is_fullscreen = next_fullscreen;
             self.update_from_mpv()?;
         }
@@ -4855,8 +5000,13 @@ impl VideoPlaybackState {
         let file_path = self.current_path.as_deref().unwrap_or("unknown video");
         self.request_id = self.request_id.wrapping_add(1).max(1);
         let request_id = self.request_id;
-        let mut stream = UnixStream::connect(ipc_path)
-            .map_err(|error| video_playback_error("mpv", file_path, &format!("Could not connect to mpv IPC: {error}")))?;
+        let mut stream = UnixStream::connect(ipc_path).map_err(|error| {
+            video_playback_error(
+                "mpv",
+                file_path,
+                &format!("Could not connect to mpv IPC: {error}"),
+            )
+        })?;
         stream
             .set_read_timeout(Some(Duration::from_millis(1200)))
             .ok();
@@ -4867,23 +5017,41 @@ impl VideoPlaybackState {
             "command": command,
             "request_id": request_id,
         });
-        writeln!(stream, "{request}")
-            .map_err(|error| video_playback_error("mpv", file_path, &format!("Could not send mpv command: {error}")))?;
+        writeln!(stream, "{request}").map_err(|error| {
+            video_playback_error(
+                "mpv",
+                file_path,
+                &format!("Could not send mpv command: {error}"),
+            )
+        })?;
 
         let mut reader = BufReader::new(stream);
         let mut line = String::new();
         loop {
             line.clear();
-            let bytes = reader
-                .read_line(&mut line)
-                .map_err(|error| video_playback_error("mpv", file_path, &format!("Could not read mpv response: {error}")))?;
+            let bytes = reader.read_line(&mut line).map_err(|error| {
+                video_playback_error(
+                    "mpv",
+                    file_path,
+                    &format!("Could not read mpv response: {error}"),
+                )
+            })?;
 
             if bytes == 0 {
-                return Err(video_playback_error("mpv", file_path, "mpv closed the IPC connection."));
+                return Err(video_playback_error(
+                    "mpv",
+                    file_path,
+                    "mpv closed the IPC connection.",
+                ));
             }
 
-            let response = serde_json::from_str::<serde_json::Value>(&line)
-                .map_err(|error| video_playback_error("mpv", file_path, &format!("Could not parse mpv response: {error}")))?;
+            let response = serde_json::from_str::<serde_json::Value>(&line).map_err(|error| {
+                video_playback_error(
+                    "mpv",
+                    file_path,
+                    &format!("Could not parse mpv response: {error}"),
+                )
+            })?;
 
             if response
                 .get("request_id")
@@ -4906,17 +5074,28 @@ impl VideoPlaybackState {
                 ));
             }
 
-            return Ok(response.get("data").cloned().unwrap_or(serde_json::Value::Null));
+            return Ok(response
+                .get("data")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null));
         }
     }
 
     #[cfg(not(unix))]
     fn mpv_command(&mut self, _command: serde_json::Value) -> Result<serde_json::Value, String> {
-        Err("Cassette video playback through mpv IPC is only implemented on Unix-like systems.".to_owned())
+        Err(
+            "Cassette video playback through mpv IPC is only implemented on Unix-like systems."
+                .to_owned(),
+        )
     }
 
     fn process_has_exited(&mut self) -> bool {
-        match self.child.as_mut().and_then(|child| child.try_wait().ok()).flatten() {
+        match self
+            .child
+            .as_mut()
+            .and_then(|child| child.try_wait().ok())
+            .flatten()
+        {
             Some(_) => true,
             None => false,
         }
@@ -5001,6 +5180,110 @@ impl VideoPlaybackState {
     }
 }
 
+#[cfg(not(target_os = "linux"))]
+impl VideoPlaybackState {
+    fn play(
+        &mut self,
+        _video: &VideoEntry,
+        _start_position_seconds: Option<f64>,
+    ) -> Result<VideoPlaybackStatus, String> {
+        Err(
+            "Cassette-controlled video playback is available only on Linux in Cassette 0.1.0."
+                .to_owned(),
+        )
+    }
+
+    fn pause(&mut self) -> Result<VideoPlaybackStatus, String> {
+        Ok(self.status())
+    }
+
+    fn resume(&mut self) -> Result<VideoPlaybackStatus, String> {
+        Ok(self.status())
+    }
+
+    fn stop(&mut self) -> Result<VideoPlaybackStatus, String> {
+        self.clear_active_video(false);
+        Ok(self.status())
+    }
+
+    fn refresh(&mut self) -> Option<VideoProgressSnapshot> {
+        None
+    }
+
+    fn seek(&mut self, _position_seconds: f64) -> Result<VideoPlaybackStatus, String> {
+        Ok(self.status())
+    }
+
+    fn set_volume(&mut self, volume: f64) -> Result<VideoPlaybackStatus, String> {
+        self.volume = volume.clamp(0.0, 1.0);
+        Ok(self.status())
+    }
+
+    fn bring_to_front(&mut self) -> Result<VideoPlaybackStatus, String> {
+        Err(
+            "Cassette-controlled video playback is available only on Linux in Cassette 0.1.0."
+                .to_owned(),
+        )
+    }
+
+    fn toggle_fullscreen(&mut self) -> Result<VideoPlaybackStatus, String> {
+        Err(
+            "Cassette-controlled video playback is available only on Linux in Cassette 0.1.0."
+                .to_owned(),
+        )
+    }
+
+    fn progress_snapshot(&self) -> Option<VideoProgressSnapshot> {
+        None
+    }
+
+    fn stop_process(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+
+    fn clear_active_video(&mut self, has_ended: bool) {
+        self.current_video_id = None;
+        self.current_path = None;
+        self.is_playing = false;
+        self.has_ended = has_ended;
+        self.position_seconds = 0;
+        self.duration_seconds = None;
+        self.has_video_window = false;
+        self.is_fullscreen = false;
+        self.last_error = None;
+    }
+
+    fn volume_or_default(&self) -> f64 {
+        if self.volume > 0.0 {
+            self.volume
+        } else {
+            1.0
+        }
+    }
+
+    fn status(&self) -> VideoPlaybackStatus {
+        VideoPlaybackStatus {
+            video_id: self.current_video_id.clone(),
+            file_path: self.current_path.clone(),
+            is_playing: self.is_playing,
+            has_ended: self.has_ended,
+            position_seconds: self.position_seconds,
+            duration_seconds: self.duration_seconds,
+            volume: self.volume_or_default(),
+            has_video_window: self.has_video_window,
+            is_fullscreen: self.is_fullscreen,
+            backend: "unavailable".to_owned(),
+            error: Some(
+                "Cassette-controlled video playback is available only on Linux in Cassette 0.1.0."
+                    .to_owned(),
+            ),
+        }
+    }
+}
+
 fn video_window_title(video: &VideoEntry) -> String {
     let artist = video
         .artist
@@ -5081,14 +5364,17 @@ fn cleanup_playback_for_exit(app: &AppHandle) {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn mpv_ipc_path() -> PathBuf {
     std::env::temp_dir().join(format!("cassette-mpv-{}.sock", unique_timestamp_nanos()))
 }
 
+#[cfg(target_os = "linux")]
 fn mpv_log_path() -> PathBuf {
     std::env::temp_dir().join(format!("cassette-mpv-{}.log", unique_timestamp_nanos()))
 }
 
+#[cfg(target_os = "linux")]
 fn ensure_mpv_available(file_path: &str) -> Result<(), String> {
     match Command::new("mpv")
         .arg("--version")
@@ -5116,6 +5402,7 @@ fn ensure_mpv_available(file_path: &str) -> Result<(), String> {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn wait_for_mpv_ipc(
     child: &mut Child,
     ipc_path: &Path,
@@ -5151,6 +5438,7 @@ fn wait_for_mpv_ipc(
     ))
 }
 
+#[cfg(target_os = "linux")]
 fn read_mpv_log(log_path: &Path) -> String {
     fs::read_to_string(log_path)
         .unwrap_or_default()
@@ -5217,6 +5505,7 @@ fn check_for_playback_error(playbin: &gst::Element) -> Result<(), String> {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn video_playback_error(backend: &str, file_path: &str, detail: &str) -> String {
     let codec_info = ffprobe_video_codec_info(Path::new(file_path));
     let mut message = format!(
@@ -5252,6 +5541,7 @@ fn video_playback_error(backend: &str, file_path: &str, detail: &str) -> String 
     message
 }
 
+#[cfg(target_os = "linux")]
 fn ffprobe_video_codec_info(path: &Path) -> VideoCodecInfo {
     let output = match Command::new("ffprobe")
         .args([
@@ -5362,6 +5652,18 @@ fn ffprobe_video_codec_info(path: &Path) -> VideoCodecInfo {
     }
 }
 
+#[cfg(not(target_os = "linux"))]
+fn ffprobe_video_codec_info(_path: &Path) -> VideoCodecInfo {
+    VideoCodecInfo {
+        container: None,
+        video_codec: None,
+        audio_codec: None,
+        resolution: None,
+        duration_seconds: None,
+        error: Some("Video inspection is available only on Linux in Cassette 0.1.0.".to_owned()),
+    }
+}
+
 fn row_to_track(row: &rusqlite::Row<'_>) -> rusqlite::Result<Track> {
     Ok(Track {
         id: row.get(0)?,
@@ -5464,9 +5766,12 @@ fn normalize_manual_genres(genres: Vec<String>) -> Vec<String> {
 
 fn normalize_video_type(value: &str) -> String {
     match value {
-        "music_video" | "live_show" | "concert" | "interview_documentary" | "behind_the_scenes" | "other" => {
-            value.to_owned()
-        }
+        "music_video"
+        | "live_show"
+        | "concert"
+        | "interview_documentary"
+        | "behind_the_scenes"
+        | "other" => value.to_owned(),
         _ => "other".to_owned(),
     }
 }
@@ -5750,6 +6055,7 @@ fn video_from_path(
     })
 }
 
+#[cfg(target_os = "linux")]
 fn ffprobe_video_duration_seconds(path: &Path) -> Option<u32> {
     let output = Command::new("ffprobe")
         .args([
@@ -5778,6 +6084,12 @@ fn ffprobe_video_duration_seconds(path: &Path) -> Option<u32> {
     }
 }
 
+#[cfg(not(target_os = "linux"))]
+fn ffprobe_video_duration_seconds(_path: &Path) -> Option<u32> {
+    None
+}
+
+#[cfg(target_os = "linux")]
 fn generate_video_thumbnail(
     path: &Path,
     duration_seconds: Option<u32>,
@@ -5818,6 +6130,15 @@ fn generate_video_thumbnail(
         let _ = fs::remove_file(&thumbnail_path);
         None
     }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn generate_video_thumbnail(
+    _path: &Path,
+    _duration_seconds: Option<u32>,
+    _thumbnail_dir: &Path,
+) -> Option<String> {
+    None
 }
 
 fn track_from_path(path: PathBuf, scanned_at: i64) -> Option<(Track, Option<EmbeddedCoverArt>)> {
@@ -5960,11 +6281,15 @@ fn validate_update_track_tags_request(request: &UpdateTrackTagsRequest) -> Resul
     }
 
     if matches!(request.track_number, Some(0)) {
-        return Err("Track number must be blank or an integer greater than or equal to 1.".to_owned());
+        return Err(
+            "Track number must be blank or an integer greater than or equal to 1.".to_owned(),
+        );
     }
 
     if matches!(request.disc_number, Some(0)) {
-        return Err("Disc number must be blank or an integer greater than or equal to 1.".to_owned());
+        return Err(
+            "Disc number must be blank or an integer greater than or equal to 1.".to_owned(),
+        );
     }
 
     Ok(())
@@ -5984,17 +6309,15 @@ fn validated_cached_track_path(track: &Track, root_path: &Path) -> Result<PathBu
     let canonical_root = root_path
         .canonicalize()
         .map_err(|error| format!("Could not verify library folder: {error}"))?;
-    let canonical_target = target_path
-        .canonicalize()
-        .map_err(|error| {
-            if error.kind() == io::ErrorKind::NotFound {
-                "Selected track no longer exists.".to_owned()
-            } else {
-                format!("Could not verify selected track: {error}")
-            }
-        })?;
+    let canonical_target = target_path.canonicalize().map_err(|error| {
+        if error.kind() == io::ErrorKind::NotFound {
+            "Selected track no longer exists.".to_owned()
+        } else {
+            format!("Could not verify selected track: {error}")
+        }
+    })?;
 
-    if !canonical_target.starts_with(&canonical_root) {
+    if !canonical_path_is_within_root(&canonical_target, &canonical_root) {
         return Err("Selected track is outside the active library folder.".to_owned());
     }
 
@@ -6006,6 +6329,10 @@ fn validated_cached_track_path(track: &Track, root_path: &Path) -> Result<PathBu
     }
 
     Ok(canonical_target)
+}
+
+fn canonical_path_is_within_root(target: &Path, root: &Path) -> bool {
+    target.starts_with(root)
 }
 
 fn read_tagged_file(path: &Path) -> Result<lofty::file::TaggedFile, String> {
@@ -6027,7 +6354,9 @@ fn tag_editing_safely_validated_for_path(path: &Path) -> bool {
 }
 
 fn track_tag_values_from_file(tagged_file: &lofty::file::TaggedFile) -> TrackTagValues {
-    let tag = tagged_file.primary_tag().or_else(|| tagged_file.first_tag());
+    let tag = tagged_file
+        .primary_tag()
+        .or_else(|| tagged_file.first_tag());
 
     TrackTagValues {
         title: tag.and_then(|tag| clean_text(tag.title().map(|value| value.into_owned()))),
@@ -6093,8 +6422,12 @@ fn genre_override_active_for_values(
         ..track.clone()
     };
 
-    assignments.albums.contains_key(&album_key_for_track(&raw_track))
-        || assignments.artists.contains_key(&artist_key_for_track(&raw_track))
+    assignments
+        .albums
+        .contains_key(&album_key_for_track(&raw_track))
+        || assignments
+            .artists
+            .contains_key(&artist_key_for_track(&raw_track))
 }
 
 fn update_track_tags_file(path: &Path, request: &UpdateTrackTagsRequest) -> Result<(), String> {
@@ -6161,7 +6494,9 @@ where
 
     if let Err(error) = hook(TagWriteStage::AfterTemporaryVerification) {
         cleanup_file(&temp_path);
-        return Err(format!("Safe replacement stopped after temporary verification: {error}"));
+        return Err(format!(
+            "Safe replacement stopped after temporary verification: {error}"
+        ));
     }
 
     replace_original_with_verified_temp(path, &temp_path, &backup_path, request, hook)
@@ -6260,11 +6595,16 @@ fn verify_tag_values(path: &Path, request: &UpdateTrackTagsRequest) -> Result<()
 }
 
 fn tag_values_match(actual: &TrackTagValues, expected: &TrackTagValues) -> bool {
-    normalize_optional_text(actual.title.as_deref()) == normalize_optional_text(expected.title.as_deref())
-        && normalize_optional_text(actual.artist.as_deref()) == normalize_optional_text(expected.artist.as_deref())
-        && normalize_optional_text(actual.album.as_deref()) == normalize_optional_text(expected.album.as_deref())
-        && normalize_optional_text(actual.album_artist.as_deref()) == normalize_optional_text(expected.album_artist.as_deref())
-        && normalize_optional_genre(actual.genre.as_deref()) == normalize_optional_genre(expected.genre.as_deref())
+    normalize_optional_text(actual.title.as_deref())
+        == normalize_optional_text(expected.title.as_deref())
+        && normalize_optional_text(actual.artist.as_deref())
+            == normalize_optional_text(expected.artist.as_deref())
+        && normalize_optional_text(actual.album.as_deref())
+            == normalize_optional_text(expected.album.as_deref())
+        && normalize_optional_text(actual.album_artist.as_deref())
+            == normalize_optional_text(expected.album_artist.as_deref())
+        && normalize_optional_genre(actual.genre.as_deref())
+            == normalize_optional_genre(expected.genre.as_deref())
         && actual.year == expected.year
         && actual.track_number == expected.track_number
         && actual.disc_number == expected.disc_number
@@ -6476,8 +6816,11 @@ fn rescan_single_track_after_tag_write(
     cover_art_dir: Option<PathBuf>,
     previous_cover_art_path: Option<String>,
 ) -> Result<Track, String> {
-    let Some((mut track, embedded_cover_art)) = track_from_path(path.to_path_buf(), scanned_at) else {
-        return Err("Tags were written, but Cassette could not rescan the updated file.".to_owned());
+    let Some((mut track, embedded_cover_art)) = track_from_path(path.to_path_buf(), scanned_at)
+    else {
+        return Err(
+            "Tags were written, but Cassette could not rescan the updated file.".to_owned(),
+        );
     };
     let album_art_key = album_art_key_for_track(&track, path);
     track.cover_art_path = cover_art_candidate(
@@ -6729,7 +7072,9 @@ fn read_lyrics_file(lyrics_file: LyricsFile, offset_seconds: f64) -> Option<Trac
     } else {
         None
     };
-    let track_path = metadata.as_ref().map(|metadata| metadata.track_path.clone());
+    let track_path = metadata
+        .as_ref()
+        .map(|metadata| metadata.track_path.clone());
 
     Some(TrackLyrics {
         path: lyrics_file.path.to_string_lossy().into_owned(),
@@ -6806,11 +7151,9 @@ async fn search_lrclib_lyrics_results(track: &Track) -> Result<Vec<LrclibLyricsR
 
     let url = reqwest::Url::parse_with_params("https://lrclib.net/api/search", &query)
         .map_err(|error| format!("Could not prepare LRCLIB request: {error}"))?;
-    let response = client
-        .get(url)
-        .send()
-        .await
-        .map_err(|_| "Offline/network error: could not reach LRCLIB. Check your connection.".to_owned())?;
+    let response = client.get(url).send().await.map_err(|_| {
+        "Offline/network error: could not reach LRCLIB. Check your connection.".to_owned()
+    })?;
 
     if response.status() == reqwest::StatusCode::NOT_FOUND {
         return Ok(Vec::new());
@@ -6991,7 +7334,12 @@ fn lrclib_picker_score(result: &LrclibLyricsResult, track: &Track) -> i64 {
 }
 
 fn found_lyrics_from_result(result: &LrclibLyricsResult) -> Option<FoundLyrics> {
-    if let Some(text) = result.synced_lyrics.as_deref().map(str::trim).filter(|text| !text.is_empty()) {
+    if let Some(text) = result
+        .synced_lyrics
+        .as_deref()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+    {
         return Some(FoundLyrics {
             kind: "synced",
             text: text.to_owned(),
@@ -7026,9 +7374,17 @@ fn save_app_lyrics(
         .map_err(|error| format!("Could not create lyrics cache folder: {error}"))?;
 
     let cache_key = format!("{:016x}", stable_hash(&track.file_path));
-    let extension = if lyrics.kind == "synced" { "lrc" } else { "txt" };
+    let extension = if lyrics.kind == "synced" {
+        "lrc"
+    } else {
+        "txt"
+    };
     let path = lyrics_dir.join(format!("{cache_key}.{extension}"));
-    let opposite_extension = if lyrics.kind == "synced" { "txt" } else { "lrc" };
+    let opposite_extension = if lyrics.kind == "synced" {
+        "txt"
+    } else {
+        "lrc"
+    };
     let opposite_path = lyrics_dir.join(format!("{cache_key}.{opposite_extension}"));
     let metadata_path = lyrics_dir.join(format!("{cache_key}.json"));
 
@@ -7037,8 +7393,7 @@ fn save_app_lyrics(
     }
 
     let text = lyrics.text;
-    fs::write(&path, &text)
-        .map_err(|error| format!("Could not save lyrics cache: {error}"))?;
+    fs::write(&path, &text).map_err(|error| format!("Could not save lyrics cache: {error}"))?;
     if replace_cached && opposite_path.exists() {
         let _ = fs::remove_file(opposite_path);
     }
@@ -7335,14 +7690,19 @@ mod tag_editor_tests {
                 panic!("{REAL_FLAC_ENV} must point to the disposable copied FLAC")
             });
             let source = PathBuf::from(source);
-            assert!(source.is_file(), "test FLAC does not exist: {}", source.display());
+            assert!(
+                source.is_file(),
+                "test FLAC does not exist: {}",
+                source.display()
+            );
             assert_eq!(
                 source.extension().and_then(|value| value.to_str()),
                 Some("flac"),
                 "test input must be a disposable FLAC copy"
             );
 
-            let safe_label = label.replace(|character: char| !character.is_ascii_alphanumeric(), "_");
+            let safe_label =
+                label.replace(|character: char| !character.is_ascii_alphanumeric(), "_");
             let directory = std::env::temp_dir().join(format!(
                 "Cassette Tag Editor Rust Test-{}-{}-{safe_label}",
                 std::process::id(),
@@ -7499,12 +7859,11 @@ mod tag_editor_tests {
 
     fn add_preservation_metadata(path: &Path) {
         const TEST_PNG: &[u8] = &[
-            0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,
-            b'I', b'H', b'D', b'R', 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
-            0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4, 0x89, 0x00, 0x00, 0x00,
-            0x0d, b'I', b'D', b'A', b'T', 0x08, 0xd7, 0x63, 0xf8, 0xcf, 0xc0, 0xf0,
-            0x1f, 0x00, 0x05, 0x00, 0x01, 0xff, 0x89, 0x99, 0x3d, 0x1d, 0x00, 0x00,
-            0x00, 0x00, b'I', b'E', b'N', b'D', 0xae, 0x42, 0x60, 0x82,
+            0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, b'I', b'H',
+            b'D', b'R', 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
+            0x00, 0x1f, 0x15, 0xc4, 0x89, 0x00, 0x00, 0x00, 0x0d, b'I', b'D', b'A', b'T', 0x08,
+            0xd7, 0x63, 0xf8, 0xcf, 0xc0, 0xf0, 0x1f, 0x00, 0x05, 0x00, 0x01, 0xff, 0x89, 0x99,
+            0x3d, 0x1d, 0x00, 0x00, 0x00, 0x00, b'I', b'E', b'N', b'D', 0xae, 0x42, 0x60, 0x82,
         ];
 
         let mut input = fs::File::open(path).expect("read FLAC to add preservation tags");
@@ -7512,8 +7871,14 @@ mod tag_editor_tests {
             .expect("read format-specific FLAC metadata");
         drop(input);
         let tag = flac.vorbis_comments_mut().expect("FLAC Vorbis comments");
-        tag.insert("COMMENT".to_owned(), "Cassette preservation comment".to_owned());
-        tag.insert("LYRICS".to_owned(), "Preserve these lyrics exactly".to_owned());
+        tag.insert(
+            "COMMENT".to_owned(),
+            "Cassette preservation comment".to_owned(),
+        );
+        tag.insert(
+            "LYRICS".to_owned(),
+            "Preserve these lyrics exactly".to_owned(),
+        );
         tag.insert("REPLAYGAIN_TRACK_GAIN".to_owned(), "-7.25 dB".to_owned());
         tag.insert("REPLAYGAIN_TRACK_PEAK".to_owned(), "0.987654".to_owned());
         tag.insert(
@@ -7537,14 +7902,19 @@ mod tag_editor_tests {
             Some(PictureInformation::default()),
         )
         .expect("insert test picture");
-        flac
-            .save_to_path(path, WriteOptions::default())
+        flac.save_to_path(path, WriteOptions::default())
             .expect("save preservation metadata");
 
         let reopened = read_tagged_file(path).expect("reopen preservation metadata");
         let tag = reopened.primary_tag().expect("reopened FLAC tag");
-        assert_eq!(tag.get_string(ItemKey::Lyrics), Some("Preserve these lyrics exactly"));
-        assert_eq!(tag.get_string(ItemKey::ReplayGainTrackGain), Some("-7.25 dB"));
+        assert_eq!(
+            tag.get_string(ItemKey::Lyrics),
+            Some("Preserve these lyrics exactly")
+        );
+        assert_eq!(
+            tag.get_string(ItemKey::ReplayGainTrackGain),
+            Some("-7.25 dB")
+        );
         assert_eq!(
             tag.get_string(ItemKey::MusicBrainzRecordingId),
             Some("00000000-1111-2222-3333-444444444444")
@@ -7571,8 +7941,12 @@ mod tag_editor_tests {
 
     #[test]
     fn only_flac_is_enabled_and_other_formats_are_rejected_before_writing() {
-        assert!(tag_editing_safely_validated_for_path(Path::new("track.flac")));
-        assert!(tag_editing_safely_validated_for_path(Path::new("track.FLAC")));
+        assert!(tag_editing_safely_validated_for_path(Path::new(
+            "track.flac"
+        )));
+        assert!(tag_editing_safely_validated_for_path(Path::new(
+            "track.FLAC"
+        )));
 
         let directory = std::env::temp_dir().join(format!(
             "Cassette Tag Format Gate Test-{}-{}",
@@ -7741,10 +8115,22 @@ mod tag_editor_tests {
         assert_eq!(unrelated_metadata(&test_file.path), original_unrelated);
         let tagged_file = read_tagged_file(&test_file.path).expect("reopen preserved metadata");
         let tag = tagged_file.primary_tag().expect("preserved primary tag");
-        assert_eq!(tag.get_string(ItemKey::Comment), Some("Cassette preservation comment"));
-        assert_eq!(tag.get_string(ItemKey::Lyrics), Some("Preserve these lyrics exactly"));
-        assert_eq!(tag.get_string(ItemKey::ReplayGainTrackGain), Some("-7.25 dB"));
-        assert_eq!(tag.get_string(ItemKey::ReplayGainTrackPeak), Some("0.987654"));
+        assert_eq!(
+            tag.get_string(ItemKey::Comment),
+            Some("Cassette preservation comment")
+        );
+        assert_eq!(
+            tag.get_string(ItemKey::Lyrics),
+            Some("Preserve these lyrics exactly")
+        );
+        assert_eq!(
+            tag.get_string(ItemKey::ReplayGainTrackGain),
+            Some("-7.25 dB")
+        );
+        assert_eq!(
+            tag.get_string(ItemKey::ReplayGainTrackPeak),
+            Some("0.987654")
+        );
         assert_eq!(
             tag.get_string(ItemKey::MusicBrainzReleaseId),
             Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
@@ -7765,13 +8151,28 @@ mod tag_editor_tests {
         let original = fs::read(&test_file.path).expect("read baseline bytes");
 
         for invalid_request in [
-            UpdateTrackTagsRequest { year: Some(0), ..request_for(&test_file.path) },
-            UpdateTrackTagsRequest { track_number: Some(0), ..request_for(&test_file.path) },
-            UpdateTrackTagsRequest { disc_number: Some(0), ..request_for(&test_file.path) },
-            UpdateTrackTagsRequest { track_id: "  ".to_owned(), ..request_for(&test_file.path) },
+            UpdateTrackTagsRequest {
+                year: Some(0),
+                ..request_for(&test_file.path)
+            },
+            UpdateTrackTagsRequest {
+                track_number: Some(0),
+                ..request_for(&test_file.path)
+            },
+            UpdateTrackTagsRequest {
+                disc_number: Some(0),
+                ..request_for(&test_file.path)
+            },
+            UpdateTrackTagsRequest {
+                track_id: "  ".to_owned(),
+                ..request_for(&test_file.path)
+            },
         ] {
             assert!(update_track_tags_file(&test_file.path, &invalid_request).is_err());
-            assert_eq!(fs::read(&test_file.path).expect("read rejected file"), original);
+            assert_eq!(
+                fs::read(&test_file.path).expect("read rejected file"),
+                original
+            );
         }
 
         for invalid_json in [
@@ -7790,7 +8191,9 @@ mod tag_editor_tests {
     fn read_only_file_fails_intact_and_leaves_no_sidecars() {
         let test_file = TestAudioFile::new("readonly");
         let original = fs::read(&test_file.path).expect("read baseline bytes");
-        let mut permissions = fs::metadata(&test_file.path).expect("read permissions").permissions();
+        let mut permissions = fs::metadata(&test_file.path)
+            .expect("read permissions")
+            .permissions();
         let mut request = request_for(&test_file.path);
         request.title = Some("must not be written".to_owned());
         permissions.set_readonly(true);
@@ -7804,8 +8207,13 @@ mod tag_editor_tests {
         restored_permissions.set_readonly(false);
         fs::set_permissions(&test_file.path, restored_permissions)
             .expect("restore disposable FLAC permissions");
-        assert!(result.expect_err("read-only write must fail").contains("read-only"));
-        assert_eq!(fs::read(&test_file.path).expect("read intact file"), original);
+        assert!(result
+            .expect_err("read-only write must fail")
+            .contains("read-only"));
+        assert_eq!(
+            fs::read(&test_file.path).expect("read intact file"),
+            original
+        );
         assert_no_sidecars(&test_file);
     }
 
@@ -7834,7 +8242,10 @@ mod tag_editor_tests {
                 .expect_err("simulated replacement failure must be returned");
 
             assert!(error.contains("simulated"));
-            assert_eq!(fs::read(&test_file.path).expect("read restored original"), original);
+            assert_eq!(
+                fs::read(&test_file.path).expect("read restored original"),
+                original
+            );
             read_tagged_file(&test_file.path).expect("restored original is readable");
             assert_decodable(&test_file.path);
             assert_no_sidecars(&test_file);
@@ -7864,7 +8275,11 @@ mod tag_editor_tests {
         assert!(error.contains("automatic restore failed"));
         assert!(!test_file.path.exists());
         let sidecars = test_file.sidecars();
-        assert_eq!(sidecars.len(), 2, "backup and edited temporary copy must survive");
+        assert_eq!(
+            sidecars.len(),
+            2,
+            "backup and edited temporary copy must survive"
+        );
         let backup = sidecars
             .iter()
             .find(|path| path.to_string_lossy().contains(".backup.flac"))
@@ -7882,7 +8297,10 @@ mod tag_editor_tests {
 
         fs::rename(&backup, &test_file.path).expect("manually recover original from backup");
         fs::remove_file(&edited_temp).expect("remove disposable edited recovery candidate");
-        assert_eq!(fs::read(&test_file.path).expect("read manually restored file"), original);
+        assert_eq!(
+            fs::read(&test_file.path).expect("read manually restored file"),
+            original
+        );
         assert_no_sidecars(&test_file);
     }
 
@@ -7903,7 +8321,9 @@ mod tag_editor_tests {
         let first = thread::spawn(move || {
             let _guard = TagWriteGuard::new(&thread_state, thread_key).expect("first writer guard");
             locked_sender.send(()).expect("announce first guard");
-            continue_receiver.recv().expect("wait for concurrent attempt");
+            continue_receiver
+                .recv()
+                .expect("wait for concurrent attempt");
             update_track_tags_file(&path, &first_request)
         });
         locked_receiver.recv().expect("wait for first guard");
@@ -7913,8 +8333,14 @@ mod tag_editor_tests {
             .expect("second writer must be rejected");
         assert!(second_error.contains("already being edited"));
         continue_sender.send(()).expect("release first writer");
-        first.join().expect("first writer thread").expect("first update succeeds");
-        assert_eq!(values_for(&test_file.path).title.as_deref(), Some("first guarded update"));
+        first
+            .join()
+            .expect("first writer thread")
+            .expect("first update succeeds");
+        assert_eq!(
+            values_for(&test_file.path).title.as_deref(),
+            Some("first guarded update")
+        );
         assert_no_sidecars(&test_file);
     }
 
@@ -7966,13 +8392,9 @@ mod tag_editor_tests {
         request.genre = Some("Cache Genre".to_owned());
 
         update_track_tags_file(&test_file.path, &request).expect("write cache test tags");
-        let mut returned_track = rescan_single_track_after_tag_write(
-            &test_file.path,
-            scanned_at + 1,
-            None,
-            None,
-        )
-        .expect("rescan updated track");
+        let mut returned_track =
+            rescan_single_track_after_tag_write(&test_file.path, scanned_at + 1, None, None)
+                .expect("rescan updated track");
         database
             .update_cached_track(&mut returned_track)
             .expect("update temporary cache row");
@@ -7999,7 +8421,10 @@ mod tag_editor_tests {
         assert_eq!(returned_track.id, original_id);
         assert_eq!(returned_track.file_path, original_path);
         assert_eq!(returned_track.title, "Cache updated title");
-        assert_eq!(returned_track.artist.as_deref(), Some("Cache updated artist"));
+        assert_eq!(
+            returned_track.artist.as_deref(),
+            Some("Cache updated artist")
+        );
         assert_eq!(returned_track.album.as_deref(), Some("Cache updated album"));
         assert_eq!(
             returned_track.album_artist.as_deref(),
@@ -8015,7 +8440,77 @@ mod tag_editor_tests {
         assert_decodable(&test_file.path);
         assert_no_sidecars(&test_file);
     }
+}
 
+#[cfg(test)]
+mod platform_path_tests {
+    use super::*;
+
+    struct TestDirectory(PathBuf);
+
+    impl TestDirectory {
+        fn new(label: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "cassette-{label}-{}-{}",
+                std::process::id(),
+                unique_timestamp_nanos()
+            ));
+            fs::create_dir_all(&path).expect("create platform-path test directory");
+            Self(path)
+        }
+    }
+
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn canonical_containment_accepts_unicode_inside_root_and_rejects_sibling() {
+        let parent = TestDirectory::new("containment");
+        let root = parent.0.join("Library ü");
+        let inside_dir = root.join("Björk").join("東京");
+        let inside = inside_dir.join("Jóga.flac");
+        let outside = parent.0.join("Library ü backup").join("Jóga.flac");
+
+        fs::create_dir_all(&inside_dir).expect("create Unicode library folders");
+        fs::create_dir_all(outside.parent().expect("outside parent"))
+            .expect("create sibling folder");
+        fs::write(&inside, b"test").expect("create inside file");
+        fs::write(&outside, b"test").expect("create sibling file");
+
+        let canonical_root = root.canonicalize().expect("canonicalize root");
+        let canonical_inside = inside.canonicalize().expect("canonicalize inside file");
+        let canonical_outside = outside.canonicalize().expect("canonicalize sibling file");
+
+        assert!(canonical_path_is_within_root(
+            &canonical_inside,
+            &canonical_root
+        ));
+        assert!(!canonical_path_is_within_root(
+            &canonical_outside,
+            &canonical_root
+        ));
+    }
+
+    #[test]
+    fn sidecar_for_unicode_track_stays_beside_original() {
+        let directory = TestDirectory::new("sidecar-unicode");
+        let track = directory.0.join("Música 東京.flac");
+        fs::write(&track, b"test").expect("create Unicode track");
+
+        let sidecar = unique_sidecar_path(&track, "tmp").expect("allocate sidecar name");
+
+        assert_eq!(sidecar.parent(), track.parent());
+        assert!(!sidecar.exists());
+        assert!(sidecar
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| {
+                name.starts_with(".Música 東京.flac.cassette-") && name.ends_with(".tmp.flac")
+            }));
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -8048,6 +8543,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
+            get_platform_capabilities,
             get_library_cache,
             send_linux_notification,
             get_video_library,

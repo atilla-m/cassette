@@ -13,6 +13,7 @@ import type {
   CdRipResult,
   LibraryCache,
   LrclibLyricsResult,
+  PlatformCapabilities,
   Playlist,
   Track,
   TrackTagEditorData,
@@ -22,6 +23,10 @@ import type {
   VideoInfoUpdate,
   VideoLibrary,
 } from "$lib/types/library";
+
+export async function getPlatformCapabilities(): Promise<PlatformCapabilities> {
+  return invoke<PlatformCapabilities>("get_platform_capabilities");
+}
 
 export async function chooseLibraryFolder(): Promise<string | null> {
   const selected = await open({
