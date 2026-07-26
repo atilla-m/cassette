@@ -5,6 +5,120 @@
     <link rel="icon" href="%sveltekit.assets%/favicon.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Tauri + SvelteKit + Typescript App</title>
+    <script>
+      if (new URLSearchParams(location.search).has("stage2-review")) {
+        const cover = (title, left, right) => `data:image/svg+xml,${encodeURIComponent(`
+          <svg xmlns="http://www.w3.org/2000/svg" width="640" height="640" viewBox="0 0 640 640">
+            <defs>
+              <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+                <stop stop-color="${left}"/><stop offset="1" stop-color="${right}"/>
+              </linearGradient>
+              <filter id="grain"><feTurbulence baseFrequency=".8" numOctaves="2" stitchTiles="stitch"/><feColorMatrix values="1 0 0 0 0 0 1 0 0 0 0 0 1 0 0 0 0 0 .12 0"/></filter>
+            </defs>
+            <rect width="640" height="640" fill="url(#g)"/>
+            <circle cx="454" cy="184" r="144" fill="none" stroke="#f2ece1" stroke-opacity=".24" stroke-width="2"/>
+            <circle cx="454" cy="184" r="88" fill="none" stroke="#f2ece1" stroke-opacity=".16" stroke-width="26"/>
+            <path d="M76 470h488M76 506h382M76 542h244" stroke="#f2ece1" stroke-opacity=".38" stroke-width="5"/>
+            <rect width="640" height="640" filter="url(#grain)" opacity=".28"/>
+            <text x="76" y="102" fill="#f2ece1" font-family="sans-serif" font-size="26" letter-spacing="5">${title.toUpperCase()}</text>
+          </svg>
+        `)}`;
+        const releases = [
+          ["Mara Vale", "Afterimage", 2026, ["Electronic", "Ambient"], "#4b2f23", "#b87743"],
+          ["Mara Vale", "Glass Hours", 2024, ["Electronic"], "#201b18", "#745038"],
+          ["Mara Vale", "Nocturne Service", 2022, ["Ambient"], "#171512", "#55453a"],
+          ["North Arcade", "Signal Bloom", 2025, ["Electronic", "Indie"], "#2c2017", "#9a6541"],
+          ["North Arcade", "Static Gardens", 2021, ["Indie"], "#191612", "#68442f"],
+          ["Echo Lanes", "Soft Mechanics", 2024, ["Ambient", "Electronic"], "#22201c", "#816348"],
+          ["Echo Lanes", "Held Light", 2020, ["Ambient"], "#151412", "#51483d"],
+          ["June Circuit", "Late Service", 2023, ["Indie", "Electronic"], "#302016", "#a05f35"],
+          ["June Circuit", "Weather Memory", 2019, ["Indie"], "#1d1916", "#76523b"],
+          ["The Long Unicode Ensemble — 東京", "Copper Signals", 2026, ["Electronic"], "#241a14", "#b06d3f"],
+        ];
+        const tracks = releases.flatMap(([artist, album, year, genres, left, right], releaseIndex) => {
+          const artwork = cover(album, left, right);
+          return Array.from({ length: releaseIndex % 3 === 0 ? 7 : 5 }, (_, trackIndex) => ({
+            id: `review-${releaseIndex}-${trackIndex}`,
+            filePath: `/review/${artist}/${album}/${String(trackIndex + 1).padStart(2, "0")}.flac`,
+            fileName: `${String(trackIndex + 1).padStart(2, "0")}-${album.toLowerCase().replaceAll(" ", "-")}.flac`,
+            extension: trackIndex % 6 === 4 ? "mp3" : "flac",
+            title: [
+              "Low Light Runner",
+              "Antenna Weather",
+              "The Long Way Through a Quiet Machine",
+              "Copper Static",
+              "Room Tone",
+              "Night Transfer",
+              "Last Signal Home",
+            ][trackIndex],
+            artist,
+            album,
+            albumArtist: artist,
+            genres,
+            trackNumber: trackIndex + 1,
+            discNumber: 1,
+            year,
+            durationSeconds: 184 + releaseIndex * 7 + trackIndex * 19,
+            modifiedTime: 1750000000 + releaseIndex * 10000 + trackIndex,
+            fileSize: 28000000,
+            scannedAt: 1750000000,
+            coverArtPath: artwork,
+            lyricsPath: null,
+            lyricsKind: null,
+            isFavorite: (releaseIndex + trackIndex) % 5 === 0,
+            playCount: (releaseIndex + trackIndex) % 4,
+            lastPlayedAt: null,
+          }));
+        });
+        let callbackId = 1;
+        window.__TAURI_INTERNALS__ = {
+          transformCallback(callback) {
+            const id = callbackId++;
+            window[`_${id}`] = callback;
+            return id;
+          },
+          unregisterCallback(id) {
+            delete window[`_${id}`];
+          },
+          convertFileSrc(path) {
+            return path;
+          },
+          async invoke(command) {
+            if (command === "get_library_cache") {
+              return {
+                tracks,
+                playlists: [],
+                lastScannedFolder: "/review/library",
+                lastScannedAt: 1750000000,
+              };
+            }
+            if (command === "get_video_library") {
+              return { videos: [], lastVideoFolder: null, lastVideoScannedAt: null };
+            }
+            if (command === "get_playback_status") {
+              return {
+                filePath: null,
+                isPlaying: false,
+                hasEnded: false,
+                positionSeconds: 0,
+                durationSeconds: null,
+                volume: 0.76,
+              };
+            }
+            if (command === "read_track_lyrics") {
+              return null;
+            }
+            if (command === "plugin:event|listen") {
+              return callbackId++;
+            }
+            return null;
+          },
+        };
+        window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener() {} };
+        localStorage.setItem("cassette:interface-mode", "modern");
+        localStorage.setItem("cassette:modern-appearance", "default");
+      }
+    </script>
     %sveltekit.head%
   </head>
   <body data-sveltekit-preload-data="hover">

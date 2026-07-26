@@ -8,6 +8,12 @@
     albums: Album[];
     currentAlbumId: string | null;
     hasSearchQuery: boolean;
+    eyebrow?: string;
+    title?: string;
+    countLabel?: string | null;
+    showControls?: boolean;
+    emptyTitle?: string | null;
+    emptyMessage?: string | null;
     sort: AlbumSortKey;
     sortDirectionLabel: string;
     onSortChange: (value: AlbumSortKey) => void;
@@ -22,6 +28,12 @@
     albums,
     currentAlbumId,
     hasSearchQuery,
+    eyebrow = "Browse the shelf",
+    title = "Albums",
+    countLabel = null,
+    showControls = true,
+    emptyTitle = null,
+    emptyMessage = null,
     sort,
     sortDirectionLabel,
     onSortChange,
@@ -59,31 +71,33 @@
 <section class="modern-albums" aria-labelledby="modern-albums-title">
   <header class="modern-collection-header">
     <div>
-      <p>Browse the shelf</p>
-      <h3 id="modern-albums-title">Albums</h3>
+      <p>{eyebrow}</p>
+      <h3 id="modern-albums-title">{title}</h3>
     </div>
     <div class="modern-album-controls">
-      <span>{albums.length} {albums.length === 1 ? "album" : "albums"}</span>
-      <label>
-        <span>Sort by</span>
-        <select value={sort} onchange={(event) => onSortChange(inputValue(event))}>
-          <option value="title">Album title</option>
-          <option value="artist">Artist</option>
-          <option value="year">Year</option>
-          <option value="trackCount">Song count</option>
-        </select>
-      </label>
-      <button type="button" aria-label={`Album sort direction: ${sortDirectionLabel}`} onclick={onToggleSortDirection}>
-        {sortDirectionLabel}
-      </button>
+      <span>{countLabel ?? `${albums.length} ${albums.length === 1 ? "album" : "albums"}`}</span>
+      {#if showControls}
+        <label>
+          <span>Sort by</span>
+          <select value={sort} onchange={(event) => onSortChange(inputValue(event))}>
+            <option value="title">Album title</option>
+            <option value="artist">Artist</option>
+            <option value="year">Year</option>
+            <option value="trackCount">Song count</option>
+          </select>
+        </label>
+        <button type="button" aria-label={`Album sort direction: ${sortDirectionLabel}`} onclick={onToggleSortDirection}>
+          {sortDirectionLabel}
+        </button>
+      {/if}
     </div>
   </header>
 
   {#if albums.length === 0}
     <div class="modern-empty-state">
       <span aria-hidden="true">C</span>
-      <h3>{hasSearchQuery ? "No albums matched" : "Your album shelf is empty"}</h3>
-      <p>{hasSearchQuery ? "Try another album title, artist, or year." : "Scan a music folder to build your local collection."}</p>
+      <h3>{emptyTitle ?? (hasSearchQuery ? "No albums matched" : "Your album shelf is empty")}</h3>
+      <p>{emptyMessage ?? (hasSearchQuery ? "Try another album title, artist, or year." : "Scan a music folder to build your local collection.")}</p>
     </div>
   {:else}
     <div class="modern-album-grid">

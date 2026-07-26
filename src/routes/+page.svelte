@@ -62,8 +62,11 @@
   import ContextMenu from "$lib/components/ContextMenu.svelte";
   import LibrarySection from "$lib/components/LibrarySection.svelte";
   import ModernAlbumsPage from "$lib/components/modern/ModernAlbumsPage.svelte";
+  import ModernArtistsPage from "$lib/components/modern/ModernArtistsPage.svelte";
+  import ModernCollectionDetail from "$lib/components/modern/ModernCollectionDetail.svelte";
   import ModernGenresPage from "$lib/components/modern/ModernGenresPage.svelte";
   import ModernSidebar from "$lib/components/modern/ModernSidebar.svelte";
+  import ModernSongsPage from "$lib/components/modern/ModernSongsPage.svelte";
   import ModernTopbar from "$lib/components/modern/ModernTopbar.svelte";
   import NowPlayingBar from "$lib/components/NowPlayingBar.svelte";
   import Sidebar from "$lib/components/Sidebar.svelte";
@@ -456,6 +459,8 @@
   let songSort = $state<SongSortKey>("title");
   let songSortDirection = $state<SortDirection>("asc");
   let songFormatFilter = $state("All");
+  let songArtistFilter = $state("All");
+  let songAlbumFilter = $state("All");
   let albumSort = $state<AlbumSortKey>("title");
   let albumSortDirection = $state<SortDirection>("asc");
   let artistSort = $state<ArtistSortKey>("name");
@@ -531,6 +536,14 @@
   let statsTotalPlays = $derived(tracks.reduce((total, track) => total + track.playCount, 0));
   let statsRecentlyPlayedCount = $derived(tracks.filter((track) => track.lastPlayedAt !== null).length);
   let songFormatOptions = $derived<DropdownOption[]>(availableFormats.map((format) => ({ value: format, label: format })));
+  let songArtistOptions = $derived<DropdownOption[]>([
+    { value: "All", label: "All artists" },
+    ...displayArtists.map((artist) => ({ value: artist.name, label: artist.name })),
+  ]);
+  let songAlbumOptions = $derived<DropdownOption[]>([
+    { value: "All", label: "All albums" },
+    ...displayAlbums.map((album) => ({ value: album.id, label: `${album.title} — ${album.artist}` })),
+  ]);
   let normalizedSearchQuery = $derived(normalizeSearch(searchQuery));
   let libraryTracksById = $derived(new Map(tracks.map((track) => [track.id, track])));
   let selectedAlbum = $derived(displayAlbums.find((album) => album.id === selectedAlbumId) ?? null);
@@ -582,6 +595,11 @@
   let selectedGenreSearchAlbums = $derived(searchFilterGenreAlbums(selectedGenreAlbums, normalizedSearchQuery));
   let selectedGenreSearchArtists = $derived(searchFilterArtists(selectedGenreArtists, normalizedSearchQuery));
   let visibleSongTracks = $derived(searchFilterTracks(filteredSongTracks, normalizedSearchQuery));
+  let modernFilteredSongTracks = $derived(filteredSongTracks.filter((track) =>
+    (songArtistFilter === "All" || artistNameForTrack(track) === songArtistFilter)
+    && (songAlbumFilter === "All" || albumIdForTrack(track) === songAlbumFilter),
+  ));
+  let modernVisibleSongTracks = $derived(searchFilterTracks(modernFilteredSongTracks, normalizedSearchQuery));
   let visibleAlbums = $derived(searchFilterAlbums(sortedAlbums, normalizedSearchQuery));
   let visibleArtists = $derived(searchFilterArtists(sortedArtists, normalizedSearchQuery));
   let visibleGenres = $derived(searchFilterGenres(sortedGenres, normalizedSearchQuery));
@@ -630,6 +648,7 @@
   let currentTrackCoverArtSrc = $derived(localImageSource(currentTrack?.coverArtPath));
   let currentTrackDuration = $derived(durationSeconds ?? currentTrack?.durationSeconds ?? null);
   let currentAlbumId = $derived(currentTrack ? albumIdForTrack(currentTrack) : null);
+  let currentArtistName = $derived(currentTrack ? artistNameForTrack(currentTrack) : null);
   let syncedLyricLines = $derived(currentLyrics?.kind === "synced" ? parseLrcLyrics(currentLyrics.text) : []);
   let lyricsOffsetSeconds = $derived(currentLyrics?.offsetSeconds ?? 0);
   let adjustedLyricPositionSeconds = $derived(positionSeconds - lyricsOffsetSeconds);
@@ -762,6 +781,14 @@
   $effect(() => {
     if (!availableFormats.includes(songFormatFilter)) {
       songFormatFilter = "All";
+    }
+
+    if (songArtistFilter !== "All" && !displayArtists.some((artist) => artist.name === songArtistFilter)) {
+      songArtistFilter = "All";
+    }
+
+    if (songAlbumFilter !== "All" && !displayAlbums.some((album) => album.id === songAlbumFilter)) {
+      songAlbumFilter = "All";
     }
   });
 
@@ -6515,7 +6542,41 @@
         {/if}
       {:else if activeView === "Artists"}
         {#if selectedArtist}
-          <section class="detail-view" aria-labelledby="artist-detail-title">
+          {#if interfaceMode === "modern"}
+            <ModernCollectionDetail
+              kind="Artist"
+              title={selectedArtist.name}
+              backLabel={artistBackLabel()}
+              albums={selectedArtistSearchAlbums}
+              atmosphereAlbums={selectedArtistAlbums}
+              {currentAlbumId}
+              hasSearchQuery={normalizedSearchQuery.length > 0}
+              stats={[
+                artistSongCount(selectedArtist),
+                `${selectedArtistAlbums.length} ${selectedArtistAlbums.length === 1 ? "album" : "albums"}`,
+              ]}
+              secondaryLabels={selectedArtistGenres.filter((genre) => genre !== "Unknown Genre")}
+              searchValue={searchQuery}
+              searchPlaceholder="Search this artist..."
+              {albumSort}
+              albumSortDirectionLabel={sortDirectionLabel(albumSortDirection)}
+              onBack={handleArtistDetailBack}
+              onSearchInput={(value) => searchQuery = value}
+              onSearchKeydown={handleSearchKeydown}
+              onClearSearch={clearSearch}
+              onPlay={() => void handlePlaySelectedArtist()}
+              onShuffle={() => void handleShuffleSelectedArtist()}
+              onQueue={handleAddSelectedArtistToQueue}
+              onAlbumSortChange={(value) => albumSort = value}
+              onToggleAlbumSortDirection={() => albumSortDirection = nextSortDirection(albumSortDirection)}
+              onOpenAlbum={handleAlbumSelect}
+              onPlayAlbum={(album, shouldShuffle) => void playTrackSet(tracksForAlbum(album), shouldShuffle)}
+              onQueueAlbum={(album) => appendTracksToQueue(tracksForAlbum(album))}
+              onOpenAlbumContextMenu={openAlbumContextMenu}
+              hasTracks={selectedArtistTracks.length > 0}
+            />
+          {:else}
+            <section class="detail-view" aria-labelledby="artist-detail-title">
             <button class="back-button album-detail-back" type="button" onclick={handleArtistDetailBack}>{artistBackLabel()}</button>
             <div class="artist-detail-header" style={`--item-color: ${selectedArtist.color}`}>
               <div class="artist-avatar detail-avatar" style={`--item-color: ${selectedArtist.color}`} aria-hidden="true">
@@ -6597,9 +6658,26 @@
                 </div>
               {/if}
             </LibrarySection>
-          </section>
+            </section>
+          {/if}
         {:else}
-          <LibrarySection title="All Artists" viewAllLabel={`${visibleArtists.length} total`}>
+          {#if interfaceMode === "modern"}
+            <ModernArtistsPage
+              artists={visibleArtists}
+              albums={displayAlbums}
+              {currentArtistName}
+              hasSearchQuery={normalizedSearchQuery.length > 0}
+              sort={artistSort}
+              sortDirectionLabel={sortDirectionLabel(artistSortDirection)}
+              onSortChange={(value) => artistSort = value}
+              onToggleSortDirection={() => artistSortDirection = nextSortDirection(artistSortDirection)}
+              onOpenArtist={handleArtistSelect}
+              onPlayArtist={(artist, shouldShuffle) => void playTrackSet(tracksForArtist(artist), shouldShuffle)}
+              onQueueArtist={(artist) => appendTracksToQueue(tracksForArtist(artist))}
+              onOpenContextMenu={openArtistContextMenu}
+            />
+          {:else}
+            <LibrarySection title="All Artists" viewAllLabel={`${visibleArtists.length} total`}>
             <div class="control-bar">
               <label>
                 <span>Sort</span>
@@ -6638,11 +6716,48 @@
                 {/each}
               </div>
             {/if}
-          </LibrarySection>
+            </LibrarySection>
+          {/if}
         {/if}
       {:else if activeView === "Genres"}
         {#if selectedGenre}
-          <section class="detail-view" aria-labelledby="genre-detail-title">
+          {#if interfaceMode === "modern"}
+            <ModernCollectionDetail
+              kind="Genre"
+              title={selectedGenre.name}
+              backLabel="← Genres"
+              albums={selectedGenreSearchAlbums}
+              atmosphereAlbums={selectedGenreAlbums}
+              {currentAlbumId}
+              hasSearchQuery={normalizedSearchQuery.length > 0}
+              stats={[
+                songCountLabel(selectedGenreTracks.length),
+                `${selectedGenreArtists.length} ${selectedGenreArtists.length === 1 ? "artist" : "artists"}`,
+                `${selectedGenreAlbums.length} ${selectedGenreAlbums.length === 1 ? "album" : "albums"}`,
+              ]}
+              relatedArtists={selectedGenreSearchArtists}
+              searchValue={searchQuery}
+              searchPlaceholder="Search this genre..."
+              {albumSort}
+              albumSortDirectionLabel={sortDirectionLabel(albumSortDirection)}
+              onBack={handleBackToGenres}
+              onSearchInput={(value) => searchQuery = value}
+              onSearchKeydown={handleSearchKeydown}
+              onClearSearch={clearSearch}
+              onPlay={() => void handlePlaySelectedGenre()}
+              onShuffle={() => void handleShuffleSelectedGenre()}
+              onQueue={handleAddSelectedGenreToQueue}
+              onAlbumSortChange={(value) => albumSort = value}
+              onToggleAlbumSortDirection={() => albumSortDirection = nextSortDirection(albumSortDirection)}
+              onOpenAlbum={handleAlbumSelect}
+              onPlayAlbum={(album, shouldShuffle) => void playTrackSet(tracksForAlbum(album), shouldShuffle)}
+              onQueueAlbum={(album) => appendTracksToQueue(tracksForAlbum(album))}
+              onOpenAlbumContextMenu={openAlbumContextMenu}
+              onOpenArtist={handleArtistSelect}
+              hasTracks={selectedGenreTracks.length > 0}
+            />
+          {:else}
+            <section class="detail-view" aria-labelledby="genre-detail-title">
             <button class="back-button album-detail-back" type="button" onclick={handleBackToGenres}>← Genres</button>
             <div class="genre-detail-header" style={`--item-color: ${selectedGenre.color}`}>
               <div class="genre-mark detail-avatar" style={`--item-color: ${selectedGenre.color}`} aria-hidden="true">
@@ -6743,8 +6858,8 @@
                 </div>
               {/if}
             </LibrarySection>
-
-          </section>
+            </section>
+          {/if}
         {:else}
           {#if interfaceMode === "modern"}
             <ModernGenresPage
@@ -6805,7 +6920,35 @@
           {/if}
         {/if}
       {:else if activeView === "Songs"}
-        <LibrarySection title="All Songs" viewAllLabel={`${visibleSongTracks.length} ${visibleSongTracks.length === 1 ? "song" : "songs"}`}>
+        {#if interfaceMode === "modern"}
+          <ModernSongsPage
+            tracks={modernVisibleSongTracks}
+            libraryTrackCount={tracks.length}
+            {isScanning}
+            selectedTrackId={currentTrack?.id ?? null}
+            hasSearchQuery={normalizedSearchQuery.length > 0}
+            sort={songSort}
+            sortOptions={songSortOptions}
+            sortDirectionLabel={sortDirectionLabel(songSortDirection)}
+            formatFilter={songFormatFilter}
+            formatOptions={songFormatOptions}
+            artistFilter={songArtistFilter}
+            artistOptions={songArtistOptions}
+            albumFilter={songAlbumFilter}
+            albumOptions={songAlbumOptions}
+            onSortChange={handleSongSortChange}
+            onToggleSortDirection={() => songSortDirection = nextSortDirection(songSortDirection)}
+            onFormatFilterChange={handleSongFormatFilterChange}
+            onArtistFilterChange={(value) => songArtistFilter = value}
+            onAlbumFilterChange={(value) => songAlbumFilter = value}
+            onTrackSelect={handleTrackSelect}
+            onTrackContextMenu={openTrackContextMenu}
+            onArtistSelect={handleTrackArtistSelect}
+            onAlbumSelect={handleTrackAlbumSelect}
+            onToggleFavorite={handleToggleFavorite}
+          />
+        {:else}
+          <LibrarySection title="All Songs" viewAllLabel={`${visibleSongTracks.length} ${visibleSongTracks.length === 1 ? "song" : "songs"}`}>
           <div class="control-bar song-browser-controls">
             <CompactDropdown
               label="Sort"
@@ -6871,7 +7014,8 @@
               onToggleFavorite={handleToggleFavorite}
             />
           {/if}
-        </LibrarySection>
+          </LibrarySection>
+        {/if}
       {:else if activeView === "Playlists"}
         {#if isLikedSongsOpen}
           <section class="playlist-detail-page" aria-labelledby="liked-songs-title">
