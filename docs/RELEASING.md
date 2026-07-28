@@ -6,7 +6,7 @@ This checklist prepares a draft; publishing is always a separate manual decision
 
 - [ ] Confirm `main` is clean and contains only the original Cassette interface.
 - [ ] Confirm the release branch was created directly from the intended `main` commit.
-- [ ] Confirm no Modern branch was merged and no `cassette:interface-mode`, `cassette:modern-appearance`, Modern component, or Interface selector exists.
+- [ ] Confirm the release contains only the stable original/Legacy interface, with no alternate interface components, selectors, or persisted interface settings.
 - [ ] Review every uncommitted change before committing it intentionally.
 - [ ] Verify `package.json`, `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json` all say `0.1.0`.
 - [ ] Verify product name `Cassette`, executable `cassette`, and bundle identifier `io.github.atilla.cassette`.
@@ -26,6 +26,7 @@ This checklist prepares a draft; publishing is always a separate manual decision
 
 ## 3. Local Fedora test
 
+- [ ] Install `patchelf` before testing AppImage bundling; the GStreamer bundling plugin requires it.
 - [ ] Run `npm ci`.
 - [ ] Run `npm run build`.
 - [ ] Run `npm run check`.
@@ -38,6 +39,7 @@ This checklist prepares a draft; publishing is always a separate manual decision
 - [ ] Run the AppImage on a clean Linux installation, not only the build machine.
 - [ ] Inspect AppImage contents and runtime logs to see which WebKitGTK/GStreamer libraries and plugins are actually included.
 - [ ] Do not call the AppImage fully portable until the clean-install test succeeds.
+- [ ] If Fedora's newer ELF sections are incompatible with `linuxdeploy`'s bundled `strip`, retry the local diagnostic build with `NO_STRIP=1 npm run tauri build -- --bundles appimage`; use the Ubuntu 22.04 workflow artifact for release review.
 - [ ] Test Albums startup, Album Detail, Artists, Artist Detail, Genres, Genre Detail, Songs, Playlists, Queue, Lyrics, Stats, Settings, and the bottom player.
 - [ ] Test all five themes.
 - [ ] Test Linux notifications with and without `notify-send`.
@@ -80,7 +82,7 @@ Inspect source, built frontend, Linux bundles, Windows installers, and extracted
 - [ ] Search for `/home/atilla`, the developer username, personal music paths, and Windows user-profile paths.
 - [ ] Search for databases, cached covers, cached lyrics, test audio/video, source fixtures, logs, `.env` files, API keys, tokens, certificates, and temporary tag-editor files.
 - [ ] Confirm no raw `target`, `node_modules`, `.git`, personal nested repositories, or recovery files are packaged.
-- [ ] Confirm no Modern branch names, Modern components, or Modern interface settings are present.
+- [ ] Confirm no alternate interface branch names, components, or settings are present.
 - [ ] Inspect installer file lists rather than relying only on ignore rules.
 - [ ] Verify GStreamer development files are not in Windows installers.
 - [ ] Record checksums for every release asset after downloading it from the draft.
