@@ -1,8 +1,8 @@
 # Windows GStreamer strategy
 
-## Decision for Cassette 0.1.0
+## Decision for Cassette 0.1.0-beta.1
 
-Windows support is beta and the installers are not self-contained. Users must install the official GStreamer 1.26.11 MSVC x86_64 runtime and make its `bin` directory available through `PATH`.
+Linux is the primary tested platform for `v0.1.0-beta.1`. Windows 10/11 x86_64 support is beta, the planned installers are unsigned and not self-contained, and checkpoint 2 must still verify that they build and work on clean machines. Users must install the official GStreamer 1.26.11 MSVC x86_64 runtime and make its `bin` directory available through `PATH`.
 
 The CI and release builders install both official packages:
 
@@ -36,7 +36,7 @@ Cassette uses `playbin` for audio and GStreamer's discovery/typefinding support 
 
 A successful Rust compile proves that headers/import libraries were found; it does not prove that these plugins load or that real files play. The release checklist therefore requires representative real-file tests on clean Windows 10 and Windows 11 virtual machines.
 
-DVD/video support is not part of the Windows 0.1.0 runtime contract. The existing Linux implementation continues to use external `mpv`, `ffmpeg`, `ffprobe`, and `lsdvd` processes.
+Experimental video/DVD functionality is disabled and unsupported in Cassette `0.1.0-beta.1` on every platform. Existing backend code may remain, but the beta does not expose its UI and does not require or advertise `mpv`, `ffmpeg`, `ffprobe`, or `lsdvd` as beta runtime dependencies.
 
 ## Future self-contained distribution requirements
 
