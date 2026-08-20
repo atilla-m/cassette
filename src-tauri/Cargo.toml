@@ -6,6 +6,7 @@ authors = ["Cassette contributors"]
 edition = "2021"
 homepage = "https://github.com/atilla-m/cassette"
 repository = "https://github.com/atilla-m/cassette"
+license = "GPL-3.0-or-later"
 categories = ["multimedia::audio"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html

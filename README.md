@@ -84,8 +84,10 @@ npm run tauri build
 
 Ignored real-media fixture tests are intentionally excluded from normal CI.
 
-## Release and license status
+## Release and license
 
 The release process is documented in [docs/RELEASING.md](docs/RELEASING.md), with GStreamer details in [docs/GSTREAMER-WINDOWS.md](docs/GSTREAMER-WINDOWS.md).
 
-This repository currently has no `LICENSE` file. The package metadata is therefore marked `UNLICENSED`; selecting and adding a license is a blocker before public binary distribution. The current desktop icons are inherited Tauri template artwork and should also be replaced with approved Cassette artwork before the first public release.
+Cassette is free software licensed under the [GNU General Public License version 3 or later](LICENSE) (`GPL-3.0-or-later`).
+
+Version `0.1.0-beta.1` keeps the stock Tauri desktop icons. They can be replaced with approved Cassette artwork in a later release.
