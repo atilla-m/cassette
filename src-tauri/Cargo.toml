@@ -35,3 +35,8 @@ reqwest = { version = "0.13.4", features = ["json"] }
 [target.'cfg(target_os = "linux")'.dependencies]
 libloading = "0.8"
 zbus = "5.16.0"
+
+[profile.release]
+# Keep debug builds untouched. Release artifacts retain application error messages,
+# while native symbols and machine-specific source paths are removed or remapped.
+strip = "symbols"

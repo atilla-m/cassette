@@ -7,59 +7,118 @@ on:
 permissions:
   contents: read
 
+env:
+  CARGO_TERM_COLOR: always
+  RELEASE_VERSION: 0.1.0-beta.1
+
 jobs:
   linux:
-    name: Linux (Ubuntu 22.04)
+    name: Linux x86_64 (Ubuntu 22.04)
     runs-on: ubuntu-22.04
-    timeout-minutes: 60
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
 
-      - name: Install Linux native dependencies
+      - name: Refresh apt metadata and install libunwind
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
+          set -euo pipefail
           sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libunwind-dev
+
+      - name: Install Linux build and packaging dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          set -euo pipefail
           sudo apt-get install -y --no-install-recommends \
-            libwebkit2gtk-4.1-dev \
-            libappindicator3-dev \
-            librsvg2-dev \
-            patchelf \
-            libgstreamer1.0-dev \
+            build-essential \
+            binutils \
+            cpio \
+            file \
+            libayatana-appindicator3-dev \
+            libdiscid-dev \
+            libfuse2 \
             libgstreamer-plugins-base1.0-dev \
+            libgstreamer1.0-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            patchelf \
+            p7zip-full \
+            pkg-config \
+            rpm \
+            squashfs-tools \
+            gstreamer1.0-libav \
+            gstreamer1.0-plugins-bad \
             gstreamer1.0-plugins-base \
             gstreamer1.0-plugins-good \
-            gstreamer1.0-plugins-bad \
-            gstreamer1.0-plugins-ugly \
-            gstreamer1.0-libav \
-            libnotify-bin \
-            libdiscid-dev
+            gstreamer1.0-plugins-ugly
+          patchelf --version
 
       - run: npm ci
       - run: npm run build
       - run: npm run check
+      - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
       - run: cargo test --manifest-path src-tauri/Cargo.toml
       - run: cargo check --manifest-path src-tauri/Cargo.toml
-      - run: npm run tauri build -- --no-bundle
+
+      - name: Build current-version Linux release bundles
+        run: npm run release:linux
+
+      - name: Verify Linux packages and scan release artifacts
+        run: |
+          python scripts/audit-release-artifacts.py \
+            --workspace . \
+            --version "$RELEASE_VERSION" \
+            --license LICENSE \
+            --frontend build \
+            --artifact src-tauri/target/release/cassette \
+            --artifact src-tauri/target/release/bundle/deb/Cassette_0.1.0-beta.1_amd64.deb \
+            --artifact src-tauri/target/release/bundle/rpm/Cassette-0.1.0-beta.1-1.x86_64.rpm \
+            --artifact src-tauri/target/release/bundle/appimage/Cassette_0.1.0-beta.1_amd64.AppImage
+
+      - name: Upload exact Linux CI artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: cassette-0.1.0-beta.1-linux-x86_64
+          if-no-files-found: error
+          path: |
+            src-tauri/target/release/bundle/deb/Cassette_0.1.0-beta.1_amd64.deb
+            src-tauri/target/release/bundle/rpm/Cassette-0.1.0-beta.1-1.x86_64.rpm
+            src-tauri/target/release/bundle/appimage/Cassette_0.1.0-beta.1_amd64.AppImage
 
   windows:
-    name: Windows (MSVC x86_64)
-    runs-on: windows-latest
-    timeout-minutes: 90
+    name: Windows x86_64 (Windows Server 2022)
+    runs-on: windows-2022
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
+          components: rustfmt
 
-      - name: Install official GStreamer MSVC x86_64 packages
+      - name: Install and discover official GStreamer MSVC x86_64 packages
         shell: pwsh
         run: ./scripts/install-gstreamer-windows.ps1
 
@@ -72,31 +131,51 @@ jobs:
             "flacdec", "oggdemux", "vorbisdec", "opusdec", "wavparse", "qtdemux"
           )
           foreach ($element in $elements) {
-            gst-inspect-1.0.exe $element
+            & gst-inspect-1.0.exe $element *> $null
             if ($LASTEXITCODE -ne 0) {
               throw "Required GStreamer element is unavailable: $element"
             }
           }
 
-          $mp3Decoders = @("mpg123audiodec", "avdec_mp3")
-          if (-not ($mp3Decoders | Where-Object {
+          $mp3Available = @("mpg123audiodec", "avdec_mp3") | Where-Object {
             & gst-inspect-1.0.exe $_ *> $null
             $LASTEXITCODE -eq 0
-          })) {
-            throw "No supported MP3 decoder is installed."
           }
+          if (-not $mp3Available) { throw "No supported MP3 decoder is installed." }
 
-          $aacDecoders = @("faad", "avdec_aac")
-          if (-not ($aacDecoders | Where-Object {
+          $aacAvailable = @("faad", "avdec_aac") | Where-Object {
             & gst-inspect-1.0.exe $_ *> $null
             $LASTEXITCODE -eq 0
-          })) {
-            throw "No supported AAC decoder is installed."
           }
+          if (-not $aacAvailable) { throw "No supported AAC decoder is installed." }
 
       - run: npm ci
       - run: npm run build
       - run: npm run check
+      - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
       - run: cargo test --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc
       - run: cargo check --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc
-      - run: npm run tauri build -- --target x86_64-pc-windows-msvc --no-bundle
+
+      - name: Build current-version NSIS and MSI bundles
+        run: npm run release:windows
+
+      - name: Verify and scan Windows release artifacts
+        shell: pwsh
+        run: |
+          python scripts/audit-release-artifacts.py `
+            --workspace . `
+            --version $env:RELEASE_VERSION `
+            --license LICENSE `
+            --frontend build `
+            --artifact src-tauri/target/x86_64-pc-windows-msvc/release/cassette.exe `
+            --artifact src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/Cassette_0.1.0-beta.1_x64-setup.exe `
+            --artifact src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/Cassette_0.1.0-beta.1_x64_en-US.msi
+
+      - name: Upload exact Windows CI artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: cassette-0.1.0-beta.1-windows-x86_64
+          if-no-files-found: error
+          path: |
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/Cassette_0.1.0-beta.1_x64-setup.exe
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/Cassette_0.1.0-beta.1_x64_en-US.msi

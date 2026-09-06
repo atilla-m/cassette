@@ -18,6 +18,8 @@
     "preview": "vite preview",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
+    "release:linux": "node scripts/build-release.mjs --bundles appimage,deb,rpm",
+    "release:windows": "node scripts/build-release.mjs --target x86_64-pc-windows-msvc --bundles nsis,msi",
     "tauri": "tauri"
   },
   "license": "GPL-3.0-or-later",

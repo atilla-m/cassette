@@ -44,17 +44,19 @@ Do not run the 13 ignored real-media fixture tests and do not install generated 
 
 Checkpoint 1 does not validate or repair AppImage, CI, NSIS, or MSI packaging.
 
+Release builds and package audits use the portable wrappers documented in [ARTIFACT-SAFETY.md](ARTIFACT-SAFETY.md). Never upload a bundle that has not passed the scanner from an exact current-version path.
+
 ## 4. Checkpoint 2 and clean-machine validation
 
 - [ ] Run the complete Linux CI job on Ubuntu 22.04.
-- [ ] Run the complete Windows CI job on `windows-latest` with stable `x86_64-pc-windows-msvc`.
+- [ ] Run the complete Windows CI job on pinned `windows-2022` with stable `x86_64-pc-windows-msvc`.
 - [ ] Confirm both jobs run `npm ci`, frontend build/check, Cargo test/check, and compile the Tauri application without running ignored real-media tests.
 - [ ] Verify AppImage generation and launch on a clean Linux installation. Do not call it portable before this succeeds.
 - [ ] Verify unsigned NSIS and MSI generation, install, launch, and uninstall on clean Windows 10 and Windows 11 x86_64 VMs.
-- [ ] Confirm the draft workflow creates expected artifacts without publishing on `workflow_dispatch`.
+- [ ] Confirm the tag-only draft workflow creates the expected artifacts as a draft prerelease and never runs for ordinary pushes or pull requests.
 - [ ] Review workflow logs and packaging warnings.
 
-For local AppImage diagnostics, install `patchelf` first. If Fedora's newer ELF sections are incompatible with `linuxdeploy`'s bundled `strip`, diagnose with `NO_STRIP=1 npm run tauri build -- --bundles appimage`; release decisions must still use a clean validated artifact.
+For local AppImage diagnostics, provision `patchelf` and the documented linuxdeploy support tools first, then run `npm run release:linux`. Do not use `NO_STRIP=1` as a substitute for missing packaging tools. Release decisions must use a normally built, scanned artifact from a clean supported host.
 
 ## 5. Linux functional and uninstall tests
 

@@ -93,6 +93,6 @@ The 13 ignored real-media fixture tests are intentionally excluded from normal v
 
 Report beta problems through [Cassette GitHub Issues](https://github.com/atilla-m/cassette/issues). Include the operating system, package format, Cassette version, relevant GStreamer/runtime details, reproduction steps, and sanitized logs; do not attach private library databases or personal media.
 
-The release process is documented in [docs/RELEASING.md](docs/RELEASING.md).
+The release process is documented in [docs/RELEASING.md](docs/RELEASING.md), with release-path and artifact-scanner details in [docs/ARTIFACT-SAFETY.md](docs/ARTIFACT-SAFETY.md).
 
 Cassette is free software licensed under the [GNU General Public License version 3 or later](LICENSE) (`GPL-3.0-or-later`). The full license is included in application bundle resources.

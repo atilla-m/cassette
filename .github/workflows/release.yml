@@ -1,134 +1,287 @@
-name: Draft release
+name: Draft prerelease
 
 on:
   push:
     tags:
       - "v*"
-  workflow_dispatch:
 
 permissions:
   contents: read
 
+env:
+  CARGO_TERM_COLOR: always
+  RELEASE_VERSION: 0.1.0-beta.1
+
 jobs:
+  preflight:
+    name: Validate tagged release commit
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Verify tag, commit, version, and license metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+
+          project_version="$(node -p "require('./package.json').version")"
+          test "$project_version" = "$RELEASE_VERSION"
+          test "$GITHUB_REF_NAME" = "v$project_version"
+
+          test "$(node -p "require('./package-lock.json').version")" = "$project_version"
+          test "$(node -p "require('./package-lock.json').packages[''].version")" = "$project_version"
+          test "$(node -p "require('./src-tauri/tauri.conf.json').version")" = "$project_version"
+          grep -Fqx "version = \"$project_version\"" src-tauri/Cargo.toml
+          grep -Fqx 'license = "GPL-3.0-or-later"' src-tauri/Cargo.toml
+          test "$(node -p "require('./package.json').license")" = "GPL-3.0-or-later"
+          test "$(node -p "require('./src-tauri/tauri.conf.json').bundle.license")" = "GPL-3.0-or-later"
+
   build:
     name: Build ${{ matrix.name }}
+    needs: preflight
     strategy:
       fail-fast: false
       matrix:
         include:
           - name: Linux x86_64
+            platform: linux
             os: ubuntu-22.04
-            bundles: appimage,deb,rpm
-            artifact: linux-x86_64-[bundle]
+            rust_target: x86_64-unknown-linux-gnu
+            artifact_name: cassette-0.1.0-beta.1-linux-x86_64
           - name: Windows x86_64
-            os: windows-latest
-            bundles: nsis,msi
-            artifact: windows-x86_64-[bundle]
+            platform: windows
+            os: windows-2022
+            rust_target: x86_64-pc-windows-msvc
+            artifact_name: cassette-0.1.0-beta.1-windows-x86_64
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 120
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-pc-windows-msvc
+          targets: ${{ matrix.rust_target }}
+          components: rustfmt
 
-      - name: Install Linux native dependencies
-        if: runner.os == 'Linux'
+      - name: Confirm build uses tagged commit
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+
+      - name: Refresh apt metadata and install libunwind
+        if: matrix.platform == 'linux'
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
+          set -euo pipefail
           sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libunwind-dev
+
+      - name: Install Linux build and packaging dependencies
+        if: matrix.platform == 'linux'
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          set -euo pipefail
           sudo apt-get install -y --no-install-recommends \
-            libwebkit2gtk-4.1-dev \
-            libappindicator3-dev \
-            librsvg2-dev \
-            patchelf \
-            libgstreamer1.0-dev \
+            build-essential \
+            binutils \
+            cpio \
+            file \
+            libayatana-appindicator3-dev \
+            libdiscid-dev \
+            libfuse2 \
             libgstreamer-plugins-base1.0-dev \
+            libgstreamer1.0-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            patchelf \
+            p7zip-full \
+            pkg-config \
+            rpm \
+            squashfs-tools \
+            gstreamer1.0-libav \
+            gstreamer1.0-plugins-bad \
             gstreamer1.0-plugins-base \
             gstreamer1.0-plugins-good \
-            gstreamer1.0-plugins-bad \
-            gstreamer1.0-plugins-ugly \
-            gstreamer1.0-libav \
-            libnotify-bin \
-            libdiscid-dev \
-            rpm
+            gstreamer1.0-plugins-ugly
+          patchelf --version
 
-      - name: Install official GStreamer MSVC x86_64 packages
-        if: runner.os == 'Windows'
+      - name: Install and discover official GStreamer MSVC x86_64 packages
+        if: matrix.platform == 'windows'
         shell: pwsh
         run: ./scripts/install-gstreamer-windows.ps1
 
       - run: npm ci
       - run: npm run build
       - run: npm run check
-      - run: cargo test --manifest-path src-tauri/Cargo.toml
-      - run: cargo check --manifest-path src-tauri/Cargo.toml
+      - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
 
-      - name: Build installers
-        uses: tauri-apps/tauri-action@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Cargo test (Linux)
+        if: matrix.platform == 'linux'
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
+      - name: Cargo check (Linux)
+        if: matrix.platform == 'linux'
+        run: cargo check --manifest-path src-tauri/Cargo.toml
+
+      - name: Cargo test (Windows x86_64)
+        if: matrix.platform == 'windows'
+        run: cargo test --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc
+
+      - name: Cargo check (Windows x86_64)
+        if: matrix.platform == 'windows'
+        run: cargo check --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc
+
+      - name: Build Linux release bundles
+        if: matrix.platform == 'linux'
+        run: npm run release:linux
+
+      - name: Verify Linux release artifacts
+        if: matrix.platform == 'linux'
+        run: |
+          python scripts/audit-release-artifacts.py \
+            --workspace . \
+            --version "$RELEASE_VERSION" \
+            --license LICENSE \
+            --frontend build \
+            --artifact src-tauri/target/release/cassette \
+            --artifact src-tauri/target/release/bundle/deb/Cassette_0.1.0-beta.1_amd64.deb \
+            --artifact src-tauri/target/release/bundle/rpm/Cassette-0.1.0-beta.1-1.x86_64.rpm \
+            --artifact src-tauri/target/release/bundle/appimage/Cassette_0.1.0-beta.1_amd64.AppImage
+
+      - name: Build NSIS and MSI release bundles
+        if: matrix.platform == 'windows'
+        run: npm run release:windows
+
+      - name: Verify Windows release artifacts
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          python scripts/audit-release-artifacts.py `
+            --workspace . `
+            --version $env:RELEASE_VERSION `
+            --license LICENSE `
+            --frontend build `
+            --artifact src-tauri/target/x86_64-pc-windows-msvc/release/cassette.exe `
+            --artifact src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/Cassette_0.1.0-beta.1_x64-setup.exe `
+            --artifact src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/Cassette_0.1.0-beta.1_x64_en-US.msi
+
+      - name: Upload exact Linux workflow artifacts
+        if: matrix.platform == 'linux'
+        uses: actions/upload-artifact@v4
         with:
-          args: --bundles ${{ matrix.bundles }}
-          uploadWorkflowArtifacts: true
-          workflowArtifactNamePattern: ${{ matrix.artifact }}
+          name: ${{ matrix.artifact_name }}
+          if-no-files-found: error
+          path: |
+            src-tauri/target/release/bundle/deb/Cassette_0.1.0-beta.1_amd64.deb
+            src-tauri/target/release/bundle/rpm/Cassette-0.1.0-beta.1-1.x86_64.rpm
+            src-tauri/target/release/bundle/appimage/Cassette_0.1.0-beta.1_amd64.AppImage
+
+      - name: Upload exact Windows workflow artifacts
+        if: matrix.platform == 'windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          if-no-files-found: error
+          path: |
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/Cassette_0.1.0-beta.1_x64-setup.exe
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/Cassette_0.1.0-beta.1_x64_en-US.msi
 
   draft-release:
-    name: Create one draft release
-    if: github.event_name == 'push'
-    needs: build
+    name: Create one draft prerelease
+    needs: [preflight, build]
     runs-on: ubuntu-22.04
     permissions:
       contents: write
     steps:
       - uses: actions/download-artifact@v4
         with:
-          path: release-assets
-          merge-multiple: true
+          name: cassette-0.1.0-beta.1-linux-x86_64
+          path: release-assets/linux
+      - uses: actions/download-artifact@v4
+        with:
+          name: cassette-0.1.0-beta.1-windows-x86_64
+          path: release-assets/windows
 
-      - name: Select and verify release assets
+      - name: Verify exact selected assets
         shell: bash
         run: |
           set -euo pipefail
-          mkdir selected-assets
+          test -f release-assets/linux/Cassette_0.1.0-beta.1_amd64.deb
+          test -f release-assets/linux/Cassette-0.1.0-beta.1-1.x86_64.rpm
+          test -f release-assets/linux/Cassette_0.1.0-beta.1_amd64.AppImage
+          test -f release-assets/windows/Cassette_0.1.0-beta.1_x64-setup.exe
+          test -f release-assets/windows/Cassette_0.1.0-beta.1_x64_en-US.msi
+          test "$(find release-assets -type f | wc -l)" -eq 5
+          sha256sum \
+            release-assets/linux/Cassette_0.1.0-beta.1_amd64.deb \
+            release-assets/linux/Cassette-0.1.0-beta.1-1.x86_64.rpm \
+            release-assets/linux/Cassette_0.1.0-beta.1_amd64.AppImage \
+            release-assets/windows/Cassette_0.1.0-beta.1_x64-setup.exe \
+            release-assets/windows/Cassette_0.1.0-beta.1_x64_en-US.msi
 
-          find release-assets -type f \( \
-            -name '*.AppImage' -o \
-            -name '*.deb' -o \
-            -name '*.rpm' -o \
-            -name '*setup.exe' -o \
-            -name '*.msi' \
-          \) -exec cp '{}' selected-assets/ \;
-
-          test "$(find selected-assets -maxdepth 1 -type f -name '*.AppImage' | wc -l)" -ge 1
-          test "$(find selected-assets -maxdepth 1 -type f -name '*.deb' | wc -l)" -ge 1
-          test "$(find selected-assets -maxdepth 1 -type f -name '*.rpm' | wc -l)" -ge 1
-          test "$(find selected-assets -maxdepth 1 -type f -name '*setup.exe' | wc -l)" -ge 1
-          test "$(find selected-assets -maxdepth 1 -type f -name '*.msi' | wc -l)" -ge 1
-
-          find selected-assets -maxdepth 1 -type f -printf '%f\n' | sort
-
-      - name: Create draft and upload assets
+      - name: Create draft prerelease and upload exact assets
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         shell: bash
         run: |
           set -euo pipefail
-          tag="${GITHUB_REF_NAME}"
+          tag="$GITHUB_REF_NAME"
+          test "$tag" = "v$RELEASE_VERSION"
 
           if gh release view "$tag" >/dev/null 2>&1; then
             is_draft="$(gh api "repos/${GH_REPO}/releases/tags/${tag}" --jq '.draft')"
+            is_prerelease="$(gh api "repos/${GH_REPO}/releases/tags/${tag}" --jq '.prerelease')"
             test "$is_draft" = "true"
+            test "$is_prerelease" = "true"
+
+            while IFS= read -r asset; do
+              case "$asset" in
+                Cassette_0.1.0-beta.1_amd64.deb|Cassette-0.1.0-beta.1-1.x86_64.rpm|Cassette_0.1.0-beta.1_amd64.AppImage|Cassette_0.1.0-beta.1_x64-setup.exe|Cassette_0.1.0-beta.1_x64_en-US.msi) ;;
+                *) echo "Refusing to reuse draft with unexpected asset: $asset" >&2; exit 1 ;;
+              esac
+            done < <(gh api "repos/${GH_REPO}/releases/tags/${tag}" --jq '.assets[].name')
           else
             gh release create "$tag" \
               --draft \
+              --prerelease \
               --verify-tag \
               --title "Cassette ${tag#v}" \
-              --notes "Draft build. Complete docs/RELEASING.md before publishing."
+              --notes "Draft prerelease. Complete docs/RELEASING.md before publishing."
           fi
 
-          gh release upload "$tag" selected-assets/* --clobber
+          gh release upload "$tag" \
+            release-assets/linux/Cassette_0.1.0-beta.1_amd64.deb \
+            release-assets/linux/Cassette-0.1.0-beta.1-1.x86_64.rpm \
+            release-assets/linux/Cassette_0.1.0-beta.1_amd64.AppImage \
+            release-assets/windows/Cassette_0.1.0-beta.1_x64-setup.exe \
+            release-assets/windows/Cassette_0.1.0-beta.1_x64_en-US.msi \
+            --clobber
+
+          actual_assets="$(gh api "repos/${GH_REPO}/releases/tags/${tag}" --jq '.assets[].name' | sort)"
+          expected_assets="$(printf '%s\n' \
+            Cassette-0.1.0-beta.1-1.x86_64.rpm \
+            Cassette_0.1.0-beta.1_amd64.AppImage \
+            Cassette_0.1.0-beta.1_amd64.deb \
+            Cassette_0.1.0-beta.1_x64-setup.exe \
+            Cassette_0.1.0-beta.1_x64_en-US.msi | sort)"
+          test "$actual_assets" = "$expected_assets"
