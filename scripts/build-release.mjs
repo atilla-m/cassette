@@ -72,10 +72,17 @@ console.log(
 );
 console.log(`Remapped roots: ${mappings.map((mapping) => mapping.label).join(", ")}.`);
 
-const npmExecutable = process.platform === "win32" ? "npm.cmd" : "npm";
+// Invoke the repository-pinned JavaScript CLI directly. Windows cannot spawn
+// npm.cmd without a shell on current Node releases, while enabling a shell
+// would make path-remapping flags vulnerable to platform-specific quoting.
+const tauriCli = join(workspace, "node_modules", "@tauri-apps", "cli", "tauri.js");
+if (!existsSync(tauriCli)) {
+  throw new Error("The Tauri CLI is missing. Run npm ci before building a release.");
+}
+
 const result = spawnSync(
-  npmExecutable,
-  ["run", "tauri", "--", "build", ...forwardedArguments],
+  process.execPath,
+  [tauriCli, "build", ...forwardedArguments],
   {
     cwd: workspace,
     env: environment,
