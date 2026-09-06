@@ -83,9 +83,21 @@ $uninstallRegistryRoots = @(
   "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*"
 )
 foreach ($registryRoot in $uninstallRegistryRoots) {
-  Get-ItemProperty -Path $registryRoot -ErrorAction SilentlyContinue |
-    Where-Object { $_.DisplayName -like "GStreamer*MSVC*x86_64*" -or $_.DisplayName -like "GStreamer*1.26.11*" } |
-    ForEach-Object { Add-CandidateRoot $_.InstallLocation }
+  $registryItems = Get-ItemProperty -Path $registryRoot -ErrorAction SilentlyContinue
+  foreach ($registryItem in $registryItems) {
+    $displayNameProperty = $registryItem.PSObject.Properties["DisplayName"]
+    if (-not $displayNameProperty) {
+      continue
+    }
+
+    $displayName = [string]$displayNameProperty.Value
+    if ($displayName -like "GStreamer*MSVC*x86_64*" -or $displayName -like "GStreamer*1.26.11*") {
+      $installLocationProperty = $registryItem.PSObject.Properties["InstallLocation"]
+      if ($installLocationProperty) {
+        Add-CandidateRoot ([string]$installLocationProperty.Value)
+      }
+    }
+  }
 }
 
 $gstInspectCandidates = [System.Collections.Generic.List[string]]::new()
