@@ -167,7 +167,7 @@ jobs:
             --artifact src-tauri/target/release/bundle/rpm/Cassette-0.1.0-beta.1-1.x86_64.rpm \
             --artifact src-tauri/target/release/bundle/appimage/Cassette_0.1.0-beta.1_amd64.AppImage
 
-      - name: Build NSIS and MSI release bundles
+      - name: Build NSIS release bundle
         if: matrix.platform == 'windows'
         run: npm run release:windows
 
@@ -181,8 +181,7 @@ jobs:
             --license LICENSE `
             --frontend build `
             --artifact src-tauri/target/x86_64-pc-windows-msvc/release/cassette.exe `
-            --artifact src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/Cassette_0.1.0-beta.1_x64-setup.exe `
-            --artifact src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/Cassette_0.1.0-beta.1_x64_en-US.msi
+            --artifact src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/Cassette_0.1.0-beta.1_x64-setup.exe
 
       - name: Upload exact Linux workflow artifacts
         if: matrix.platform == 'linux'
@@ -203,7 +202,6 @@ jobs:
           if-no-files-found: error
           path: |
             src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/Cassette_0.1.0-beta.1_x64-setup.exe
-            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/Cassette_0.1.0-beta.1_x64_en-US.msi
 
   draft-release:
     name: Create one draft prerelease
@@ -229,14 +227,12 @@ jobs:
           test -f release-assets/linux/Cassette-0.1.0-beta.1-1.x86_64.rpm
           test -f release-assets/linux/Cassette_0.1.0-beta.1_amd64.AppImage
           test -f release-assets/windows/Cassette_0.1.0-beta.1_x64-setup.exe
-          test -f release-assets/windows/Cassette_0.1.0-beta.1_x64_en-US.msi
-          test "$(find release-assets -type f | wc -l)" -eq 5
+          test "$(find release-assets -type f | wc -l)" -eq 4
           sha256sum \
             release-assets/linux/Cassette_0.1.0-beta.1_amd64.deb \
             release-assets/linux/Cassette-0.1.0-beta.1-1.x86_64.rpm \
             release-assets/linux/Cassette_0.1.0-beta.1_amd64.AppImage \
-            release-assets/windows/Cassette_0.1.0-beta.1_x64-setup.exe \
-            release-assets/windows/Cassette_0.1.0-beta.1_x64_en-US.msi
+            release-assets/windows/Cassette_0.1.0-beta.1_x64-setup.exe
 
       - name: Create draft prerelease and upload exact assets
         env:
@@ -256,7 +252,7 @@ jobs:
 
             while IFS= read -r asset; do
               case "$asset" in
-                Cassette_0.1.0-beta.1_amd64.deb|Cassette-0.1.0-beta.1-1.x86_64.rpm|Cassette_0.1.0-beta.1_amd64.AppImage|Cassette_0.1.0-beta.1_x64-setup.exe|Cassette_0.1.0-beta.1_x64_en-US.msi) ;;
+                Cassette_0.1.0-beta.1_amd64.deb|Cassette-0.1.0-beta.1-1.x86_64.rpm|Cassette_0.1.0-beta.1_amd64.AppImage|Cassette_0.1.0-beta.1_x64-setup.exe) ;;
                 *) echo "Refusing to reuse draft with unexpected asset: $asset" >&2; exit 1 ;;
               esac
             done < <(gh api "repos/${GH_REPO}/releases/tags/${tag}" --jq '.assets[].name')
@@ -274,7 +270,6 @@ jobs:
             release-assets/linux/Cassette-0.1.0-beta.1-1.x86_64.rpm \
             release-assets/linux/Cassette_0.1.0-beta.1_amd64.AppImage \
             release-assets/windows/Cassette_0.1.0-beta.1_x64-setup.exe \
-            release-assets/windows/Cassette_0.1.0-beta.1_x64_en-US.msi \
             --clobber
 
           actual_assets="$(gh api "repos/${GH_REPO}/releases/tags/${tag}" --jq '.assets[].name' | sort)"
@@ -282,6 +277,5 @@ jobs:
             Cassette-0.1.0-beta.1-1.x86_64.rpm \
             Cassette_0.1.0-beta.1_amd64.AppImage \
             Cassette_0.1.0-beta.1_amd64.deb \
-            Cassette_0.1.0-beta.1_x64-setup.exe \
-            Cassette_0.1.0-beta.1_x64_en-US.msi | sort)"
+            Cassette_0.1.0-beta.1_x64-setup.exe | sort)"
           test "$actual_assets" = "$expected_assets"

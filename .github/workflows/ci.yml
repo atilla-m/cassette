@@ -156,7 +156,7 @@ jobs:
       - run: cargo test --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc
       - run: cargo check --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc
 
-      - name: Build current-version NSIS and MSI bundles
+      - name: Build current-version NSIS bundle
         run: npm run release:windows
 
       - name: Verify and scan Windows release artifacts
@@ -168,8 +168,7 @@ jobs:
             --license LICENSE `
             --frontend build `
             --artifact src-tauri/target/x86_64-pc-windows-msvc/release/cassette.exe `
-            --artifact src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/Cassette_0.1.0-beta.1_x64-setup.exe `
-            --artifact src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/Cassette_0.1.0-beta.1_x64_en-US.msi
+            --artifact src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/Cassette_0.1.0-beta.1_x64-setup.exe
 
       - name: Upload exact Windows CI artifacts
         uses: actions/upload-artifact@v4
@@ -178,4 +177,3 @@ jobs:
           if-no-files-found: error
           path: |
             src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/Cassette_0.1.0-beta.1_x64-setup.exe
-            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/Cassette_0.1.0-beta.1_x64_en-US.msi

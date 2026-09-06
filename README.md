@@ -10,7 +10,7 @@ This beta includes the current Cassette interface and all five existing themes: 
 
 Modern UI work is reserved for a future release. This beta does not include a Modern/Legacy interface switch or promise the rejected Modern design. Experimental video and DVD functionality is disabled and unsupported in this beta; hidden backend code and tools such as `lsdvd`, `ffmpeg`, `ffprobe`, and `mpv` are not part of the beta runtime contract.
 
-The configured package formats are DEB and RPM for Linux, AppImage for Linux, and NSIS setup EXE and MSI for Windows. Checkpoint 1 validates only DEB and RPM. Do not treat AppImage or Windows installer generation as passing until checkpoint 2 and clean-machine testing verify them.
+The configured package formats are DEB, RPM, and AppImage for Linux, and an NSIS setup EXE for Windows. MSI is not included in this beta: WiX/MSI cannot represent the authoritative `0.1.0-beta.1` prerelease identifier without changing the project version. Do not treat packages as release-ready until checkpoint 2 and clean-machine testing verify them.
 
 The beta uses the stock Tauri desktop icons as an accepted known limitation. Locally generated packages and planned Windows installers are unsigned; package managers, desktop security tools, or Windows SmartScreen may warn about an unrecognized publisher.
 
@@ -64,7 +64,8 @@ Windows beta limitations:
 - Linux desktop notifications, MPRIS, and CD detection/ripping are unavailable.
 - Experimental video/DVD functionality is disabled and unsupported.
 - Missing or undiscoverable GStreamer runtime files can prevent the dynamically linked application from starting.
-- The planned NSIS and MSI installers are unsigned and have not passed checkpoint 2 or clean Windows 10/11 testing.
+- The planned NSIS installer is unsigned and has not passed clean Windows 10/11 testing.
+- MSI is excluded from this beta because its version rules cannot represent `0.1.0-beta.1` faithfully.
 - Tauri's WebView2 download bootstrapper may require network access if WebView2 is missing.
 
 See [docs/GSTREAMER-WINDOWS.md](docs/GSTREAMER-WINDOWS.md) for the build and runtime strategy.

@@ -52,7 +52,8 @@ Release builds and package audits use the portable wrappers documented in [ARTIF
 - [ ] Run the complete Windows CI job on pinned `windows-2022` with stable `x86_64-pc-windows-msvc`.
 - [ ] Confirm both jobs run `npm ci`, frontend build/check, Cargo test/check, and compile the Tauri application without running ignored real-media tests.
 - [ ] Verify AppImage generation and launch on a clean Linux installation. Do not call it portable before this succeeds.
-- [ ] Verify unsigned NSIS and MSI generation, install, launch, and uninstall on clean Windows 10 and Windows 11 x86_64 VMs.
+- [ ] Verify unsigned NSIS generation, install, launch, and uninstall on clean Windows 10 and Windows 11 x86_64 VMs.
+- [x] Exclude MSI from `0.1.0-beta.1`: WiX/MSI requires a numeric-only optional prerelease identifier, so it cannot represent the authoritative version faithfully.
 - [ ] Confirm the tag-only draft workflow creates the expected artifacts as a draft prerelease and never runs for ordinary pushes or pull requests.
 - [ ] Review workflow logs and packaging warnings.
 
@@ -82,7 +83,7 @@ Perform all checks on clean x86_64 VMs, not only on a CI runner. Follow [GSTREAM
 - [ ] Install the official GStreamer 1.26.11 MSVC x86_64 runtime and make its `bin` directory available in `PATH`.
 - [ ] Verify Cassette starts without development files installed.
 - [ ] Install/uninstall the unsigned NSIS setup as a standard user and verify its per-user Start Menu and uninstall entries.
-- [ ] Install/uninstall the unsigned MSI and decide whether it is reliable enough to include.
+- [ ] Reconsider MSI for a future version whose release identifier is representable by WiX/MSI; do not include it in `0.1.0-beta.1`.
 - [ ] Verify normal WebView2 bootstrapper behavior with WebView2 present and absent.
 - [ ] Scan disposable libraries on `C:`, another drive, and Unicode paths.
 - [ ] Play representative FLAC, MP3, OGG/Vorbis, Opus, WAV, and M4A/AAC files.

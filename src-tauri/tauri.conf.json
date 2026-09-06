@@ -28,7 +28,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["appimage", "deb", "rpm", "nsis", "msi"],
+    "targets": ["appimage", "deb", "rpm", "nsis"],
     "category": "Music",
     "shortDescription": "Private, local-first music library and player.",
     "longDescription": "Cassette scans and plays a local music library with artwork, playlists, queue management, lyrics, statistics, themes, and safe FLAC metadata editing.",
