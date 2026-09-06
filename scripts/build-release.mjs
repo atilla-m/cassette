@@ -67,8 +67,31 @@ for (const mapping of mappings) {
 
 environment.CARGO_ENCODED_RUSTFLAGS = encodedFlags.join(UNIT_SEPARATOR);
 
+// Rust's remapping does not reach C/C++ sources compiled by dependency build
+// scripts. In particular, MSVC can otherwise retain Cargo-home paths from
+// __FILE__ in the final PE. Supply the equivalent native-compiler mappings for
+// release builds without relying on a shell to quote them.
+function shellQuote(value) {
+  return `'${value.replaceAll("'", `'\\''`)}'`;
+}
+
+function appendCompilerFlags(variable, flags) {
+  const existing = environment[variable]?.trim();
+  const encoded = flags.map(shellQuote).join(" ");
+  environment[variable] = existing ? `${existing} ${encoded}` : encoded;
+}
+
+environment.CC_SHELL_ESCAPED_FLAGS = "1";
+const compilerMappingFlags = mappings.map((mapping) => (
+  process.platform === "win32"
+    ? `/pathmap:${mapping.source}=${mapping.destination}`
+    : `-ffile-prefix-map=${mapping.source}=${mapping.destination}`
+));
+appendCompilerFlags("CFLAGS", compilerMappingFlags);
+appendCompilerFlags("CXXFLAGS", compilerMappingFlags);
+
 console.log(
-  `Building Cassette ${expectedVersion} with release-only stripping and ${mappings.length} portable path remapping rule(s).`,
+  `Building Cassette ${expectedVersion} with release-only stripping and ${mappings.length} portable Rust/C/C++ path remapping rule(s).`,
 );
 console.log(`Remapped roots: ${mappings.map((mapping) => mapping.label).join(", ")}.`);
 
