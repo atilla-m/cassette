@@ -1,5 +1,5 @@
 param(
-  [string]$InstallRoot = "C:\gstreamer\1.0\msvc_x86_64"
+  [string]$InstallRoot = "C:\gstreamer"
 )
 
 Set-StrictMode -Version Latest
@@ -43,7 +43,8 @@ foreach ($package in $packages) {
     "/norestart",
     "/l*v",
     "`"$installLog`"",
-    "INSTALLDIR=`"$InstallRoot`""
+    "INSTALLDIR=`"$InstallRoot`"",
+    "ADDLOCAL=ALL"
   )
   if ($process.ExitCode -notin @(0, 3010)) {
     throw "GStreamer installer $($package.Name) exited with code $($process.ExitCode). MSI log: $installLog"
@@ -66,6 +67,7 @@ function Add-CandidateRoot {
 
 # First check requested and documented locations, then installer registry data.
 Add-CandidateRoot $InstallRoot
+Add-CandidateRoot (Join-Path $InstallRoot "1.0\msvc_x86_64")
 Add-CandidateRoot $env:GSTREAMER_1_0_ROOT_MSVC_X86_64
 Add-CandidateRoot $env:GSTREAMER_ROOT_X86_64
 Add-CandidateRoot "C:\gstreamer\1.0\msvc_x86_64"
