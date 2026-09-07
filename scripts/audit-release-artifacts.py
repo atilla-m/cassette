@@ -161,22 +161,36 @@ def extract_rpm(path: Path, destination: Path) -> Path:
     if not rpm2cpio or not cpio:
         raise RuntimeError("RPM inspection requires rpm2cpio and cpio")
 
-    producer = subprocess.Popen([rpm2cpio, str(path)], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    assert producer.stdout is not None
-    consumer = subprocess.run(
-        [cpio, "-idm", "--quiet"],
-        cwd=destination,
-        stdin=producer.stdout,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-    )
-    producer.stdout.close()
-    producer_stderr = producer.stderr.read() if producer.stderr else b""
-    producer_returncode = producer.wait()
-    if producer_returncode != 0 or consumer.returncode != 0:
-        detail = (producer_stderr + consumer.stderr).decode("utf-8", "replace").strip()
-        raise RuntimeError(f"Could not extract RPM {path}: {detail}")
+    # Do not connect these processes with a live pipe. cpio is allowed to stop
+    # reading at the archive trailer, which can give rpm2cpio a timing-dependent
+    # SIGPIPE while it flushes trailing padding even though extraction succeeded.
+    with tempfile.TemporaryFile() as payload:
+        producer = subprocess.run(
+            [rpm2cpio, str(path)],
+            stdout=payload,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        if producer.returncode != 0:
+            detail = producer.stderr.decode("utf-8", "replace").strip() or "no diagnostic output"
+            raise RuntimeError(
+                f"Could not convert RPM {path} (rpm2cpio exit {producer.returncode}): {detail}"
+            )
+
+        payload.seek(0)
+        consumer = subprocess.run(
+            [cpio, "-idm", "--quiet", "--no-absolute-filenames"],
+            cwd=destination,
+            stdin=payload,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        if consumer.returncode != 0:
+            detail = consumer.stderr.decode("utf-8", "replace").strip() or "no diagnostic output"
+            raise RuntimeError(
+                f"Could not extract RPM {path} (cpio exit {consumer.returncode}): {detail}"
+            )
     return destination
 
 
