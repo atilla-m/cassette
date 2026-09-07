@@ -156,10 +156,25 @@ def extract_deb(path: Path, destination: Path) -> tuple[Path, str]:
 
 
 def extract_rpm(path: Path, destination: Path) -> Path:
+    bsdtar = command_path("bsdtar")
+    if bsdtar:
+        listing = run_checked([bsdtar, "-tf", str(path)]).stdout.decode("utf-8", "replace")
+        for member in listing.splitlines():
+            member_path = Path(member)
+            if member_path.is_absolute() or ".." in member_path.parts:
+                raise RuntimeError(f"RPM path escapes extraction root: {member}")
+        run_checked([
+            bsdtar,
+            "-xf", str(path),
+            "-C", str(destination),
+            "--no-same-owner",
+        ])
+        return destination
+
     rpm2cpio = command_path("rpm2cpio")
     cpio = command_path("cpio")
     if not rpm2cpio or not cpio:
-        raise RuntimeError("RPM inspection requires rpm2cpio and cpio")
+        raise RuntimeError("RPM inspection requires bsdtar or both rpm2cpio and cpio")
 
     # Do not connect these processes with a live pipe. cpio is allowed to stop
     # reading at the archive trailer, which can give rpm2cpio a timing-dependent

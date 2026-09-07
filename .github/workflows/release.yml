@@ -113,6 +113,7 @@ jobs:
             binutils \
             cpio \
             file \
+            libarchive-tools \
             libayatana-appindicator3-dev \
             libdiscid-dev \
             libfuse2 \
