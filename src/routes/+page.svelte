@@ -59,6 +59,21 @@
     setVideoVolume,
     stopVideo,
   } from "$lib/api/playback";
+  import {
+    AUTOMATIC_UPDATE_SETTING_KEY,
+    LAST_SUCCESSFUL_UPDATE_CHECK_KEY,
+    LAST_AUTOMATIC_UPDATE_ATTEMPT_KEY,
+    type CassetteUpdate,
+    checkForCassetteUpdate,
+    getUpdateRuntimeInfo,
+    installAppImageUpdate,
+    loadUpdaterStorage,
+    persistUpdaterStorage,
+    shouldRunAutomaticUpdateCheck,
+    updateReleaseUrl,
+    type UpdateDownloadProgress,
+    type UpdateRuntimeInfo,
+  } from "$lib/api/updates";
   import CompactDropdown, { type DropdownOption } from "$lib/components/CompactDropdown.svelte";
   import ContextMenu from "$lib/components/ContextMenu.svelte";
   import LibrarySection from "$lib/components/LibrarySection.svelte";
@@ -105,7 +120,8 @@
   import { sendLinuxNotification } from "$lib/utils/linuxNotifications";
   import { localImageSource } from "$lib/utils/localImage";
   import { listen } from "@tauri-apps/api/event";
-  import { openPath } from "@tauri-apps/plugin-opener";
+  import { ask } from "@tauri-apps/plugin-dialog";
+  import { openPath, openUrl } from "@tauri-apps/plugin-opener";
   import { onMount } from "svelte";
   import packageInfo from "../../package.json";
 
@@ -417,6 +433,20 @@
   let trackNotificationsEnabled = $state(false);
   let trackNotificationStatus = $state<string | null>(null);
   let trackNotificationStatusIsError = $state(false);
+  let automaticUpdateChecksEnabled = $state(true);
+  let lastSuccessfulUpdateCheck = $state<number | null>(null);
+  let updateRuntime = $state<UpdateRuntimeInfo | null>(null);
+  let updateCheckState = $state<"idle" | "checking" | "confirming" | "available" | "current" | "downloading" | "installing" | "error">("idle");
+  let updateStatusMessage = $state<string | null>(null);
+  let updateStatusIsError = $state(false);
+  let availableUpdateVersion = $state<string | null>(null);
+  let availableUpdateNotes = $state<string | null>(null);
+  let updateDownloadProgress = $state<UpdateDownloadProgress | null>(null);
+  let showUpdateNotice = $state(false);
+  let availableUpdate: CassetteUpdate | null = null;
+  let lastAutomaticUpdateAttempt: number | null = null;
+  let updaterStorageAvailable = true;
+  let automaticUpdateCheckAttemptedThisSession = false;
   let lastNotifiedTrackKey: string | null = null;
   let lastNotifiedPlaybackStartId: number | null = null;
   let playbackStartId = 0;
@@ -600,6 +630,25 @@
   let queueLengthLabel = $derived(`${playbackQueue.length} ${playbackQueue.length === 1 ? "track" : "tracks"}`);
   let volumePercentLabel = $derived(`${Math.round(volume * 100)}%`);
   let lastScanLabel = $derived(lastScannedAt ? formatDateTime(lastScannedAt) : "Not available");
+  let updateIsBusy = $derived(updateCheckState === "checking" || updateCheckState === "confirming" || updateCheckState === "downloading" || updateCheckState === "installing");
+  let updatePackageLabel = $derived(
+    !updateRuntime
+      ? "Detecting..."
+      : updateRuntime.packageKind === "appimage"
+      ? "AppImage"
+      : updateRuntime.packageKind === "native-or-unknown"
+        ? "DEB, RPM, or other"
+        : updateRuntime.development
+          ? "Development build"
+          : "Unsupported platform",
+  );
+  let updateProgressLabel = $derived(
+    updateDownloadProgress?.percent !== null && updateDownloadProgress?.percent !== undefined
+      ? `${updateDownloadProgress.percent}%`
+      : updateDownloadProgress
+        ? `${formatByteCount(updateDownloadProgress.downloadedBytes)} downloaded`
+        : "Preparing download",
+  );
   let mixSelectedGenreSet = $derived(new Set(mixSelectedGenres));
   let mixSelectedArtistSet = $derived(new Set(mixSelectedArtists));
   let mixSelectedAlbumSet = $derived(new Set(mixSelectedAlbums));
@@ -744,6 +793,21 @@
     }
     autoFindLyricsEnabled = window.localStorage.getItem(AUTO_LYRICS_SETTING_KEY) !== "off";
     trackNotificationsEnabled = window.localStorage.getItem(TRACK_NOTIFICATIONS_SETTING_KEY) === "on";
+    try {
+      const updaterStorage = loadUpdaterStorage(window.localStorage);
+      automaticUpdateChecksEnabled = updaterStorage.automaticChecksEnabled;
+      lastSuccessfulUpdateCheck = updaterStorage.lastSuccessfulCheck;
+      lastAutomaticUpdateAttempt = updaterStorage.lastAutomaticAttempt;
+      updaterStorageAvailable = updaterStorage.storageAvailable;
+    } catch {
+      // Accessing the browser's Storage object itself can be denied. Manual
+      // checks remain available once native runtime detection completes.
+      automaticUpdateChecksEnabled = false;
+      lastSuccessfulUpdateCheck = null;
+      lastAutomaticUpdateAttempt = null;
+      updaterStorageAvailable = false;
+    }
+    void initializeUpdater();
     void loadPlatformCapabilities();
     void loadLibraryCache();
     if (ENABLE_EXPERIMENTAL_VIDEOS) {
@@ -1145,6 +1209,255 @@
     trackNotificationStatus = null;
     trackNotificationStatusIsError = false;
     window.localStorage.setItem(TRACK_NOTIFICATIONS_SETTING_KEY, trackNotificationsEnabled ? "on" : "off");
+  }
+
+  function handleAutomaticUpdateSettingChange(event: Event) {
+    automaticUpdateChecksEnabled = event.currentTarget instanceof HTMLInputElement
+      ? event.currentTarget.checked
+      : automaticUpdateChecksEnabled;
+    if (!persistUpdaterValue(
+      AUTOMATIC_UPDATE_SETTING_KEY,
+      automaticUpdateChecksEnabled ? "on" : "off",
+    )) {
+      updaterStorageAvailable = false;
+      automaticUpdateChecksEnabled = false;
+    }
+
+    if (
+      automaticUpdateChecksEnabled
+      && updateRuntime
+      && shouldRunAutomaticUpdateCheck(true, lastAutomaticUpdateAttempt)
+    ) {
+      void runUpdateCheck("automatic");
+    }
+  }
+
+  function persistUpdaterValue(key: string, value: string | null): boolean {
+    try {
+      return persistUpdaterStorage(window.localStorage, key, value);
+    } catch {
+      return false;
+    }
+  }
+
+  async function initializeUpdater() {
+    try {
+      updateRuntime = await getUpdateRuntimeInfo();
+    } catch (error) {
+      updateRuntime = {
+        development: true,
+        platform: "development",
+        packageKind: "unsupported",
+        canSelfInstall: false,
+        updaterAvailable: false,
+      };
+      console.warn("Could not determine updater runtime:", safeUpdateError(error));
+      return;
+    }
+
+    if (
+      !updateRuntime.development
+      && updateRuntime.platform === "linux"
+      && shouldRunAutomaticUpdateCheck(automaticUpdateChecksEnabled, lastAutomaticUpdateAttempt)
+    ) {
+      await runUpdateCheck("automatic");
+    }
+  }
+
+  function unavailableUpdateMessage(runtime: UpdateRuntimeInfo | null) {
+    if (!runtime || runtime.development) {
+      return "Update checks are unavailable in development builds. No update server was contacted.";
+    }
+
+    if (runtime.platform !== "linux") {
+      return "Update checks are available only in Linux builds for Cassette 0.1.0-beta.1.";
+    }
+
+    if (!runtime.updaterAvailable) {
+      return "Updater configuration is unavailable in this build or session. Cassette remains usable; downloads are available on GitHub Releases.";
+    }
+
+    return null;
+  }
+
+  async function runUpdateCheck(kind: "manual" | "automatic") {
+    if (updateIsBusy) {
+      return;
+    }
+
+    if (kind === "automatic") {
+      if (automaticUpdateCheckAttemptedThisSession || !updaterStorageAvailable
+        || !shouldRunAutomaticUpdateCheck(automaticUpdateChecksEnabled, lastAutomaticUpdateAttempt)) {
+        return;
+      }
+      automaticUpdateCheckAttemptedThisSession = true;
+      lastAutomaticUpdateAttempt = Date.now();
+      if (!persistUpdaterValue(
+        LAST_AUTOMATIC_UPDATE_ATTEMPT_KEY,
+        String(lastAutomaticUpdateAttempt),
+      )) {
+        updaterStorageAvailable = false;
+        automaticUpdateChecksEnabled = false;
+        return;
+      }
+    }
+
+    const unavailable = unavailableUpdateMessage(updateRuntime);
+    if (unavailable) {
+      if (kind === "manual") {
+        updateCheckState = "error";
+        updateStatusIsError = false;
+        updateStatusMessage = unavailable;
+      }
+      return;
+    }
+
+    const runtime = updateRuntime;
+    if (!runtime) {
+      return;
+    }
+
+    const previousState = availableUpdate ? "available" : "idle";
+    updateCheckState = "checking";
+    updateStatusIsError = false;
+    updateStatusMessage = kind === "manual" ? "Checking the signed beta channel..." : null;
+
+    try {
+      const nextUpdate = await checkForCassetteUpdate(runtime);
+      const checkedAt = Date.now();
+      lastSuccessfulUpdateCheck = checkedAt;
+      if (!persistUpdaterValue(LAST_SUCCESSFUL_UPDATE_CHECK_KEY, String(checkedAt))) {
+        updaterStorageAvailable = false;
+        automaticUpdateChecksEnabled = false;
+      }
+
+      if (!nextUpdate) {
+        availableUpdate = null;
+        availableUpdateVersion = null;
+        availableUpdateNotes = null;
+        showUpdateNotice = false;
+        updateCheckState = kind === "manual" ? "current" : "idle";
+        updateStatusMessage = kind === "manual" ? `Cassette ${appVersion} is up to date.` : null;
+        return;
+      }
+
+      availableUpdate = nextUpdate;
+      availableUpdateVersion = nextUpdate.version;
+      availableUpdateNotes = nextUpdate.body?.trim() || "No release notes were provided.";
+      updateCheckState = "available";
+      updateStatusMessage = `Cassette ${nextUpdate.version} is available.`;
+      showUpdateNotice = kind === "automatic";
+    } catch (error) {
+      if (kind === "automatic") {
+        updateCheckState = previousState;
+        updateStatusMessage = null;
+        console.warn("Automatic update check failed:", safeUpdateError(error));
+      } else {
+        updateCheckState = "error";
+        updateStatusIsError = true;
+        updateStatusMessage = `Could not check for updates: ${safeUpdateError(error)} You can try again or use GitHub Releases.`;
+      }
+    }
+  }
+
+  async function handleManualUpdateCheck() {
+    await runUpdateCheck("manual");
+  }
+
+  async function handleViewUpdateDownload() {
+    if (!availableUpdateVersion) {
+      return;
+    }
+
+    try {
+      await openUrl(updateReleaseUrl(availableUpdateVersion));
+    } catch (error) {
+      updateCheckState = "error";
+      updateStatusIsError = true;
+      updateStatusMessage = `Could not open the release page: ${safeUpdateError(error)}`;
+    }
+  }
+
+  async function handleInstallAppImageUpdate() {
+    if (updateIsBusy || !availableUpdate || !availableUpdateVersion || !updateRuntime?.canSelfInstall) {
+      return;
+    }
+
+    // Bind consent to the exact opaque native operation visible when the
+    // dialog opened. A later same-version check must require new consent.
+    const confirmedUpdate = availableUpdate;
+    const confirmedVersion = availableUpdateVersion;
+    let confirmed = false;
+    updateCheckState = "confirming";
+    try {
+      confirmed = await ask(
+        `Download the signed Cassette ${confirmedVersion} AppImage, replace this AppImage, and restart Cassette?`,
+        {
+          title: "Update Cassette",
+          kind: "info",
+          okLabel: "Update and restart",
+          cancelLabel: "Later",
+        },
+      );
+    } catch (error) {
+      updateCheckState = "error";
+      updateStatusIsError = true;
+      updateStatusMessage = `Could not open update confirmation: ${safeUpdateError(error)}`;
+      return;
+    }
+
+    if (!confirmed) {
+      updateCheckState = "available";
+      showUpdateNotice = false;
+      return;
+    }
+
+    updateCheckState = "downloading";
+    updateStatusIsError = false;
+    updateStatusMessage = "Downloading and verifying the signed update...";
+    updateDownloadProgress = { downloadedBytes: 0, totalBytes: null, percent: null, installing: false };
+
+    try {
+      await installAppImageUpdate(confirmedUpdate, (progress) => {
+        updateDownloadProgress = progress;
+        if (progress.installing) {
+          updateCheckState = "installing";
+          updateStatusMessage = "Installing the verified update and restarting Cassette...";
+        }
+      });
+    } catch (error) {
+      updateCheckState = "error";
+      updateStatusIsError = true;
+      updateStatusMessage = `Update failed: ${safeUpdateError(error)} Your library data is separate from the application. If installation completed but restart failed, reopen Cassette.`;
+      updateDownloadProgress = null;
+    }
+  }
+
+  function handleUpdateLater() {
+    showUpdateNotice = false;
+    updateStatusIsError = false;
+    updateStatusMessage = availableUpdateVersion
+      ? `Cassette ${availableUpdateVersion} remains available when you are ready.`
+      : null;
+  }
+
+  function handleReviewAvailableUpdate() {
+    showUpdateNotice = false;
+    activeView = "Settings";
+    requestAnimationFrame(() => {
+      document.getElementById("settings-updates-title")?.scrollIntoView({ block: "center", behavior: "smooth" });
+    });
+  }
+
+  function safeUpdateError(error: unknown) {
+    const raw = error instanceof Error ? error.message : String(error);
+    const normalized = raw.replace(/[\r\n]+/g, " ").trim();
+
+    if (/endpoint|pubkey|public key|configuration|plugin:updater|updater.*not found/i.test(normalized)) {
+      return "The signed update service is not configured yet.";
+    }
+
+    return normalized || "Unknown updater error.";
   }
 
   async function handleTestTrackNotification() {
@@ -4576,6 +4889,23 @@
       dateStyle: "medium",
       timeStyle: "short",
     }).format(new Date(timestampSeconds * 1000));
+  }
+
+  function formatByteCount(bytes: number) {
+    if (bytes < 1024) {
+      return `${bytes} B`;
+    }
+
+    const units = ["KB", "MB", "GB"];
+    let value = bytes / 1024;
+    let unitIndex = 0;
+
+    while (value >= 1024 && unitIndex < units.length - 1) {
+      value /= 1024;
+      unitIndex += 1;
+    }
+
+    return `${value.toFixed(value >= 10 ? 1 : 2)} ${units[unitIndex]}`;
   }
 
   function parseLrcLyrics(text: string): SyncedLyricLine[] {
@@ -8248,6 +8578,100 @@
               </div>
             </section>
 
+            <section class="settings-section updates-section" aria-labelledby="settings-updates-title">
+              <div class="settings-section-header">
+                <div>
+                  <p class="eyebrow">Updates</p>
+                  <h4 id="settings-updates-title">Linux beta channel</h4>
+                </div>
+                <span class="settings-pill">Version {appVersion}</span>
+              </div>
+
+              <div class="settings-control-list">
+                <label class="settings-toggle-row">
+                  <span>Automatic update checks</span>
+                  <input
+                    type="checkbox"
+                    checked={automaticUpdateChecksEnabled}
+                    onchange={handleAutomaticUpdateSettingChange}
+                  />
+                  <strong>{automaticUpdateChecksEnabled ? "On" : "Off"}</strong>
+                  <small>At most once every 24 hours. Available updates are never installed automatically.</small>
+                </label>
+                <div>
+                  <span>Installation type</span>
+                  <strong>{updatePackageLabel}</strong>
+                  <small>
+                    {updateRuntime?.canSelfInstall
+                      ? "This AppImage can install a verified update after you confirm."
+                      : "Cassette will open the release page and will not replace a system package."}
+                  </small>
+                </div>
+              </div>
+
+              <div class="settings-actions">
+                <button type="button" disabled={!updateRuntime || updateIsBusy} onclick={handleManualUpdateCheck}>
+                  {updateCheckState === "checking" ? "Checking..." : "Check for updates"}
+                </button>
+              </div>
+
+              {#if unavailableUpdateMessage(updateRuntime)}
+                <p class="settings-note">{unavailableUpdateMessage(updateRuntime)}</p>
+              {/if}
+
+              {#if lastSuccessfulUpdateCheck !== null}
+                <p class="settings-note">Last successful check: {formatDateTime(lastSuccessfulUpdateCheck / 1000)}</p>
+              {/if}
+
+              {#if availableUpdateVersion}
+                <article class="update-available-card">
+                  <div>
+                    <p class="eyebrow">Update available</p>
+                    <h5>Cassette {availableUpdateVersion}</h5>
+                  </div>
+                  <div class="update-release-notes">
+                    <strong>Release notes</strong>
+                    <p>{availableUpdateNotes}</p>
+                  </div>
+
+                  {#if updateCheckState === "downloading" || updateCheckState === "installing"}
+                    <div class="update-progress" aria-live="polite">
+                      {#if updateDownloadProgress?.percent !== null && updateDownloadProgress?.percent !== undefined}
+                        <progress max="100" value={updateDownloadProgress.percent}></progress>
+                      {:else}
+                        <progress></progress>
+                      {/if}
+                      <strong>{updateProgressLabel}</strong>
+                    </div>
+                  {:else}
+                    <div class="settings-actions">
+                      {#if updateRuntime?.canSelfInstall}
+                        <button class="primary" type="button" disabled={updateIsBusy} onclick={handleInstallAppImageUpdate}>
+                          Update and restart
+                        </button>
+                      {:else}
+                        <button class="primary" type="button" onclick={handleViewUpdateDownload}>
+                          View download
+                        </button>
+                      {/if}
+                      <button type="button" onclick={handleUpdateLater}>Later</button>
+                    </div>
+                  {/if}
+                </article>
+              {/if}
+
+              {#if updateStatusMessage}
+                <p class="form-message" class:error={updateStatusIsError} role={updateStatusIsError ? "alert" : "status"}>
+                  {updateStatusMessage}
+                </p>
+              {/if}
+
+              <p class="settings-note">
+                AppImage updates require a valid Tauri signature and explicit confirmation. DEB, RPM, and unknown
+                installations remain under your package manager's control. Updating does not replace Cassette's user data.
+              </p>
+            </section>
+
             <section class="settings-section about-section" aria-labelledby="settings-about-title">
               <div class="settings-section-header">
                 <div>
@@ -8278,6 +8702,17 @@
       {/if}
     </main>
   </div>
+
+  {#if showUpdateNotice && availableUpdateVersion}
+    <aside class="update-notice" aria-live="polite" aria-label="Cassette update available">
+      <div>
+        <strong>Cassette {availableUpdateVersion} is available</strong>
+        <span>{updateRuntime?.canSelfInstall ? "Signed AppImage update" : "Linux package download"}</span>
+      </div>
+      <button type="button" onclick={handleReviewAvailableUpdate}>Review</button>
+      <button type="button" onclick={handleUpdateLater}>Later</button>
+    </aside>
+  {/if}
 
   {#if isQueueOpen}
     <button class="queue-backdrop" type="button" aria-label="Close Up Next" onclick={() => isQueueOpen = false}></button>
@@ -12391,6 +12826,128 @@
     accent-color: var(--accent);
   }
 
+  .updates-section .settings-toggle-row small {
+    grid-column: 1 / -1;
+    margin-top: 0;
+  }
+
+  .update-available-card {
+    display: grid;
+    gap: 14px;
+    border: 1px solid var(--accent-strong);
+    border-radius: 8px;
+    background: var(--panel);
+    padding: 14px;
+  }
+
+  .update-available-card h5,
+  .update-release-notes p {
+    margin: 0;
+  }
+
+  .update-available-card h5 {
+    color: var(--text);
+    font-size: 1rem;
+  }
+
+  .update-release-notes {
+    display: grid;
+    gap: 6px;
+  }
+
+  .update-release-notes strong {
+    color: var(--text-muted);
+    font-size: 0.78rem;
+    text-transform: uppercase;
+  }
+
+  .update-release-notes p {
+    max-height: 180px;
+    overflow: auto;
+    color: var(--text-muted);
+    font-size: 0.86rem;
+    line-height: 1.5;
+    white-space: pre-wrap;
+  }
+
+  .update-progress {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .update-progress progress {
+    width: 100%;
+    accent-color: var(--accent);
+  }
+
+  .update-progress strong {
+    color: var(--text-muted);
+    font-size: 0.8rem;
+  }
+
+  .update-notice {
+    position: fixed;
+    right: 24px;
+    bottom: 108px;
+    z-index: 75;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    max-width: min(520px, calc(100vw - 48px));
+    border: 1px solid var(--accent-strong);
+    border-radius: 8px;
+    background: var(--panel-strong);
+    box-shadow: 0 14px 36px var(--shadow);
+    color: var(--text);
+    padding: 12px;
+  }
+
+  .update-notice > div {
+    display: grid;
+    min-width: 0;
+    gap: 3px;
+    margin-right: 6px;
+  }
+
+  .update-notice strong,
+  .update-notice span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .update-notice strong {
+    font-size: 0.88rem;
+  }
+
+  .update-notice span {
+    color: var(--text-soft);
+    font-size: 0.76rem;
+    font-weight: 720;
+  }
+
+  .update-notice button {
+    min-height: 34px;
+    border: 1px solid var(--border-strong);
+    border-radius: 7px;
+    background: var(--panel);
+    color: var(--text);
+    cursor: default;
+    font: inherit;
+    font-size: 0.78rem;
+    font-weight: 850;
+    padding: 0 10px;
+  }
+
+  .update-notice button:hover,
+  .update-notice button:focus-visible {
+    border-color: var(--accent-strong);
+    background: var(--panel-hover);
+    outline: none;
+  }
+
   .theme-preset-grid {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(164px, 1fr));
@@ -14317,6 +14874,22 @@
     .shortcut-row {
       grid-template-columns: 1fr;
       gap: 6px;
+    }
+
+    .update-notice {
+      right: 16px;
+      bottom: 150px;
+      left: 16px;
+      display: grid;
+      max-width: none;
+    }
+
+    .update-notice button {
+      width: 100%;
+    }
+
+    .update-progress {
+      grid-template-columns: 1fr;
     }
   }
 </style>

@@ -1,6 +1,6 @@
-# Cassette v0.1.0-beta.1 release checklist
+# Cassette v0.1.0-beta.1 Linux release checklist
 
-This checklist prepares a draft for the cross-platform beta. Publishing is always a separate manual decision. Linux x86_64 is the primary tested platform; Windows 10/11 x86_64 remains beta and requires the documented external GStreamer runtime.
+This checklist prepares a draft for the Linux-only beta.1 release. Publishing is always a separate manual decision. Release assets are DEB, RPM, AppImage, and the AppImage updater signature. Windows CI remains active, but Windows installer qualification and distribution move to a later beta.
 
 ## 1. Source, scope, and metadata
 
@@ -15,6 +15,7 @@ This checklist prepares a draft for the cross-platform beta. Publishing is alway
 - [ ] Accept the stock Tauri icons as a documented `v0.1.0-beta.1` limitation; replacement artwork is not a release blocker for this beta.
 - [ ] Check authors, description, homepage, repository, category, release notes, and bug-report link.
 - [ ] Confirm there are no signing identities, fake signatures, credentials, or secrets in source.
+- [ ] Confirm the genuine updater public key and only the beta Pages endpoint are configured in `src-tauri/tauri.conf.json`; do not create the release tag while the key checkpoint in [UPDATES.md](UPDATES.md) is incomplete.
 
 ## 2. License and dependency payload
 
@@ -33,6 +34,7 @@ Do not run the 13 ignored real-media fixture tests and do not install generated 
 
 - [ ] Run `npm run build`.
 - [ ] Run `npm run check`.
+- [ ] Run `npm run test:updater`.
 - [ ] Run `cargo test --manifest-path src-tauri/Cargo.toml`.
 - [ ] Run `cargo check --manifest-path src-tauri/Cargo.toml`.
 - [ ] Run `npm run tauri build -- --bundles deb,rpm`.
@@ -46,18 +48,28 @@ Checkpoint 1 does not validate or repair AppImage, CI, NSIS, or MSI packaging.
 
 Release builds and package audits use the portable wrappers documented in [ARTIFACT-SAFETY.md](ARTIFACT-SAFETY.md). Never upload a bundle that has not passed the scanner from an exact current-version path.
 
-## 4. Checkpoint 2 and clean-machine validation
+## 4. CI, signed updater, and clean-machine validation
 
 - [ ] Run the complete Linux CI job on Ubuntu 22.04.
-- [ ] Run the complete Windows CI job on pinned `windows-2022` with stable `x86_64-pc-windows-msvc`.
+- [ ] Run the complete Windows CI job on pinned `windows-2022` with stable `x86_64-pc-windows-msvc`; treat it as regression coverage, not beta.1 release qualification.
 - [ ] Confirm both jobs run `npm ci`, frontend build/check, Cargo test/check, and compile the Tauri application without running ignored real-media tests.
 - [ ] Verify AppImage generation and launch on a clean Linux installation. Do not call it portable before this succeeds.
-- [ ] Verify unsigned NSIS generation, install, launch, and uninstall on clean Windows 10 and Windows 11 x86_64 VMs.
+- [ ] Confirm the signed release build emits `Cassette_0.1.0-beta.1_amd64.AppImage.sig` and the draft contains only the exact three Linux packages plus that signature.
+- [ ] Verify AppImage update checking, deliberate trusted-frontend confirmation, opaque pending-operation replacement, AppImage filesystem-identity replacement rejection, download progress, signature rejection, install, relaunch, **Later**, and 24-hour automatic-check timing using the disposable end-to-end procedure in [UPDATES.md](UPDATES.md). Record the remaining final pathname race rather than claiming all local mutation races are eliminated.
+- [ ] Verify DEB/RPM/unknown package behavior is notification/download-only and never invokes the AppImage installer or system package manager.
 - [x] Exclude MSI from `0.1.0-beta.1`: WiX/MSI requires a numeric-only optional prerelease identifier, so it cannot represent the authoritative version faithfully.
-- [ ] Confirm the tag-only draft workflow creates the expected artifacts as a draft prerelease and never runs for ordinary pushes or pull requests.
+- [ ] Confirm the exact-tag draft workflow creates the expected Linux artifacts as a draft prerelease and never runs for ordinary pushes or pull requests.
+- [ ] Confirm a draft release cannot deploy the public update feed; only intentional publication of the exact prerelease triggers the Pages workflow.
 - [ ] Review workflow logs and packaging warnings.
 
-For local AppImage diagnostics, provision `patchelf` and the documented linuxdeploy support tools first, then run `npm run release:linux`. Do not use `NO_STRIP=1` as a substitute for missing packaging tools. Release decisions must use a normally built, scanned artifact from a clean supported host.
+`npm run release:linux` is DEB/RPM package validation only; ordinary CI does not produce AppImages. Only `npm run release:linux:signed` produces distributable AppImages, after the genuine public key/endpoint and signing credentials exist. The wrapper rejects missing configuration, unsigned AppImage arguments, and ambient configuration overrides before building. Provision `patchelf` and the documented linuxdeploy support tools; do not use `NO_STRIP=1` as a substitute. Release decisions require freshly built and scanned artifacts from a clean supported host.
+
+- [ ] Run `python3 scripts/test-signature-safety.py` and `npm run test:updater`.
+- [ ] Verify the exact AppImage/signature pair with `node scripts/verify-update.mjs APPIMAGE SIGNATURE 0.1.0-beta.1`; a nonempty signature alone is insufficient. Confirm feed generation verifies a private snapshot of both files and serializes the signature from that same snapshot.
+- [ ] Verify native detection on the actual AppImage mount, including Tauri's embedded bundle type; extracted/unknown runtimes must remain download-only.
+- [ ] Verify a failed automatic check remains rate-limited across restart; manual checks must remain available.
+- [ ] Confirm there is no cancellation control promised after update confirmation.
+- [ ] Before beta.2 or key rotation, follow the deliberate transition procedures in [UPDATES.md](UPDATES.md).
 
 ## 5. Linux functional and uninstall tests
 
@@ -75,9 +87,9 @@ Use disposable library data and media for release testing.
 
 Document the user-facing uninstall commands as `sudo dnf remove cassette` for RPM and `sudo apt remove cassette` for DEB. Explain that users may manually remove the application-data directory after backing it up.
 
-## 6. Clean Windows 10/11 VM tests
+## 6. Deferred Windows 10/11 checkpoint (later beta)
 
-Perform all checks on clean x86_64 VMs, not only on a CI runner. Follow [GSTREAMER-WINDOWS.md](GSTREAMER-WINDOWS.md).
+Do not block the Linux beta.1 on this section. Perform these checks on clean x86_64 VMs before a later Windows beta, not only on a CI runner. Follow [GSTREAMER-WINDOWS.md](GSTREAMER-WINDOWS.md).
 
 - [ ] Verify the documented missing-GStreamer behavior before installing GStreamer.
 - [ ] Install the official GStreamer 1.26.11 MSVC x86_64 runtime and make its `bin` directory available in `PATH`.
@@ -104,7 +116,7 @@ Inspect source, built frontend, Linux bundles, Windows installers, and extracted
 - [ ] Verify GStreamer development files are not in Windows installers.
 - [ ] Record checksums for every release asset after downloading it from the draft.
 
-## 8. Create and review the draft
+## 8. Create and review the Linux draft
 
 Run these steps only after both checkpoints and clean-machine tests pass. Tagging, pushing, and publishing are explicitly outside checkpoint 1.
 
@@ -112,11 +124,12 @@ Run these steps only after both checkpoints and clean-machine tests pass. Taggin
 - [ ] Push only the reviewed tag: `git push origin v0.1.0-beta.1`.
 - [ ] Wait for `.github/workflows/release.yml` to finish.
 - [ ] Confirm there is exactly one draft GitHub Release.
-- [ ] Confirm the draft contains only formats that actually passed validation; do not claim AppImage or Windows artifacts passed merely because they were configured.
+- [ ] Confirm the draft contains exactly the DEB, RPM, AppImage, and `.AppImage.sig` for `0.1.0-beta.1`; NSIS and MSI must be absent.
 - [ ] Download every draft installer rather than testing only runner outputs.
-- [ ] Repeat install, launch, playback, FLAC edit, and uninstall smoke tests with downloaded files.
+- [ ] Repeat install, launch, playback, FLAC edit, updater, data-retention, and uninstall smoke tests with downloaded files.
 - [ ] Review beta warning, platform limitations, dependency requirements, stock-icon status, unsigned-package warnings, license, third-party notices, and checksums.
-- [ ] Manually publish only after every blocker is closed.
+- [ ] Configure repository **Pages → Build and deployment → Source: GitHub Actions** and verify the Pages deployment workflow is present on the default branch.
+- [ ] Manually publish only after every blocker is closed. Publication triggers feed generation; verify `updates/beta/latest.json` contains the exact published version, immutable AppImage URL, signature, notes, and publication time.
 
 ## 9. Remove a bad draft/tag without rewriting main
 

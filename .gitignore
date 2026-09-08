@@ -8,3 +8,13 @@ node_modules
 !.env.example
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
+
+# Local updater signing material. Production keys belong outside the repository;
+# these exact names are ignored as a final guard against an accidental local copy.
+/.cassette-signing/
+/cassette-updater.key
+/cassette-updater.key.pub
+/src-tauri/cassette-updater.key
+/src-tauri/cassette-updater.key.pub
+/scripts/update-verifier/target/
+/scripts/__pycache__/

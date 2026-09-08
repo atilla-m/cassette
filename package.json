@@ -18,15 +18,19 @@
     "preview": "vite preview",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
-    "release:linux": "node scripts/build-release.mjs --bundles appimage,deb,rpm",
+    "test:updater": "node --test --experimental-test-isolation=none scripts/test-update-policy.mjs scripts/test-release-policy.mjs",
+    "release:linux": "node scripts/build-release.mjs --bundles deb,rpm",
+    "release:linux:signed": "node scripts/build-release.mjs --features signed-updater --bundles appimage,deb,rpm --config src-tauri/tauri.updater.conf.json --ci",
     "release:windows": "node scripts/build-release.mjs --target x86_64-pc-windows-msvc --bundles nsis",
-    "tauri": "tauri"
+    "tauri": "node scripts/tauri.mjs"
   },
   "license": "GPL-3.0-or-later",
   "dependencies": {
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-dialog": "^2.7.1",
-    "@tauri-apps/plugin-opener": "^2"
+    "@tauri-apps/plugin-opener": "^2",
+    "@tauri-apps/plugin-process": "^2.3.1",
+    "@tauri-apps/plugin-updater": "^2.11.0"
   },
   "devDependencies": {
     "@sveltejs/adapter-static": "^3.0.6",

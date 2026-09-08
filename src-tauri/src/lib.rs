@@ -28,6 +28,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 mod mpris;
+mod updates;
 
 use mpris::{MprisState, MprisTrack};
 
@@ -8530,6 +8531,7 @@ mod platform_path_tests {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_process::init())
         .manage(Mutex::new(PlaybackState::default()))
         .manage(Mutex::new(VideoPlaybackState::default()))
         .manage(Mutex::new(TagWriteState::default()))
@@ -8547,6 +8549,8 @@ pub fn run() {
             app.manage(Mutex::new(library));
             app.manage(mpris);
 
+            updates::initialize(app.handle());
+
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -8558,6 +8562,9 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             get_platform_capabilities,
+            updates::get_update_runtime_info,
+            updates::check_cassette_update,
+            updates::install_cassette_update,
             get_library_cache,
             send_linux_notification,
             get_video_library,

@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "linux-updater",
+  "description": "Linux-only permissions for signed update checks and explicit AppImage replacement",
+  "platforms": ["linux"],
+  "windows": ["main"],
+  "permissions": [
+    "process:allow-restart"
+  ]
+}

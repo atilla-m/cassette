@@ -1,10 +1,10 @@
 # Windows GStreamer strategy
 
-## Decision for Cassette 0.1.0-beta.1
+## Decision after Cassette 0.1.0-beta.1
 
-Linux is the primary tested platform for `v0.1.0-beta.1`. Windows 10/11 x86_64 support is beta, the planned installers are unsigned and not self-contained, and checkpoint 2 must still verify that they build and work on clean machines. Users must install the official GStreamer 1.26.11 MSVC x86_64 runtime and make its `bin` directory available through `PATH`.
+`v0.1.0-beta.1` is Linux-only. Windows 10/11 x86_64 build coverage remains in CI, but installer qualification and distribution are deferred to a later beta. The planned installers are unsigned and not self-contained, and the Windows checkpoint must still verify that they work on clean machines. Users of a future Windows beta will need the official GStreamer 1.26.11 MSVC x86_64 runtime with its `bin` directory available through `PATH` unless the distribution strategy changes first.
 
-The CI and release builders install both official packages:
+The Windows CI builder installs both official packages:
 
 - `gstreamer-1.0-msvc-x86_64-1.26.11.msi`
 - `gstreamer-1.0-devel-msvc-x86_64-1.26.11.msi`

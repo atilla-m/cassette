@@ -24,6 +24,7 @@ import tarfile
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
+from update_signature import validate_signature
 
 
 EXPECTED_VERSION = "0.1.0-beta.1"
@@ -256,6 +257,8 @@ def detect_kind(path: Path) -> str:
     lower_name = path.name.lower()
     if path.is_dir():
         return "appdir" if lower_name.endswith(".appdir") else "directory"
+    if lower_name.endswith(".sig"):
+        return "signature"
     if lower_name.endswith(".appimage"):
         return "appimage"
     if lower_name.endswith(".deb"):
@@ -653,7 +656,10 @@ def audit_artifact(audit: Audit, path: Path, temporary_root: Path) -> None:
     destination.mkdir()
 
     try:
-        if kind == "deb":
+        if kind == "signature":
+            validate_signature(path, audit.expected_version)
+            audit.scanned_files += 1
+        elif kind == "deb":
             root, control = extract_deb(path, destination)
             verify_deb(audit, path, root, control)
             scan_tree(audit, root, label)
@@ -739,7 +745,9 @@ def main() -> int:
         temporary_root = Path(temporary)
         for artifact in args.artifact:
             artifact_path = artifact if artifact.is_absolute() else workspace / artifact
-            audit_artifact(audit, artifact_path.resolve(), temporary_root)
+            # Preserve the signature's original filename and symlink identity.
+            audit_path = artifact_path.absolute() if artifact_path.suffix.lower() == ".sig" else artifact_path.resolve()
+            audit_artifact(audit, audit_path, temporary_root)
 
     for warning in sorted(audit.warnings):
         print(f"WARNING: {warning}")

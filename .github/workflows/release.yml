@@ -1,9 +1,9 @@
-name: Draft prerelease
+name: Draft Linux prerelease
 
 on:
   push:
     tags:
-      - "v*"
+      - "v0.1.0-beta.1"
 
 permissions:
   contents: read
@@ -11,10 +11,11 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RELEASE_VERSION: 0.1.0-beta.1
+  UPDATE_FEED_URL: https://atilla-m.github.io/cassette/updates/beta/latest.json
 
 jobs:
   preflight:
-    name: Validate tagged release commit
+    name: Validate tagged Linux release commit
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -25,7 +26,7 @@ jobs:
         with:
           node-version: 22
 
-      - name: Verify tag, commit, version, and license metadata
+      - name: Verify tag, commit, version, license, and updater metadata
         shell: bash
         run: |
           set -euo pipefail
@@ -43,24 +44,38 @@ jobs:
           test "$(node -p "require('./package.json').license")" = "GPL-3.0-or-later"
           test "$(node -p "require('./src-tauri/tauri.conf.json').bundle.license")" = "GPL-3.0-or-later"
 
-  build:
-    name: Build ${{ matrix.name }}
+          node <<'NODE'
+          const config = require('./src-tauri/tauri.conf.json');
+          const updater = config.plugins?.updater;
+          const expectedEndpoint = process.env.UPDATE_FEED_URL;
+          if (!updater || typeof updater.pubkey !== 'string' || updater.pubkey.trim().length < 32) {
+            throw new Error('A real updater public key must be committed before creating the release tag.');
+          }
+          if (/placeholder|replace|todo|example/i.test(updater.pubkey)) {
+            throw new Error('The updater public key looks like a placeholder.');
+          }
+          if (!Array.isArray(updater.endpoints) || updater.endpoints.length !== 1 || updater.endpoints[0] !== expectedEndpoint) {
+            throw new Error(`Updater endpoints must contain only ${expectedEndpoint}.`);
+          }
+          if (updater.dangerousInsecureTransportProtocol || updater.dangerousAcceptInvalidCerts || updater.dangerousAcceptInvalidHostnames) {
+            throw new Error('Dangerous updater transport options must remain disabled.');
+          }
+
+          const updaterBuild = require('./src-tauri/tauri.updater.conf.json');
+          if (updaterBuild.bundle?.createUpdaterArtifacts !== true) {
+            throw new Error('The signed release overlay must enable createUpdaterArtifacts.');
+          }
+          const signedScript = require('./package.json').scripts?.['release:linux:signed'] || '';
+          if (!signedScript.includes('--features signed-updater') || !signedScript.includes('tauri.updater.conf.json')) {
+            throw new Error('The signed Linux build must enable the updater plugin and signed artifact overlay.');
+          }
+          NODE
+          node --input-type=module -e "import { validateUpdaterConfiguration, readReleaseConfiguration } from './scripts/release-policy.mjs'; validateUpdaterConfiguration(readReleaseConfiguration('.'));"
+
+  build-linux:
+    name: Build signed Linux x86_64 artifacts
     needs: preflight
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: Linux x86_64
-            platform: linux
-            os: ubuntu-22.04
-            rust_target: x86_64-unknown-linux-gnu
-            artifact_name: cassette-0.1.0-beta.1-linux-x86_64
-          - name: Windows x86_64
-            platform: windows
-            os: windows-2022
-            rust_target: x86_64-pc-windows-msvc
-            artifact_name: cassette-0.1.0-beta.1-windows-x86_64
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-22.04
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
@@ -74,19 +89,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Use non-personal Rust tool directories
-        if: matrix.platform == 'windows'
-        shell: pwsh
-        run: |
-          $toolRoot = Join-Path $env:SystemDrive "cassette-build-tools"
-          $cargoHome = Join-Path $toolRoot "cargo"
-          $rustupHome = Join-Path $toolRoot "rustup"
-          New-Item -ItemType Directory -Force -Path $cargoHome, $rustupHome | Out-Null
-          "CARGO_HOME=$cargoHome" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "RUSTUP_HOME=$rustupHome" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.rust_target }}
+          targets: x86_64-unknown-linux-gnu
           components: rustfmt
 
       - name: Confirm build uses tagged commit
@@ -94,7 +99,6 @@ jobs:
         run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
 
       - name: Refresh apt metadata and install libunwind
-        if: matrix.platform == 'linux'
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
@@ -103,7 +107,6 @@ jobs:
           sudo apt-get install -y --no-install-recommends libunwind-dev
 
       - name: Install Linux build and packaging dependencies
-        if: matrix.platform == 'linux'
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
@@ -135,39 +138,29 @@ jobs:
             gstreamer1.0-plugins-ugly
           patchelf --version
 
-      - name: Install and discover official GStreamer MSVC x86_64 packages
-        if: matrix.platform == 'windows'
-        shell: pwsh
-        run: ./scripts/install-gstreamer-windows.ps1
-
       - run: npm ci
       - run: npm run build
       - run: npm run check
+      - run: npm run test:updater
+      - run: python3 scripts/test-signature-safety.py
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+      - run: cargo test --manifest-path src-tauri/Cargo.toml
+      - run: cargo check --manifest-path src-tauri/Cargo.toml
 
-      - name: Cargo test (Linux)
-        if: matrix.platform == 'linux'
-        run: cargo test --manifest-path src-tauri/Cargo.toml
-
-      - name: Cargo check (Linux)
-        if: matrix.platform == 'linux'
-        run: cargo check --manifest-path src-tauri/Cargo.toml
-
-      - name: Cargo test (Windows x86_64)
-        if: matrix.platform == 'windows'
-        run: cargo test --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc
-
-      - name: Cargo check (Windows x86_64)
-        if: matrix.platform == 'windows'
-        run: cargo check --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc
-
-      - name: Build Linux release bundles
-        if: matrix.platform == 'linux'
-        run: npm run release:linux
-
-      - name: Verify Linux release artifacts
-        if: matrix.platform == 'linux'
+      - name: Build signed Linux release bundles
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        shell: bash
         run: |
+          set -euo pipefail
+          test -n "${TAURI_SIGNING_PRIVATE_KEY:-}"
+          npm run release:linux:signed
+
+      - name: Verify Linux release artifacts and updater signature
+        shell: bash
+        run: |
+          set -euo pipefail
           python scripts/audit-release-artifacts.py \
             --workspace . \
             --version "$RELEASE_VERSION" \
@@ -176,59 +169,34 @@ jobs:
             --artifact src-tauri/target/release/cassette \
             --artifact src-tauri/target/release/bundle/deb/Cassette_0.1.0-beta.1_amd64.deb \
             --artifact src-tauri/target/release/bundle/rpm/Cassette-0.1.0-beta.1-1.x86_64.rpm \
-            --artifact src-tauri/target/release/bundle/appimage/Cassette_0.1.0-beta.1_amd64.AppImage
-
-      - name: Build NSIS release bundle
-        if: matrix.platform == 'windows'
-        run: npm run release:windows
-
-      - name: Verify Windows release artifacts
-        if: matrix.platform == 'windows'
-        shell: pwsh
-        run: |
-          python scripts/audit-release-artifacts.py `
-            --workspace . `
-            --version $env:RELEASE_VERSION `
-            --license LICENSE `
-            --frontend build `
-            --artifact src-tauri/target/x86_64-pc-windows-msvc/release/cassette.exe `
-            --artifact src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/Cassette_0.1.0-beta.1_x64-setup.exe
+            --artifact src-tauri/target/release/bundle/appimage/Cassette_0.1.0-beta.1_amd64.AppImage \
+            --artifact src-tauri/target/release/bundle/appimage/Cassette_0.1.0-beta.1_amd64.AppImage.sig
+          node scripts/verify-update.mjs \
+            src-tauri/target/release/bundle/appimage/Cassette_0.1.0-beta.1_amd64.AppImage \
+            src-tauri/target/release/bundle/appimage/Cassette_0.1.0-beta.1_amd64.AppImage.sig "$RELEASE_VERSION"
 
       - name: Upload exact Linux workflow artifacts
-        if: matrix.platform == 'linux'
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact_name }}
+          name: cassette-0.1.0-beta.1-linux-x86_64-signed
           if-no-files-found: error
           path: |
             src-tauri/target/release/bundle/deb/Cassette_0.1.0-beta.1_amd64.deb
             src-tauri/target/release/bundle/rpm/Cassette-0.1.0-beta.1-1.x86_64.rpm
             src-tauri/target/release/bundle/appimage/Cassette_0.1.0-beta.1_amd64.AppImage
-
-      - name: Upload exact Windows workflow artifacts
-        if: matrix.platform == 'windows'
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.artifact_name }}
-          if-no-files-found: error
-          path: |
-            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/Cassette_0.1.0-beta.1_x64-setup.exe
+            src-tauri/target/release/bundle/appimage/Cassette_0.1.0-beta.1_amd64.AppImage.sig
 
   draft-release:
-    name: Create one draft prerelease
-    needs: [preflight, build]
+    name: Create Linux-only draft prerelease
+    needs: [preflight, build-linux]
     runs-on: ubuntu-22.04
     permissions:
       contents: write
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: cassette-0.1.0-beta.1-linux-x86_64
+          name: cassette-0.1.0-beta.1-linux-x86_64-signed
           path: release-assets/linux
-      - uses: actions/download-artifact@v4
-        with:
-          name: cassette-0.1.0-beta.1-windows-x86_64
-          path: release-assets/windows
 
       - name: Verify exact selected assets
         shell: bash
@@ -237,15 +205,15 @@ jobs:
           test -f release-assets/linux/Cassette_0.1.0-beta.1_amd64.deb
           test -f release-assets/linux/Cassette-0.1.0-beta.1-1.x86_64.rpm
           test -f release-assets/linux/Cassette_0.1.0-beta.1_amd64.AppImage
-          test -f release-assets/windows/Cassette_0.1.0-beta.1_x64-setup.exe
+          test -s release-assets/linux/Cassette_0.1.0-beta.1_amd64.AppImage.sig
           test "$(find release-assets -type f | wc -l)" -eq 4
           sha256sum \
             release-assets/linux/Cassette_0.1.0-beta.1_amd64.deb \
             release-assets/linux/Cassette-0.1.0-beta.1-1.x86_64.rpm \
             release-assets/linux/Cassette_0.1.0-beta.1_amd64.AppImage \
-            release-assets/windows/Cassette_0.1.0-beta.1_x64-setup.exe
+            release-assets/linux/Cassette_0.1.0-beta.1_amd64.AppImage.sig
 
-      - name: Create draft prerelease and upload exact assets
+      - name: Create draft prerelease and upload exact Linux assets
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -263,7 +231,7 @@ jobs:
 
             while IFS= read -r asset; do
               case "$asset" in
-                Cassette_0.1.0-beta.1_amd64.deb|Cassette-0.1.0-beta.1-1.x86_64.rpm|Cassette_0.1.0-beta.1_amd64.AppImage|Cassette_0.1.0-beta.1_x64-setup.exe) ;;
+                Cassette_0.1.0-beta.1_amd64.deb|Cassette-0.1.0-beta.1-1.x86_64.rpm|Cassette_0.1.0-beta.1_amd64.AppImage|Cassette_0.1.0-beta.1_amd64.AppImage.sig) ;;
                 *) echo "Refusing to reuse draft with unexpected asset: $asset" >&2; exit 1 ;;
               esac
             done < <(gh api "repos/${GH_REPO}/releases/tags/${tag}" --jq '.assets[].name')
@@ -273,20 +241,20 @@ jobs:
               --prerelease \
               --verify-tag \
               --title "Cassette ${tag#v}" \
-              --notes "Draft prerelease. Complete docs/RELEASING.md before publishing."
+              --notes "Draft Linux prerelease. Complete docs/RELEASING.md before publishing."
           fi
 
           gh release upload "$tag" \
             release-assets/linux/Cassette_0.1.0-beta.1_amd64.deb \
             release-assets/linux/Cassette-0.1.0-beta.1-1.x86_64.rpm \
             release-assets/linux/Cassette_0.1.0-beta.1_amd64.AppImage \
-            release-assets/windows/Cassette_0.1.0-beta.1_x64-setup.exe \
+            release-assets/linux/Cassette_0.1.0-beta.1_amd64.AppImage.sig \
             --clobber
 
           actual_assets="$(gh api "repos/${GH_REPO}/releases/tags/${tag}" --jq '.assets[].name' | sort)"
           expected_assets="$(printf '%s\n' \
             Cassette-0.1.0-beta.1-1.x86_64.rpm \
             Cassette_0.1.0-beta.1_amd64.AppImage \
-            Cassette_0.1.0-beta.1_amd64.deb \
-            Cassette_0.1.0-beta.1_x64-setup.exe | sort)"
+            Cassette_0.1.0-beta.1_amd64.AppImage.sig \
+            Cassette_0.1.0-beta.1_amd64.deb | sort)"
           test "$actual_assets" = "$expected_assets"

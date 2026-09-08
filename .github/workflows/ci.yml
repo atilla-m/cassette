@@ -72,6 +72,8 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm run check
+      - run: npm run test:updater
+      - run: python3 scripts/test-signature-safety.py
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
       - run: cargo test --manifest-path src-tauri/Cargo.toml
       - run: cargo check --manifest-path src-tauri/Cargo.toml
@@ -88,18 +90,16 @@ jobs:
             --frontend build \
             --artifact src-tauri/target/release/cassette \
             --artifact src-tauri/target/release/bundle/deb/Cassette_0.1.0-beta.1_amd64.deb \
-            --artifact src-tauri/target/release/bundle/rpm/Cassette-0.1.0-beta.1-1.x86_64.rpm \
-            --artifact src-tauri/target/release/bundle/appimage/Cassette_0.1.0-beta.1_amd64.AppImage
+            --artifact src-tauri/target/release/bundle/rpm/Cassette-0.1.0-beta.1-1.x86_64.rpm
 
       - name: Upload exact Linux CI artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: cassette-0.1.0-beta.1-linux-x86_64
+          name: cassette-0.1.0-beta.1-linux-package-validation
           if-no-files-found: error
           path: |
             src-tauri/target/release/bundle/deb/Cassette_0.1.0-beta.1_amd64.deb
             src-tauri/target/release/bundle/rpm/Cassette-0.1.0-beta.1-1.x86_64.rpm
-            src-tauri/target/release/bundle/appimage/Cassette_0.1.0-beta.1_amd64.AppImage
 
   windows:
     name: Windows x86_64 (Windows Server 2022)
@@ -162,6 +162,7 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm run check
+      - run: npm run test:updater
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
       - run: cargo test --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc
       - run: cargo check --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc

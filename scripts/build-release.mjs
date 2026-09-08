@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
+import { readReleaseConfiguration, validateReleaseArguments } from "./release-policy.mjs";
 
 const UNIT_SEPARATOR = "\u001f";
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
@@ -17,6 +18,12 @@ if (packageInfo.version !== expectedVersion) {
 }
 
 const forwardedArguments = process.argv.slice(2);
+validateReleaseArguments(
+  forwardedArguments,
+  readReleaseConfiguration(workspace),
+  JSON.parse(readFileSync(join(workspace, "src-tauri/tauri.updater.conf.json"), "utf8")),
+  process.env,
+);
 if (!forwardedArguments.includes("--bundles")) {
   throw new Error("A release build must specify an exact --bundles list.");
 }

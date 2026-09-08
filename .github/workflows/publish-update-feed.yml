@@ -1,0 +1,126 @@
+name: Publish beta update feed
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cassette-beta-update-feed
+  cancel-in-progress: false
+
+env:
+  RELEASE_VERSION: 0.1.0-beta.1
+
+jobs:
+  build-feed:
+    name: Validate published prerelease and build feed
+    if: github.event.release.prerelease == true && github.event.release.tag_name == 'v0.1.0-beta.1'
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Validate the published release and exact asset set
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RELEASE_TAG" = "v$RELEASE_VERSION"
+          test "$(git describe --tags --exact-match HEAD)" = "$RELEASE_TAG"
+          test "$(node -p "require('./package.json').version")" = "$RELEASE_VERSION"
+
+          is_draft="$(gh api "repos/${GH_REPO}/releases/tags/${RELEASE_TAG}" --jq '.draft')"
+          is_prerelease="$(gh api "repos/${GH_REPO}/releases/tags/${RELEASE_TAG}" --jq '.prerelease')"
+          published_at="$(gh api "repos/${GH_REPO}/releases/tags/${RELEASE_TAG}" --jq '.published_at')"
+          test "$is_draft" = "false"
+          test "$is_prerelease" = "true"
+          test -n "$published_at"
+
+          actual_assets="$(gh api "repos/${GH_REPO}/releases/tags/${RELEASE_TAG}" --jq '.assets[].name' | sort)"
+          expected_assets="$(printf '%s\n' \
+            Cassette-0.1.0-beta.1-1.x86_64.rpm \
+            Cassette_0.1.0-beta.1_amd64.AppImage \
+            Cassette_0.1.0-beta.1_amd64.AppImage.sig \
+            Cassette_0.1.0-beta.1_amd64.deb | sort)"
+          test "$actual_assets" = "$expected_assets"
+
+      - name: Download the exact AppImage/signature pair and capture release metadata
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          gh release download "$RELEASE_TAG" \
+            --pattern "Cassette_0.1.0-beta.1_amd64.AppImage.sig" \
+            --dir release-assets
+          gh release download "$RELEASE_TAG" \
+            --pattern "Cassette_0.1.0-beta.1_amd64.AppImage" \
+            --dir release-assets
+          test -s release-assets/Cassette_0.1.0-beta.1_amd64.AppImage.sig
+          gh api "repos/${GH_REPO}/releases/tags/${RELEASE_TAG}" --jq '.body' > release-notes.md
+          test -s release-notes.md
+
+      - name: Generate the static beta-channel feed
+        env:
+          APPIMAGE_SIGNATURE_FILE: release-assets/Cassette_0.1.0-beta.1_amd64.AppImage.sig
+          APPIMAGE_FILE: release-assets/Cassette_0.1.0-beta.1_amd64.AppImage
+          OUTPUT_DIR: pages-site
+          RELEASE_NOTES_FILE: release-notes.md
+          RELEASE_PUBLISHED_AT: ${{ github.event.release.published_at }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: node scripts/generate-update-feed.mjs
+
+      - name: Validate exact feed payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(find pages-site -type f | wc -l)" -eq 2
+          node <<'NODE'
+          const feed = require('./pages-site/updates/beta/latest.json');
+          if (feed.version !== process.env.RELEASE_VERSION) throw new Error('Feed version mismatch.');
+          if (!feed.notes?.trim() || !feed.pub_date) throw new Error('Feed release metadata is incomplete.');
+          const linux = feed.platforms?.['linux-x86_64'];
+          if (!linux?.signature?.trim()) throw new Error('Feed signature is missing.');
+          const expected = `https://github.com/atilla-m/cassette/releases/download/v${process.env.RELEASE_VERSION}/Cassette_${process.env.RELEASE_VERSION}_amd64.AppImage`;
+          if (linux.url !== expected) throw new Error('Feed AppImage URL mismatch.');
+          NODE
+          python3 scripts/audit-release-artifacts.py --workspace . --version "$RELEASE_VERSION" --frontend pages-site
+
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: pages-site
+
+  deploy-feed:
+    name: Deploy published beta feed to GitHub Pages
+    needs: build-feed
+    runs-on: ubuntu-22.04
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Configure GitHub Pages deployment
+        uses: actions/configure-pages@v5
+      - name: Deploy beta feed
+        id: deployment
+        uses: actions/deploy-pages@v4
