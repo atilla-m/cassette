@@ -1,0 +1,38 @@
+/*
+ * Keep Cassette readable if the page component stylesheet is briefly replaced
+ * during Vite/Svelte hot reload. The complete theme definitions live in
+ * src/routes/+page.svelte and override these baseline values when loaded.
+ */
+:root {
+  color-scheme: dark;
+  --bg: #0d0f13;
+  --bg-soft: #111317;
+  --panel: #12161c;
+  --panel-soft: #151a21;
+  --panel-strong: #1a2028;
+  --panel-hover: #1b2027;
+  --border: #242b35;
+  --border-strong: #303844;
+  --text: #f4f7fb;
+  --text-muted: #b9c3cf;
+  --text-soft: #8f9aa8;
+  --text-dim: #626c79;
+  --accent: #2f8f83;
+  --accent-soft: #17332f;
+  --accent-strong: #35544f;
+  --accent-text: #d8fffa;
+  --accent-contrast: #07110f;
+  --danger: #ffcbc8;
+  --danger-soft: #2a1718;
+  --warning: #f0c85a;
+  --shadow: rgba(0, 0, 0, 0.22);
+  --focus-ring: rgba(47, 143, 131, 0.55);
+  --range-empty: #2a313c;
+  background: var(--bg);
+  color: var(--text);
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+}
