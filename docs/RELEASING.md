@@ -15,7 +15,7 @@ This checklist prepares a draft for the Linux-only beta.1 release. Publishing is
 - [ ] Accept the stock Tauri icons as a documented `v0.1.0-beta.1` limitation; replacement artwork is not a release blocker for this beta.
 - [ ] Check authors, description, homepage, repository, category, release notes, and bug-report link.
 - [ ] Confirm there are no signing identities, fake signatures, credentials, or secrets in source.
-- [ ] Confirm the genuine updater public key and only the beta Pages endpoint are configured in `src-tauri/tauri.conf.json`; do not create the release tag while the key checkpoint in [UPDATES.md](UPDATES.md) is incomplete.
+- [x] Confirm the genuine updater public key and only the beta Pages endpoint are configured in `src-tauri/tauri.conf.json`; do not create the release tag while the remaining key checkpoint work in [UPDATES.md](UPDATES.md) is incomplete.
 
 ## 2. License and dependency payload
 

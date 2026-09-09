@@ -2,7 +2,7 @@
 
 ## Current status
 
-Checkpoint 3A prepares the Linux updater, signed-build path, and beta feed. Automatic updating is **not yet release-qualified**. A maintainer must generate and protect the real production keypair, commit only the public key, configure GitHub Actions secrets and Pages, and pass the end-to-end test described below before advertising automatic updates.
+Checkpoint 3B public identity is configured with the production public key and the beta Pages address. Automatic updating is **not yet release-qualified**: the address is configured but has not been verified live. A maintainer must review and commit the public configuration, configure GitHub Actions secrets and Pages, and pass the signed-build and end-to-end tests described below before advertising automatic updates.
 
 Tauri updater signatures are mandatory. Cassette must never publish an unsigned updater payload, disable signature verification, or substitute a placeholder public key.
 
@@ -38,13 +38,15 @@ The command creates:
 
 Store at least two encrypted, offline backups of the private key in separate trusted locations. Store the password separately from those backups. Losing the private key prevents existing Cassette installations from accepting future updates; compromise requires revoking the feed and moving users to a manually installed trust root.
 
-Add the private key content to the GitHub Actions secret `TAURI_SIGNING_PRIVATE_KEY`. If the key is password-protected, add the password as `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`; otherwise that second secret may be empty. The release workflow scopes both values only to the signed build step and never prints them.
+Add the complete private-key **file contents**, not its path, to the GitHub Actions secret `TAURI_SIGNING_PRIVATE_KEY`. If the key is password-protected, add the password string as `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`; otherwise omit that second secret or leave it empty. The release workflow scopes both values only to the signed build step and never prints them.
 
 ## Public configuration checkpoint
 
-After generating the real key, edit `src-tauri/tauri.conf.json` and add the Tauri updater plugin configuration. Set `pubkey` to the exact contents of `cassette-updater.key.pub` and configure one endpoint only:
+`src-tauri/tauri.conf.json` contains the exact contents of `cassette-updater.key.pub` and configures one endpoint only:
 
 `https://atilla-m.github.io/cassette/updates/beta/latest.json`
+
+The configured public-key source file has SHA-256 `a99b821c856fb4db7b3d1dfa70df38a77835d199ce4c34aa065e157e31430513` (Minisign key ID `DFF061EB2AC19D0B`). The publication workflow builds `pages-site/updates/beta/latest.json` and uploads `pages-site` as the GitHub Pages artifact root, so that file maps to the configured project-site URL above. This records the intended address; it does not claim that Pages or the endpoint is live.
 
 Do not point beta installations at GitHub's generic `/releases/latest` endpoint because prereleases may be excluded. Do not use a mutable release tag in an artifact URL. The tag-only release preflight rejects a missing or placeholder-like public key and rejects any other endpoint list.
 
