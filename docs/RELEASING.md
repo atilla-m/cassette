@@ -1,18 +1,18 @@
-# Cassette v0.1.0-beta.1 Linux release checklist
+# Cassette v0.1.0-beta.2 Linux release checklist
 
-This checklist prepares a draft for the Linux-only beta.1 release. Publishing is always a separate manual decision. Release assets are DEB, RPM, AppImage, and the AppImage updater signature. Windows CI remains active, but Windows installer qualification and distribution move to a later beta.
+This checklist prepares a draft for the Linux-only beta.2 release. Publishing is always a separate manual decision. Release assets are DEB, RPM, AppImage, and the AppImage updater signature. Windows CI remains active, but Windows installer qualification and distribution move to a later beta.
 
 ## 1. Source, scope, and metadata
 
 - [ ] Confirm the release branch was created from the intended source commit and every change has been reviewed.
-- [ ] Verify `package.json`, `package-lock.json`, `src-tauri/Cargo.toml`, `src-tauri/Cargo.lock`, and `src-tauri/tauri.conf.json` all resolve to `0.1.0-beta.1`.
-- [ ] Verify generated About/package metadata and runtime User-Agent strings report `0.1.0-beta.1`.
+- [ ] Verify `package.json`, `package-lock.json`, `src-tauri/Cargo.toml`, `src-tauri/Cargo.lock`, and `src-tauri/tauri.conf.json` all resolve to `0.1.0-beta.2`.
+- [ ] Verify generated About/package metadata and runtime User-Agent strings report `0.1.0-beta.2`.
 - [ ] Verify product name `Cassette`, executable `cassette`, bundle identifier `io.github.atilla.cassette`, and license `GPL-3.0-or-later`.
 - [ ] Confirm the beta contains the current interface and all five themes: Cassette Teal, Rose Noir, Royal Gold, Glacier, and Obsidian.
 - [ ] Confirm there is no interface selector and no Modern UI implementation or persisted interface setting. Modern UI is future work, not a beta promise.
 - [ ] Confirm `ENABLE_EXPERIMENTAL_VIDEOS` is `false` and video/DVD navigation remains hidden. Existing backend code may remain, but video/DVD is unsupported in this beta.
 - [ ] Confirm playback, scanning, queues, shuffle/repeat, playlists, favorites, lyrics, FLAC editing, copied-FLAC safety, CD ripping, themes, MPRIS, notifications, and database behavior remain unchanged.
-- [ ] Accept the stock Tauri icons as a documented `v0.1.0-beta.1` limitation; replacement artwork is not a release blocker for this beta.
+- [ ] Accept the stock Tauri icons as a documented `v0.1.0-beta.2` limitation; replacement artwork is not a release blocker for this beta.
 - [ ] Check authors, description, homepage, repository, category, release notes, and bug-report link.
 - [ ] Confirm there are no signing identities, fake signatures, credentials, or secrets in source.
 - [x] Confirm the genuine updater public key and only the beta Pages endpoint are configured in `src-tauri/tauri.conf.json`; do not create the release tag while the remaining key checkpoint work in [UPDATES.md](UPDATES.md) is incomplete.
@@ -51,13 +51,13 @@ Release builds and package audits use the portable wrappers documented in [ARTIF
 ## 4. CI, signed updater, and clean-machine validation
 
 - [ ] Run the complete Linux CI job on Ubuntu 22.04.
-- [ ] Run the complete Windows CI job on pinned `windows-2022` with stable `x86_64-pc-windows-msvc`; treat it as regression coverage, not beta.1 release qualification.
+- [ ] Run the complete Windows CI job on pinned `windows-2022` with stable `x86_64-pc-windows-msvc`; treat it as regression coverage, not beta.2 release qualification.
 - [ ] Confirm both jobs run `npm ci`, frontend build/check, Cargo test/check, and compile the Tauri application without running ignored real-media tests.
-- [ ] Verify AppImage generation and launch on a clean Linux installation. Do not call it portable before this succeeds.
-- [ ] Confirm the signed release build emits `Cassette_0.1.0-beta.1_amd64.AppImage.sig` and the draft contains only the exact three Linux packages plus that signature.
+- [ ] Run the signed AppImage workflow on Ubuntu 24.04 and verify its runtime requirements, Wayland-client exclusion, generation, and launch on a clean Linux installation. Ubuntu 22.04 ordinary CI validates DEB/RPM and does not establish AppImage or older-distribution compatibility.
+- [ ] Confirm the signed release build emits `Cassette_0.1.0-beta.2_amd64.AppImage.sig` and the draft contains only the exact three Linux packages plus that signature.
 - [ ] Verify AppImage update checking, deliberate trusted-frontend confirmation, opaque pending-operation replacement, AppImage filesystem-identity replacement rejection, download progress, signature rejection, install, relaunch, **Later**, and 24-hour automatic-check timing using the disposable end-to-end procedure in [UPDATES.md](UPDATES.md). Record the remaining final pathname race rather than claiming all local mutation races are eliminated.
 - [ ] Verify DEB/RPM/unknown package behavior is notification/download-only and never invokes the AppImage installer or system package manager.
-- [x] Exclude MSI from `0.1.0-beta.1`: WiX/MSI requires a numeric-only optional prerelease identifier, so it cannot represent the authoritative version faithfully.
+- [x] Exclude MSI from `0.1.0-beta.2`: WiX/MSI requires a numeric-only optional prerelease identifier, so it cannot represent the authoritative version faithfully.
 - [ ] Confirm the exact-tag draft workflow creates the expected Linux artifacts as a draft prerelease and never runs for ordinary pushes or pull requests.
 - [ ] Confirm a draft release cannot deploy the public update feed; only intentional publication of the exact prerelease triggers the Pages workflow.
 - [ ] Review workflow logs and packaging warnings.
@@ -65,11 +65,11 @@ Release builds and package audits use the portable wrappers documented in [ARTIF
 `npm run release:linux` is DEB/RPM package validation only; ordinary CI does not produce AppImages. Only `npm run release:linux:signed` produces distributable AppImages, after the genuine public key/endpoint and signing credentials exist. The wrapper rejects missing configuration, unsigned AppImage arguments, and ambient configuration overrides before building. Provision `patchelf` and the documented linuxdeploy support tools; do not use `NO_STRIP=1` as a substitute. Release decisions require freshly built and scanned artifacts from a clean supported host.
 
 - [ ] Run `python3 scripts/test-signature-safety.py` and `npm run test:updater`.
-- [ ] Verify the exact AppImage/signature pair with `node scripts/verify-update.mjs APPIMAGE SIGNATURE 0.1.0-beta.1`; a nonempty signature alone is insufficient. Confirm feed generation verifies a private snapshot of both files and serializes the signature from that same snapshot.
+- [ ] Verify the exact AppImage/signature pair with `node scripts/verify-update.mjs APPIMAGE SIGNATURE 0.1.0-beta.2`; a nonempty signature alone is insufficient. Confirm feed generation verifies a private snapshot of both files and serializes the signature from that same snapshot.
 - [ ] Verify native detection on the actual AppImage mount, including Tauri's embedded bundle type; extracted/unknown runtimes must remain download-only.
 - [ ] Verify a failed automatic check remains rate-limited across restart; manual checks must remain available.
 - [ ] Confirm there is no cancellation control promised after update confirmation.
-- [ ] Before beta.2 or key rotation, follow the deliberate transition procedures in [UPDATES.md](UPDATES.md).
+- [ ] Before publishing beta.2 or rotating a key, follow the deliberate transition procedures in [UPDATES.md](UPDATES.md).
 
 ## 5. Linux functional and uninstall tests
 
@@ -89,13 +89,13 @@ Document the user-facing uninstall commands as `sudo dnf remove cassette` for RP
 
 ## 6. Deferred Windows 10/11 checkpoint (later beta)
 
-Do not block the Linux beta.1 on this section. Perform these checks on clean x86_64 VMs before a later Windows beta, not only on a CI runner. Follow [GSTREAMER-WINDOWS.md](GSTREAMER-WINDOWS.md).
+Do not block the Linux beta.2 on this section. Perform these checks on clean x86_64 VMs before a later Windows beta, not only on a CI runner. Follow [GSTREAMER-WINDOWS.md](GSTREAMER-WINDOWS.md).
 
 - [ ] Verify the documented missing-GStreamer behavior before installing GStreamer.
 - [ ] Install the official GStreamer 1.26.11 MSVC x86_64 runtime and make its `bin` directory available in `PATH`.
 - [ ] Verify Cassette starts without development files installed.
 - [ ] Install/uninstall the unsigned NSIS setup as a standard user and verify its per-user Start Menu and uninstall entries.
-- [ ] Reconsider MSI for a future version whose release identifier is representable by WiX/MSI; do not include it in `0.1.0-beta.1`.
+- [ ] Reconsider MSI for a future version whose release identifier is representable by WiX/MSI; do not include it in `0.1.0-beta.2`.
 - [ ] Verify normal WebView2 bootstrapper behavior with WebView2 present and absent.
 - [ ] Scan disposable libraries on `C:`, another drive, and Unicode paths.
 - [ ] Play representative FLAC, MP3, OGG/Vorbis, Opus, WAV, and M4A/AAC files.
@@ -120,11 +120,11 @@ Inspect source, built frontend, Linux bundles, Windows installers, and extracted
 
 Run these steps only after both checkpoints and clean-machine tests pass. Tagging, pushing, and publishing are explicitly outside checkpoint 1.
 
-- [ ] From reviewed, clean `main`, create the annotated tag intentionally: `git tag -a v0.1.0-beta.1 -m "Cassette 0.1.0-beta.1"`.
-- [ ] Push only the reviewed tag: `git push origin v0.1.0-beta.1`.
+- [ ] From reviewed, clean `main`, create the annotated tag intentionally: `git tag -a v0.1.0-beta.2 -m "Cassette 0.1.0-beta.2"`.
+- [ ] Push only the reviewed tag: `git push origin v0.1.0-beta.2`.
 - [ ] Wait for `.github/workflows/release.yml` to finish.
 - [ ] Confirm there is exactly one draft GitHub Release.
-- [ ] Confirm the draft contains exactly the DEB, RPM, AppImage, and `.AppImage.sig` for `0.1.0-beta.1`; NSIS and MSI must be absent.
+- [ ] Confirm the draft contains exactly the DEB, RPM, AppImage, and `.AppImage.sig` for `0.1.0-beta.2`; NSIS and MSI must be absent.
 - [ ] Download every draft installer rather than testing only runner outputs.
 - [ ] Repeat install, launch, playback, FLAC edit, updater, data-retention, and uninstall smoke tests with downloaded files.
 - [ ] Review beta warning, platform limitations, dependency requirements, stock-icon status, unsigned-package warnings, license, third-party notices, and checksums.
@@ -138,19 +138,19 @@ If a tag-triggered draft is wrong, do not reset, rebase, force-push, or rewrite 
 1. Delete the draft release:
 
    ```sh
-   gh release delete v0.1.0-beta.1 --yes
+   gh release delete v0.1.0-beta.2 --yes
    ```
 
 2. Delete the remote tag:
 
    ```sh
-   git push origin :refs/tags/v0.1.0-beta.1
+   git push origin :refs/tags/v0.1.0-beta.2
    ```
 
 3. Delete the local tag:
 
    ```sh
-   git tag -d v0.1.0-beta.1
+   git tag -d v0.1.0-beta.2
    ```
 
 4. Fix the release branch through normal reviewed commits, merge normally, then create and push a new annotated tag only when ready.

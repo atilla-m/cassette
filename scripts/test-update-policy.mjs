@@ -55,8 +55,8 @@ test("only finite non-negative successful timestamps are accepted", () => {
 
 test("release links use an immutable encoded version tag", () => {
   assert.equal(
-    updateReleaseUrl("0.1.0-beta.1"),
-    "https://github.com/atilla-m/cassette/releases/tag/v0.1.0-beta.1",
+    updateReleaseUrl("0.1.0-beta.2"),
+    "https://github.com/atilla-m/cassette/releases/tag/v0.1.0-beta.2",
   );
   assert.equal(
     updateReleaseUrl("1.0.0/unsafe"),

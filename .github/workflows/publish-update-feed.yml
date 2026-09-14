@@ -12,12 +12,12 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  RELEASE_VERSION: 0.1.0-beta.1
+  RELEASE_VERSION: 0.1.0-beta.2
 
 jobs:
   build-feed:
     name: Validate published prerelease and build feed
-    if: github.event.release.prerelease == true && github.event.release.tag_name == 'v0.1.0-beta.1'
+    if: github.event.release.prerelease == true && github.event.release.tag_name == 'v0.1.0-beta.2'
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -53,10 +53,10 @@ jobs:
 
           actual_assets="$(gh api "repos/${GH_REPO}/releases/tags/${RELEASE_TAG}" --jq '.assets[].name' | sort)"
           expected_assets="$(printf '%s\n' \
-            Cassette-0.1.0-beta.1-1.x86_64.rpm \
-            Cassette_0.1.0-beta.1_amd64.AppImage \
-            Cassette_0.1.0-beta.1_amd64.AppImage.sig \
-            Cassette_0.1.0-beta.1_amd64.deb | sort)"
+            Cassette-0.1.0-beta.2-1.x86_64.rpm \
+            Cassette_0.1.0-beta.2_amd64.AppImage \
+            Cassette_0.1.0-beta.2_amd64.AppImage.sig \
+            Cassette_0.1.0-beta.2_amd64.deb | sort)"
           test "$actual_assets" = "$expected_assets"
 
       - name: Download the exact AppImage/signature pair and capture release metadata
@@ -69,19 +69,19 @@ jobs:
           set -euo pipefail
           mkdir -p release-assets
           gh release download "$RELEASE_TAG" \
-            --pattern "Cassette_0.1.0-beta.1_amd64.AppImage.sig" \
+            --pattern "Cassette_0.1.0-beta.2_amd64.AppImage.sig" \
             --dir release-assets
           gh release download "$RELEASE_TAG" \
-            --pattern "Cassette_0.1.0-beta.1_amd64.AppImage" \
+            --pattern "Cassette_0.1.0-beta.2_amd64.AppImage" \
             --dir release-assets
-          test -s release-assets/Cassette_0.1.0-beta.1_amd64.AppImage.sig
+          test -s release-assets/Cassette_0.1.0-beta.2_amd64.AppImage.sig
           gh api "repos/${GH_REPO}/releases/tags/${RELEASE_TAG}" --jq '.body' > release-notes.md
           test -s release-notes.md
 
       - name: Generate the static beta-channel feed
         env:
-          APPIMAGE_SIGNATURE_FILE: release-assets/Cassette_0.1.0-beta.1_amd64.AppImage.sig
-          APPIMAGE_FILE: release-assets/Cassette_0.1.0-beta.1_amd64.AppImage
+          APPIMAGE_SIGNATURE_FILE: release-assets/Cassette_0.1.0-beta.2_amd64.AppImage.sig
+          APPIMAGE_FILE: release-assets/Cassette_0.1.0-beta.2_amd64.AppImage
           OUTPUT_DIR: pages-site
           RELEASE_NOTES_FILE: release-notes.md
           RELEASE_PUBLISHED_AT: ${{ github.event.release.published_at }}
