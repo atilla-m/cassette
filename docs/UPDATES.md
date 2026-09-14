@@ -2,7 +2,7 @@
 
 ## Current status
 
-Checkpoint 3B public identity is configured with the production public key and the beta Pages address. Automatic updating is **not yet release-qualified**: the address is configured but has not been verified live. A maintainer must review and commit the public configuration, configure GitHub Actions secrets and Pages, and pass the signed-build and end-to-end tests described below before advertising automatic updates.
+Checkpoint 3B public identity is committed with the production public key and the beta Pages address. GitHub metadata reports both signing-secret names and GitHub Actions as the Pages source; secret values were not and cannot be inspected. Automatic updating is **not yet release-qualified**. The original beta.1 draft passed artifact, LICENSE, production-key signature, and deliberate tamper checks, but needs the detector and runtime remediation described below. A live feed and end-to-end installation remain unqualified.
 
 Tauri updater signatures are mandatory. Cassette must never publish an unsigned updater payload, disable signature verification, or substitute a placeholder public key.
 
@@ -11,7 +11,7 @@ Tauri updater signatures are mandatory. Cassette must never publish an unsigned 
 - Distributable signed release builds can check the stable beta feed. Credential-free package-validation builds report updates unavailable. Development builds never contact it, including when the manual check button is used.
 - Automatic checks default to enabled and occur at most once every 24 hours, measured from the last automatic attempt, including failed attempts. The timestamp is persisted before the request and a per-session guard also applies. Manual checks remain available at any time after runtime detection. A failed background request is silent and does not delay startup or playback.
 - A newer version is shown with its release notes. The user can choose **Later**; there is no countdown or forced installation.
-- Only Linux with Tauri's embedded AppImage bundle marker can self-install. Native code canonicalizes `APPIMAGE`, `APPDIR`, and the current executable, requires a regular type-2 x86_64 ELF AppImage, checks `usr/bin/cassette`, `AppRun`, and `cassette.desktop` inside the AppDir, and requires read-only FUSE mount evidence tying the directory to that exact image. It also captures the image's device, inode, size, modification time, and change time and revalidates that identity before download and immediately before installation. Missing, replaced, stale, inconsistent, or escaping symlink evidence falls back to download-only. Extract-and-run and runtimes whose mount source cannot be identified also fall back safely; actual release runtime compatibility remains a checkpoint 3B test.
+- Only Linux with Tauri's embedded AppImage bundle marker can self-install. Native code canonicalizes `APPIMAGE`, `APPDIR`, and the current executable, requires a regular type-2 x86_64 ELF AppImage, checks `usr/bin/cassette`, `AppRun`, and `Cassette.desktop` inside the AppDir, and requires read-only FUSE mount evidence tying the directory to that exact image. It also captures the image's device, inode, size, modification time, and change time and revalidates that identity before download and immediately before installation. Missing, replaced, stale, inconsistent, or escaping symlink evidence falls back to download-only. Extract-and-run and runtimes whose mount source cannot be identified also fall back safely; actual release runtime compatibility remains a checkpoint 3B test.
 - **Update and restart** asks for explicit confirmation before download. There is no cancellation after confirmation in beta.1. Tauri verifies the downloaded bytes, native code reauthorizes the exact AppImage immediately before installation, then Cassette relaunches. Each successful check gets a new opaque native operation identifier, so a stale confirmation cannot install a same-version update that replaced the pending operation. No direct updater permissions are granted to the webview; it can request only that opaque pending operation, never supply an arbitrary URL, path, signature, or artifact.
 - Confirmation is a policy boundary in Cassette's trusted bundled frontend, not a defense against a fully compromised webview. Native code remains the package/install authorization boundary. There is also an unavoidable final local-filesystem race between the last identity check and Tauri opening/replacing the AppImage pathname; device/inode and metadata checks narrow this window but do not claim to eliminate every attack by a local account that can mutate the running executable's directory.
 - DEB, RPM, and unknown Linux installations offer **View download**. Cassette does not call `sudo`, `apt`, `dpkg`, `dnf`, or `rpm`, and does not replace those installations with an AppImage.
@@ -72,24 +72,545 @@ In GitHub repository settings, manually configure **Pages → Build and deployme
 
 Updates replace application binaries only. Cassette's Linux data remains under `$XDG_DATA_HOME/io.github.atilla.cassette` (normally `~/.local/share/io.github.atilla.cassette`) and includes `library.sqlite3`, playlists, favorites, statistics, settings, and caches. Neither an update nor package uninstall should automatically erase that directory. Back up user data before any destructive manual removal.
 
-## Required end-to-end checkpoint
+## Checkpoint 3B signed-build and end-to-end runbook
 
-Before enabling or advertising automatic updates:
+### Runtime remediation status before resuming this runbook
 
-1. Insert the genuine public key and endpoint in `src-tauri/tauri.conf.json` and configure both named Actions secrets as applicable.
-2. Enable GitHub Pages with GitHub Actions as its source.
-3. Use a temporary lower-version test build that trusts the same public key and points at a controlled beta test feed. Do not reuse or mutate a published production tag.
-4. Build and sign a higher-version disposable AppImage through the same workflow path.
-5. Verify no check occurs in `tauri dev`; manual development checks report unavailable.
-6. Verify automatic rate limiting, silent up-to-date/background-failure behavior, notification, release notes, **Later**, confirmation, progress, signature rejection after deliberate payload tampering, successful install, and relaunch.
-7. Verify DEB/RPM/unknown packaging never calls the installer or a package-manager command and opens the expected immutable GitHub release page.
-8. Confirm `library.sqlite3`, settings, playlists, favorites, media, and caches retain their hashes/content across update and uninstall tests.
+The unpublished beta.1 tag/assets remain unchanged. Source now includes a detector correction for the generated `Cassette.desktop` marker and Fedora's basename-only FUSE mount source, with backing-file identity and FUSE-connection ownership checks retained. Source regressions do not prove that a fresh signed, mounted AppImage is correctly classified.
 
-Record the test versions, artifact hashes, feed JSON, Actions run URLs, clean-machine details, and results in the release checklist. A generated signature alone is not evidence that update installation works.
+The Ubuntu 24 diagnostic AppDir initially remained choppy. A controlled omission of only the bundled Wayland client resolved host Mesa EGL symbol-loading failures and the user confirmed smooth Albums scrolling. Production packaging now applies that omission through `src-tauri/.appimageignore`; see [the runtime evidence and portability limits](ARTIFACT-SAFETY.md#host-wayland-client-including-x11-launches). An extracted diagnostic AppDir is neither a signed release nor a FUSE/updater-installation test. No GPU selection or graphics workaround is required in the production launcher.
+
+Before a corrected beta.2 candidate, separately review the version/tag policy changes and commit target; do not move beta.1 or replace its assets. The commands below record the original beta.1 qualification plan, not authorization to repeat its tag/build or evidence that its binary contains the remediation. Adapt the exact versions, hashes, and lower-version fixture to the newly reviewed candidate before execution. Repeat artifact/license/signature/tamper checks, mounted detection and manual scrolling, supported-format playback (the audio-plugin warnings remain unresolved), real older-to-newer replacement and data preservation, and clean-machine DEB/RPM/FUSE checks. Publication and live-feed qualification remain a separate stop point.
+
+Use fresh profiles populated only from verified synthetic media. One earlier host comparison profile was later found to contain real-library references; it must not be reused or described as isolated. The passing Wayland-loader diagnostic creates a fresh database with 24 synthetic albums and separate XDG roots; it does not reuse that host profile.
+
+The updater uses SemVer and offers an update only when the feed version is greater than the embedded application version. Production builds accept exactly one endpoint, `https://atilla-m.github.io/cassette/updates/beta/latest.json`. The frontend cannot supply an endpoint, download URL, signature, or payload. Tauri consumes the download URL in the trusted feed; the production feed generator pins it to the immutable HTTPS asset URL under `github.com/atilla-m/cassette/releases/download/v0.1.0-beta.1/`.
+
+A draft release asset is available to an authenticated maintainer through `gh release download`, but it is not anonymously downloadable and therefore cannot be the direct remote source for an updater client. For this first-release test, use an isolated `0.1.0-beta.0.e2e` AppImage that retains the production public key but permits exactly `https://localhost:44443/cassette/updates/beta/latest.json`. Serve an authenticated download of the untouched production `0.1.0-beta.1` draft AppImage and its signature from loopback HTTPS. `0.1.0-beta.0.e2e` is lower than `0.1.0-beta.1`; both executable payloads are scanned for their embedded versions. Nothing is published, and the production feed is not changed.
+
+This arrangement proves real FUSE AppImage detection on the qualification host, SemVer discovery, production-key signature verification, tamper rejection, explicit confirmation, download, replacement, data separation, and relaunch into the genuine release-candidate bytes. Its controlled endpoint is the only test-build divergence from production transport policy. It does not prove GitHub Pages availability, the public GitHub asset path, or clean-machine FUSE/package compatibility; those have separate gates below.
+
+### 1. Create the production draft
+
+Tagging and pushing require separate authorization. Use a separate clean worktree so this documentation plan can remain under review without entering or being discarded from the release commit. Fail closed if the reviewed commit is no longer in remote `main` history or the tag/release already exists, then create an unsigned annotated tag at the exact reviewed commit:
+
+```sh
+set -euo pipefail
+export CASSETTE_REPOSITORY=atilla-m/cassette
+export REVIEWED_SHA=e239ead18d0b73032498038532b2768ecce25a3e
+export RELEASE_VERSION=0.1.0-beta.1
+export RELEASE_TAG=v0.1.0-beta.1
+
+MAIN_ROOT="$(git rev-parse --show-toplevel)"
+git -C "$MAIN_ROOT" fetch origin
+git -C "$MAIN_ROOT" merge-base --is-ancestor "$REVIEWED_SHA" origin/main
+TAG_WORKTREE_ROOT="$(mktemp -d /tmp/cassette-beta1-tag.XXXXXX)"
+RELEASE_SOURCE="$TAG_WORKTREE_ROOT/source"
+git -C "$MAIN_ROOT" worktree add --detach "$RELEASE_SOURCE" "$REVIEWED_SHA"
+cd "$RELEASE_SOURCE"
+test "$(git rev-parse HEAD)" = "$REVIEWED_SHA"
+test -z "$(git status --porcelain=v1)"
+test -z "$(git tag --list "$RELEASE_TAG")"
+if git ls-remote --exit-code --tags origin "refs/tags/$RELEASE_TAG" >/dev/null 2>&1; then
+  echo "Refusing to reuse an existing remote tag." >&2
+  exit 1
+fi
+if gh release view "$RELEASE_TAG" --repo "$CASSETTE_REPOSITORY" >/dev/null 2>&1; then
+  echo "Refusing to reuse an existing release." >&2
+  exit 1
+fi
+
+git tag --no-sign -a "$RELEASE_TAG" "$REVIEWED_SHA" -m "Cassette $RELEASE_VERSION"
+test "$(git rev-list -n 1 "$RELEASE_TAG")" = "$REVIEWED_SHA"
+git push origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
+cd "$MAIN_ROOT"
+git worktree remove "$RELEASE_SOURCE"
+rmdir "$TAG_WORKTREE_ROOT"
+```
+
+The tag starts only `.github/workflows/release.yml`. Select the run by both SHA and tag, wait for it, and inspect its exact association:
+
+```sh
+RELEASE_RUN_ID=
+for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
+  RELEASE_RUN_ID="$(gh run list --repo "$CASSETTE_REPOSITORY" \
+    --workflow release.yml --event push --commit "$REVIEWED_SHA" --limit 10 \
+    --json databaseId,headBranch,headSha \
+    --jq 'map(select(.headSha == "e239ead18d0b73032498038532b2768ecce25a3e")) | if length == 1 then .[0].databaseId elif length == 0 then empty else error("multiple matching release runs") end')"
+  test -n "$RELEASE_RUN_ID" && break
+  sleep 5
+done
+test -n "$RELEASE_RUN_ID"
+gh run watch "$RELEASE_RUN_ID" --repo "$CASSETTE_REPOSITORY" --exit-status
+gh run view "$RELEASE_RUN_ID" --repo "$CASSETTE_REPOSITORY" \
+  --json url,status,conclusion,headBranch,headSha,jobs
+gh release view "$RELEASE_TAG" --repo "$CASSETTE_REPOSITORY" \
+  --json tagName,isDraft,isPrerelease,assets \
+  | jq -e '.tagName == "v0.1.0-beta.1" and .isDraft and .isPrerelease and
+    ([.assets[].name] | sort) == [
+      "Cassette-0.1.0-beta.1-1.x86_64.rpm",
+      "Cassette_0.1.0-beta.1_amd64.AppImage",
+      "Cassette_0.1.0-beta.1_amd64.AppImage.sig",
+      "Cassette_0.1.0-beta.1_amd64.deb"
+    ]'
+```
+
+The expected workflow artifact is `cassette-0.1.0-beta.1-linux-x86_64-signed`. The expected draft release assets are the DEB, RPM, AppImage, and `.AppImage.sig` listed above—nothing else. The workflow must remain a draft prerelease; do not edit or publish it during qualification.
+
+### 2. Download, scan, verify, and tamper-test the genuine pair
+
+Create one narrowly scoped directory and retain it until its logs and hashes have been recorded. `gh` authentication is intentionally required for the draft download.
+
+```sh
+MAIN_ROOT="$(git rev-parse --show-toplevel)"
+QUALIFICATION_ROOT="$(mktemp -d /tmp/cassette-3b-qualification.XXXXXX)"
+ORIGINALS="$QUALIFICATION_ROOT/original-draft"
+APPIMAGE_NAME=Cassette_0.1.0-beta.1_amd64.AppImage
+SIGNATURE_NAME="$APPIMAGE_NAME.sig"
+mkdir -p "$ORIGINALS" "$QUALIFICATION_ROOT/scan"
+
+gh release download "$RELEASE_TAG" --repo "$CASSETTE_REPOSITORY" \
+  --dir "$ORIGINALS" --pattern "$APPIMAGE_NAME" --pattern "$SIGNATURE_NAME"
+test "$(find "$ORIGINALS" -maxdepth 1 -type f | wc -l)" -eq 2
+(cd "$ORIGINALS" && sha256sum "$APPIMAGE_NAME" "$SIGNATURE_NAME" > SHA256SUMS)
+
+node "$MAIN_ROOT/scripts/verify-update.mjs" \
+  "$ORIGINALS/$APPIMAGE_NAME" "$ORIGINALS/$SIGNATURE_NAME" "$RELEASE_VERSION"
+cp "$ORIGINALS/$APPIMAGE_NAME" "$QUALIFICATION_ROOT/scan/$APPIMAGE_NAME"
+cp "$ORIGINALS/$SIGNATURE_NAME" "$QUALIFICATION_ROOT/scan/$SIGNATURE_NAME"
+chmod u+x "$QUALIFICATION_ROOT/scan/$APPIMAGE_NAME"
+python3 -B "$MAIN_ROOT/scripts/audit-release-artifacts.py" \
+  --workspace "$MAIN_ROOT" --version "$RELEASE_VERSION" --license "$MAIN_ROOT/LICENSE" \
+  --artifact "$QUALIFICATION_ROOT/scan/$APPIMAGE_NAME" \
+  --artifact "$QUALIFICATION_ROOT/scan/$SIGNATURE_NAME"
+```
+
+Reject independent payload and signature mutations while keeping the originals byte-for-byte unchanged:
+
+```sh
+mkdir -p "$QUALIFICATION_ROOT/tampered-payload" "$QUALIFICATION_ROOT/tampered-signature"
+cp "$ORIGINALS/$APPIMAGE_NAME" "$QUALIFICATION_ROOT/tampered-payload/$APPIMAGE_NAME"
+cp "$ORIGINALS/$SIGNATURE_NAME" "$QUALIFICATION_ROOT/tampered-payload/$SIGNATURE_NAME"
+printf '\x00' >> "$QUALIFICATION_ROOT/tampered-payload/$APPIMAGE_NAME"
+if node "$MAIN_ROOT/scripts/verify-update.mjs" \
+  "$QUALIFICATION_ROOT/tampered-payload/$APPIMAGE_NAME" \
+  "$QUALIFICATION_ROOT/tampered-payload/$SIGNATURE_NAME" "$RELEASE_VERSION"; then
+  echo "ERROR: tampered AppImage was accepted" >&2
+  exit 1
+fi
+
+cp "$ORIGINALS/$APPIMAGE_NAME" "$QUALIFICATION_ROOT/tampered-signature/$APPIMAGE_NAME"
+cp "$ORIGINALS/$SIGNATURE_NAME" "$QUALIFICATION_ROOT/tampered-signature/$SIGNATURE_NAME"
+printf 'A' >> "$QUALIFICATION_ROOT/tampered-signature/$SIGNATURE_NAME"
+if node "$MAIN_ROOT/scripts/verify-update.mjs" \
+  "$QUALIFICATION_ROOT/tampered-signature/$APPIMAGE_NAME" \
+  "$QUALIFICATION_ROOT/tampered-signature/$SIGNATURE_NAME" "$RELEASE_VERSION"; then
+  echo "ERROR: tampered signature was accepted" >&2
+  exit 1
+fi
+(cd "$ORIGINALS" && sha256sum --check SHA256SUMS)
+```
+
+### 3. Build the isolated lower-version AppImage
+
+Create a detached worktree from the same reviewed commit. Do not make these changes on `main`. First run `npm version` so npm updates both version fields in its lockfile normally, then apply the exact test-only native/build policy patch shown below:
+
+```sh
+OLD_SOURCE="$QUALIFICATION_ROOT/old-source"
+OLD_VERSION=0.1.0-beta.0.e2e
+OLD_APPIMAGE_NAME=Cassette_0.1.0-beta.0.e2e_amd64.AppImage
+git -C "$MAIN_ROOT" worktree add --detach "$OLD_SOURCE" "$REVIEWED_SHA"
+cd "$OLD_SOURCE"
+npm version "$OLD_VERSION" --no-git-tag-version --ignore-scripts
+test "$(grep -Fxc 'const expectedVersion = "0.1.0-beta.1";' scripts/build-release.mjs)" -eq 1
+sed -i 's/const expectedVersion = "0.1.0-beta.1";/const expectedVersion = "0.1.0-beta.0.e2e";/' \
+  scripts/build-release.mjs
+
+git apply <<'PATCH'
+diff --git a/scripts/audit-release-artifacts.py b/scripts/audit-release-artifacts.py
+--- a/scripts/audit-release-artifacts.py
++++ b/scripts/audit-release-artifacts.py
+@@ -30,8 +30,9 @@
+-EXPECTED_VERSION = "0.1.0-beta.1"
++EXPECTED_VERSION = "0.1.0-beta.0.e2e"
+ EXPECTED_LICENSE = "GPL-3.0-or-later"
+ NATIVE_TAURI_DEV_URL_EXCEPTIONS = {
+     b"http://localhost:1420",
+     b"ws://localhost:1420",
++    b"https://localhost:44443",
+ }
+ FRONTEND_SUFFIXES = {".css", ".html", ".js", ".json", ".map", ".mjs"}
+ DATABASE_SUFFIXES = {".db", ".sqlite", ".sqlite3", ".db-shm", ".db-wal"}
+diff --git a/scripts/release-policy.mjs b/scripts/release-policy.mjs
+--- a/scripts/release-policy.mjs
++++ b/scripts/release-policy.mjs
+@@ -20,9 +20,9 @@ export function validateUpdaterConfiguration(config) {
+     throw new Error("Signed AppImage requires exactly one configured HTTPS beta endpoint.");
+   }
+   const endpoint = new URL(updater.endpoints[0]);
+-  if (endpoint.protocol !== "https:" || endpoint.hostname !== "atilla-m.github.io"
++  if (endpoint.protocol !== "https:" || endpoint.hostname !== "localhost"
+       || endpoint.pathname !== "/cassette/updates/beta/latest.json"
+-      || endpoint.username || endpoint.password || endpoint.port || endpoint.search || endpoint.hash
++      || endpoint.username || endpoint.password || endpoint.port !== "44443" || endpoint.search || endpoint.hash
+       || Object.keys(updater).some((key) => key.startsWith("dangerous") && updater[key])) {
+     throw new Error("Updater endpoint or transport configuration is invalid.");
+   }
+diff --git a/src-tauri/Cargo.toml b/src-tauri/Cargo.toml
+--- a/src-tauri/Cargo.toml
++++ b/src-tauri/Cargo.toml
+@@ -1,6 +1,6 @@
+ [package]
+ name = "cassette"
+-version = "0.1.0-beta.1"
++version = "0.1.0-beta.0.e2e"
+ description = "A private, local-first desktop music library and player"
+ authors = ["Cassette contributors"]
+ edition = "2021"
+diff --git a/src-tauri/src/updates.rs b/src-tauri/src/updates.rs
+--- a/src-tauri/src/updates.rs
++++ b/src-tauri/src/updates.rs
+@@ -519,11 +519,11 @@ fn valid_configuration(value: Option<&serde_json::Value>) -> bool {
+         return false;
+     };
+     endpoint.scheme() == "https"
+-        && endpoint.host_str() == Some("atilla-m.github.io")
++        && endpoint.host_str() == Some("localhost")
+         && endpoint.path() == "/cassette/updates/beta/latest.json"
+         && endpoint.username().is_empty()
+         && endpoint.password().is_none()
+-        && endpoint.port().is_none()
++        && endpoint.port() == Some(44443)
+         && endpoint.query().is_none()
+         && endpoint.fragment().is_none()
+         && !value.as_object().is_some_and(|o| {
+diff --git a/src-tauri/tauri.conf.json b/src-tauri/tauri.conf.json
+--- a/src-tauri/tauri.conf.json
++++ b/src-tauri/tauri.conf.json
+@@ -1,7 +1,7 @@
+ {
+   "$schema": "https://schema.tauri.app/config/2",
+   "productName": "Cassette",
+-  "version": "0.1.0-beta.1",
++  "version": "0.1.0-beta.0.e2e",
+   "identifier": "io.github.atilla.cassette",
+   "build": {
+     "beforeDevCommand": "npm run dev",
+@@ -30,7 +30,7 @@
+     "updater": {
+       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IERGRjA2MUVCMkFDMTlEMEIKUldRTG5jRXE2Mkh3M3k0WEFRWmhBaDdaQVNnK2dqazhTd1Z2VHNDK1J4UDVLeVdZdk1PUzdMRFEK",
+       "endpoints": [
+-        "https://atilla-m.github.io/cassette/updates/beta/latest.json"
++        "https://localhost:44443/cassette/updates/beta/latest.json"
+       ]
+     }
+   },
+PATCH
+
+cargo metadata --offline --manifest-path src-tauri/Cargo.toml --format-version 1 --no-deps >/dev/null
+npm ci
+npm run check
+npm run test:updater
+python3 -B scripts/test-signature-safety.py
+CCACHE_DISABLE=1 cargo check --offline --manifest-path src-tauri/Cargo.toml --features signed-updater
+git diff --check
+git diff --stat
+git diff -- package.json package-lock.json src-tauri/Cargo.toml src-tauri/Cargo.lock \
+  src-tauri/tauri.conf.json src-tauri/src/updates.rs scripts/build-release.mjs \
+  scripts/release-policy.mjs scripts/audit-release-artifacts.py
+MAIN_CHANGES="$(git -C "$MAIN_ROOT" status --porcelain=v1)"
+test -z "$MAIN_CHANGES" || test "$MAIN_CHANGES" = " M docs/UPDATES.md"
+```
+
+The diff must contain only the displayed version changes, the exact loopback endpoint/port, and the scanner exception for that exact test URL. The public key, HTTPS requirement, single-endpoint rule, dangerous-option rejection, signed-updater feature, signing requirement, exact signed bundle list, application source, and release workflows remain unchanged.
+
+Run the normal guarded signed command. The subshell prevents credentials from surviving the build; `set +x` keeps them out of shell tracing. Enter the password only at the local hidden prompt—never in chat, command history, or logs.
+
+```sh
+(
+  set +x
+  test -f /home/atilla/.local/share/cassette-signing/cassette-updater.key
+  export TAURI_SIGNING_PRIVATE_KEY="$(< /home/atilla/.local/share/cassette-signing/cassette-updater.key)"
+  IFS= read -r -s -p "Local updater-key password: " TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+  printf '\n'
+  export TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+  npm run release:linux:signed
+)
+
+OLD_PAIR="$QUALIFICATION_ROOT/old-pair"
+mkdir -p "$OLD_PAIR"
+cp "src-tauri/target/release/bundle/appimage/$OLD_APPIMAGE_NAME" "$OLD_PAIR/$OLD_APPIMAGE_NAME"
+cp "src-tauri/target/release/bundle/appimage/$OLD_APPIMAGE_NAME.sig" "$OLD_PAIR/$OLD_APPIMAGE_NAME.sig"
+chmod u+x "$OLD_PAIR/$OLD_APPIMAGE_NAME"
+python3 -B scripts/audit-release-artifacts.py --workspace . --version "$OLD_VERSION" \
+  --license LICENSE --artifact "$OLD_PAIR/$OLD_APPIMAGE_NAME" \
+  --artifact "$OLD_PAIR/$OLD_APPIMAGE_NAME.sig"
+node scripts/verify-update.mjs "$OLD_PAIR/$OLD_APPIMAGE_NAME" \
+  "$OLD_PAIR/$OLD_APPIMAGE_NAME.sig" "$OLD_VERSION"
+(cd "$OLD_PAIR" && sha256sum "$OLD_APPIMAGE_NAME" "$OLD_APPIMAGE_NAME.sig" > SHA256SUMS)
+```
+
+This local lower-version build must never be uploaded or installed as a system package. Its accompanying DEB/RPM outputs are incidental consequences of the fail-closed signed command and are not qualification evidence.
+
+### 4. Serve the verified newer bytes over isolated HTTPS
+
+Create a disposable local CA and localhost server certificate. They are transport-only test keys, not updater signing credentials, and are confined to the qualification directory. The client keeps certificate validation enabled and trusts this CA only through its process environment.
+
+```sh
+TLS_ROOT="$QUALIFICATION_ROOT/tls"
+SERVE_ROOT="$QUALIFICATION_ROOT/server"
+mkdir -p "$TLS_ROOT/empty-cert-dir" "$SERVE_ROOT/cassette/updates/beta"
+umask 077
+openssl req -x509 -newkey rsa:3072 -sha256 -nodes -days 2 \
+  -keyout "$TLS_ROOT/ca.key" -out "$TLS_ROOT/ca.crt" \
+  -subj "/CN=Cassette checkpoint 3B local CA" \
+  -addext "basicConstraints=critical,CA:TRUE,pathlen:0" \
+  -addext "keyUsage=critical,keyCertSign,cRLSign"
+openssl req -newkey rsa:3072 -sha256 -nodes \
+  -keyout "$TLS_ROOT/server.key" -out "$TLS_ROOT/server.csr" \
+  -subj "/CN=localhost" \
+  -addext "subjectAltName=DNS:localhost,IP:127.0.0.1" \
+  -addext "basicConstraints=critical,CA:FALSE" \
+  -addext "keyUsage=critical,digitalSignature,keyEncipherment" \
+  -addext "extendedKeyUsage=serverAuth"
+openssl x509 -req -in "$TLS_ROOT/server.csr" -CA "$TLS_ROOT/ca.crt" \
+  -CAkey "$TLS_ROOT/ca.key" -CAcreateserial -days 2 -sha256 \
+  -copy_extensions copy -out "$TLS_ROOT/server.crt"
+chmod 600 "$TLS_ROOT/ca.key" "$TLS_ROOT/server.key"
+openssl verify -CAfile "$TLS_ROOT/ca.crt" "$TLS_ROOT/server.crt"
+openssl x509 -in "$TLS_ROOT/server.crt" -noout -checkhost localhost
+
+cp "$ORIGINALS/$APPIMAGE_NAME" "$SERVE_ROOT/$APPIMAGE_NAME"
+node --input-type=module - "$SERVE_ROOT" "$APPIMAGE_NAME" "$ORIGINALS/$SIGNATURE_NAME" <<'NODE'
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+const root = process.argv[2];
+const name = process.argv[3];
+const signature = readFileSync(process.argv[4], "utf8").trim();
+const feed = {
+  version: "0.1.0-beta.1",
+  notes: "Checkpoint 3B local end-to-end fixture; not a published release.",
+  pub_date: new Date().toISOString(),
+  platforms: {
+    "linux-x86_64": { signature, url: `https://localhost:44443/${name}` },
+  },
+};
+const directory = join(root, "cassette", "updates", "beta");
+mkdirSync(directory, { recursive: true });
+writeFileSync(join(directory, "latest.json"), `${JSON.stringify(feed, null, 2)}\n`, { mode: 0o600 });
+NODE
+
+if ss -H -ltn 'sport = :44443' | grep -q .; then
+  echo "TCP port 44443 is already in use; stop and choose a new exact port in every test-only location." >&2
+  exit 1
+fi
+python3 - "$SERVE_ROOT" "$TLS_ROOT/server.crt" "$TLS_ROOT/server.key" \
+  >"$QUALIFICATION_ROOT/https-server.log" 2>&1 <<'PY' &
+import http.server
+import ssl
+import sys
+
+serve_root, certificate, private_key = sys.argv[1:4]
+handler = lambda *args, **kwargs: http.server.SimpleHTTPRequestHandler(
+    *args, directory=serve_root, **kwargs
+)
+server = http.server.ThreadingHTTPServer(("127.0.0.1", 44443), handler)
+context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+context.load_cert_chain(certificate, private_key)
+server.socket = context.wrap_socket(server.socket, server_side=True)
+server.serve_forever()
+PY
+HTTPS_SERVER_PID=$!
+curl --fail --silent --show-error --cacert "$TLS_ROOT/ca.crt" \
+  --retry 5 --retry-connrefused --retry-delay 1 \
+  https://localhost:44443/cassette/updates/beta/latest.json \
+  --output "$QUALIFICATION_ROOT/served-latest.json"
+jq -e '.version == "0.1.0-beta.1" and
+  .platforms["linux-x86_64"].url == "https://localhost:44443/Cassette_0.1.0-beta.1_amd64.AppImage" and
+  (.platforms["linux-x86_64"].signature | length > 0)' \
+  "$QUALIFICATION_ROOT/served-latest.json"
+```
+
+The production generator is intentionally not used here because it correctly refuses a test version or non-production URL. The local JSON uses the exact signature bytes from the already verified draft pair and names the real `0.1.0-beta.1` executable; it does not pretend an unchanged executable has a newer version.
+
+### 5. Exercise check, rejection, install, and relaunch
+
+Verify `/dev/fuse` is usable and launch the AppImage directly—never with `--appimage-extract-and-run`. Generate disposable media, use four isolated XDG roots, and select only the disposable media directory inside Cassette.
+
+```sh
+test -r /dev/fuse
+ldconfig -p | grep -F 'libfuse.so.2'
+RUN_ROOT="$QUALIFICATION_ROOT/run"
+RUN_IMAGE="$RUN_ROOT/$OLD_APPIMAGE_NAME"
+mkdir -p "$RUN_ROOT" "$QUALIFICATION_ROOT/media" \
+  "$QUALIFICATION_ROOT/xdg/data" "$QUALIFICATION_ROOT/xdg/config" \
+  "$QUALIFICATION_ROOT/xdg/cache" "$QUALIFICATION_ROOT/xdg/state"
+cp "$OLD_PAIR/$OLD_APPIMAGE_NAME" "$RUN_IMAGE"
+chmod u+x "$RUN_IMAGE"
+ffmpeg -nostdin -hide_banner -loglevel error -f lavfi -i sine=frequency=440:duration=4 \
+  -metadata title="Checkpoint Tone A" -metadata artist="Cassette E2E" \
+  -metadata album="Disposable Update Test" -metadata genre="Test" \
+  "$QUALIFICATION_ROOT/media/checkpoint-tone-a.flac"
+ffmpeg -nostdin -hide_banner -loglevel error -f lavfi -i sine=frequency=660:duration=4 \
+  -metadata title="Checkpoint Tone B" -metadata artist="Cassette E2E" \
+  -metadata album="Disposable Update Test" -metadata genre="Test" \
+  "$QUALIFICATION_ROOT/media/checkpoint-tone-b.flac"
+(cd "$QUALIFICATION_ROOT/media" && sha256sum *.flac > "$QUALIFICATION_ROOT/media.sha256")
+
+export XDG_DATA_HOME="$QUALIFICATION_ROOT/xdg/data"
+export XDG_CONFIG_HOME="$QUALIFICATION_ROOT/xdg/config"
+export XDG_CACHE_HOME="$QUALIFICATION_ROOT/xdg/cache"
+export XDG_STATE_HOME="$QUALIFICATION_ROOT/xdg/state"
+export SSL_CERT_FILE="$TLS_ROOT/ca.crt"
+export SSL_CERT_DIR="$TLS_ROOT/empty-cert-dir"
+"$RUN_IMAGE" &
+QUALIFICATION_APP_PID=$!
+for attempt in 1 2 3 4 5 6 7 8 9 10; do
+  if grep -E ' - fuse[^ ]* ' "/proc/$QUALIFICATION_APP_PID/mountinfo" \
+    > "$QUALIFICATION_ROOT/fuse-mount.txt"; then
+    break
+  fi
+  sleep 1
+done
+test -s "$QUALIFICATION_ROOT/fuse-mount.txt"
+```
+
+On the first launch, confirm Settings reports version `0.1.0-beta.0.e2e`, installation type **AppImage**, and **Update and restart**. This is also the native proof that the real AppImage is FUSE-mounted and tied to its backing file. Confirm the automatic check discovers `0.1.0-beta.1`, displays the local fixture notes, and offers **Later**; choose **Later**. Import only `$QUALIFICATION_ROOT/media`, set a non-default theme and another harmless setting, favorite a track, create a playlist containing both tracks, and play briefly. Close and relaunch the same AppImage. The HTTPS server log must show no second automatic feed request within 24 hours; a manual check must remain available and add a request.
+
+With Cassette closed, wait for only the process started above and record the stable library state:
+
+```sh
+LIBRARY_DB="$XDG_DATA_HOME/io.github.atilla.cassette/library.sqlite3"
+wait "$QUALIFICATION_APP_PID" || true
+test -s "$LIBRARY_DB"
+sqlite3 "$LIBRARY_DB" '.dump' > "$QUALIFICATION_ROOT/library-before.sql"
+OLD_RUN_SHA="$(sha256sum "$RUN_IMAGE" | awk '{print $1}')"
+NEW_DRAFT_SHA="$(sha256sum "$ORIGINALS/$APPIMAGE_NAME" | awk '{print $1}')"
+```
+
+Relaunch the old AppImage, check manually, then replace only the server's disposable download copy with the tampered payload. Confirm **Update and restart**. The download must fail signature verification, Cassette must remain usable, and no relaunch may occur:
+
+```sh
+cp "$QUALIFICATION_ROOT/tampered-payload/$APPIMAGE_NAME" "$SERVE_ROOT/$APPIMAGE_NAME"
+```
+
+After the failure, close Cassette and require the original executable and data to remain usable:
+
+```sh
+test "$(sha256sum "$RUN_IMAGE" | awk '{print $1}')" = "$OLD_RUN_SHA"
+sqlite3 "$LIBRARY_DB" '.dump' > "$QUALIFICATION_ROOT/library-after-rejection.sql"
+diff -u "$QUALIFICATION_ROOT/library-before.sql" "$QUALIFICATION_ROOT/library-after-rejection.sql"
+(cd "$QUALIFICATION_ROOT/media" && sha256sum --check "$QUALIFICATION_ROOT/media.sha256")
+```
+
+Relaunch and confirm the version, theme/setting, library records, playlist, favorite, and playback still work. Restore the genuine server copy, run a new manual check, confirm the operation, observe download/install progress, and allow Cassette to relaunch:
+
+```sh
+cp "$ORIGINALS/$APPIMAGE_NAME" "$SERVE_ROOT/$APPIMAGE_NAME"
+```
+
+After the relaunched application is closed, verify that the writable old path now contains the exact draft bytes and that data did not change during the update:
+
+```sh
+test "$(sha256sum "$RUN_IMAGE" | awk '{print $1}')" = "$NEW_DRAFT_SHA"
+sqlite3 "$LIBRARY_DB" '.dump' > "$QUALIFICATION_ROOT/library-after-update.sql"
+diff -u "$QUALIFICATION_ROOT/library-before.sql" "$QUALIFICATION_ROOT/library-after-update.sql"
+(cd "$QUALIFICATION_ROOT/media" && sha256sum --check "$QUALIFICATION_ROOT/media.sha256")
+(cd "$ORIGINALS" && sha256sum --check SHA256SUMS)
+```
+
+Confirm Settings now reports version `0.1.0-beta.1`; the theme/setting, tracks, playlist, favorite, and playable media must remain present. WebKit cache and updater-local-storage files may legitimately change while checking and relaunching, so validate the saved settings in the UI rather than requiring byte-identical cache files.
+
+Stop only the loopback server started above, retain the qualification directory until its hashes/results are copied into the release checklist, and leave the draft and production feed untouched:
+
+```sh
+kill "$HTTPS_SERVER_PID"
+wait "$HTTPS_SERVER_PID" || true
+unset SSL_CERT_FILE SSL_CERT_DIR XDG_DATA_HOME XDG_CONFIG_HOME XDG_CACHE_HOME XDG_STATE_HOME
+MAIN_CHANGES="$(git -C "$MAIN_ROOT" status --porcelain=v1)"
+test -z "$MAIN_CHANGES" || test "$MAIN_CHANGES" = " M docs/UPDATES.md"
+git -C "$MAIN_ROOT" diff --check
+```
+
+Do not publish at this point. Clean-machine AppImage/FUSE launch remains outstanding even if this host passes. DEB installation/removal on a clean Debian/Ubuntu machine and RPM installation/removal on a clean Fedora machine also remain outstanding. Use only isolated XDG data and disposable media on those machines; confirm notification-only updater behavior and data retention for both package types.
+
+### 6. Deliberate publication and production-feed qualification
+
+Publication requires separate authorization and must wait for every draft, end-to-end, and clean-machine gate above. Prepare final non-empty release notes, then the authorized publication command is:
+
+```sh
+gh release edit "$RELEASE_TAG" --repo "$CASSETTE_REPOSITORY" \
+  --notes-file /path/to/reviewed-release-notes.md --draft=false --prerelease
+```
+
+That `release.published` event—not the tag and not the draft—starts `.github/workflows/publish-update-feed.yml`. Select the run by the exact commit/tag, wait for it, then download the deployed JSON and public assets anonymously into a new isolated directory:
+
+```sh
+FEED_RUN_ID=
+for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
+  FEED_RUN_ID="$(gh run list --repo "$CASSETTE_REPOSITORY" \
+    --workflow publish-update-feed.yml --event release --commit "$REVIEWED_SHA" --limit 10 \
+    --json databaseId,headBranch,headSha \
+    --jq 'map(select(.headSha == "e239ead18d0b73032498038532b2768ecce25a3e")) | if length == 1 then .[0].databaseId elif length == 0 then empty else error("multiple matching feed runs") end')"
+  test -n "$FEED_RUN_ID" && break
+  sleep 5
+done
+test -n "$FEED_RUN_ID"
+gh run watch "$FEED_RUN_ID" --repo "$CASSETTE_REPOSITORY" --exit-status
+gh run view "$FEED_RUN_ID" --repo "$CASSETTE_REPOSITORY" \
+  --json url,status,conclusion,headBranch,headSha,jobs
+
+PUBLIC_CHECK="$(mktemp -d /tmp/cassette-3b-public-feed.XXXXXX)"
+curl --disable --fail --location --silent --show-error --retry 10 --retry-all-errors \
+  --header 'Authorization:' --dump-header "$PUBLIC_CHECK/headers.txt" \
+  --output "$PUBLIC_CHECK/latest.json" \
+  https://atilla-m.github.io/cassette/updates/beta/latest.json
+grep -Eiq '^content-type:[[:space:]]*application/json([;[:space:]]|$)' "$PUBLIC_CHECK/headers.txt"
+EXPECTED_ASSET_URL="https://github.com/atilla-m/cassette/releases/download/v0.1.0-beta.1/$APPIMAGE_NAME"
+jq -e --arg url "$EXPECTED_ASSET_URL" '.version == "0.1.0-beta.1" and
+  (.notes | length > 0) and (.pub_date | fromdateiso8601) and
+  .platforms["linux-x86_64"].url == $url and
+  (.platforms["linux-x86_64"].signature | length > 0)' "$PUBLIC_CHECK/latest.json"
+
+curl --disable --fail --location --silent --show-error --header 'Authorization:' \
+  --output "$PUBLIC_CHECK/$APPIMAGE_NAME" "$EXPECTED_ASSET_URL"
+curl --disable --fail --location --silent --show-error --header 'Authorization:' \
+  --output "$PUBLIC_CHECK/$SIGNATURE_NAME" "$EXPECTED_ASSET_URL.sig"
+node "$MAIN_ROOT/scripts/verify-update.mjs" \
+  "$PUBLIC_CHECK/$APPIMAGE_NAME" "$PUBLIC_CHECK/$SIGNATURE_NAME" "$RELEASE_VERSION"
+test "$(sha256sum "$PUBLIC_CHECK/$APPIMAGE_NAME" | awk '{print $1}')" = \
+  "$(sha256sum "$ORIGINALS/$APPIMAGE_NAME" | awk '{print $1}')"
+test "$(sha256sum "$PUBLIC_CHECK/$SIGNATURE_NAME" | awk '{print $1}')" = \
+  "$(sha256sum "$ORIGINALS/$SIGNATURE_NAME" | awk '{print $1}')"
+node --input-type=module - "$PUBLIC_CHECK/latest.json" "$PUBLIC_CHECK/$SIGNATURE_NAME" <<'NODE'
+import { readFileSync } from "node:fs";
+const feed = JSON.parse(readFileSync(process.argv[2], "utf8"));
+const signature = readFileSync(process.argv[3], "utf8").trim();
+if (feed.platforms?.["linux-x86_64"]?.signature !== signature) {
+  throw new Error("Published feed signature differs from the verified signature asset.");
+}
+NODE
+```
+
+Finally, launch the public `0.1.0-beta.1` AppImage directly with a new isolated XDG profile and normal system trust (unset the local test CA). A manual update check must reach and parse the production Pages feed and report `0.1.0-beta.1` up to date. This qualifies production client/feed discovery, not an update to a newer version. There is no older published production Cassette for this first release; the pre-publication `beta.0.e2e` exercise is the older-to-newer installation proof. The first direct production-channel older-to-newer test will use the genuine beta.1 client when a later, separately reviewed beta is prepared.
+
+```sh
+mkdir -p "$PUBLIC_CHECK/xdg/data" "$PUBLIC_CHECK/xdg/config" \
+  "$PUBLIC_CHECK/xdg/cache" "$PUBLIC_CHECK/xdg/state"
+chmod u+x "$PUBLIC_CHECK/$APPIMAGE_NAME"
+env -u SSL_CERT_FILE -u SSL_CERT_DIR \
+  XDG_DATA_HOME="$PUBLIC_CHECK/xdg/data" \
+  XDG_CONFIG_HOME="$PUBLIC_CHECK/xdg/config" \
+  XDG_CACHE_HOME="$PUBLIC_CHECK/xdg/cache" \
+  XDG_STATE_HOME="$PUBLIC_CHECK/xdg/state" \
+  "$PUBLIC_CHECK/$APPIMAGE_NAME"
+```
+
+Record the tag target, both Actions run URLs, all draft/public artifact hashes, feed JSON and headers, FUSE mount result, isolated data checks, and every warning. A generated signature or successful deployment alone is not evidence that update installation works.
 
 ## Release-side verification
 
-The installed Tauri CLI and the [official CLI reference](https://v2.tauri.app/reference/cli/#signer) expose `signer sign` and `signer generate`, but no `signer verify`. Do not invent that command. `node scripts/verify-update.mjs APPIMAGE SIGNATURE VERSION` runs the artifact scanner's envelope/pairing checks and the standalone Rust helper in `scripts/update-verifier`. The helper uses the same pinned `minisign-verify` library, Tauri base64 envelope decoding, and `PublicKey::verify(..., true)` operation as tauri-plugin-updater 2.11.0. This is offline public-key verification of Tauri's format, not a new cryptographic format or a Tauri CLI subcommand. Neither helper accepts a private key. Positive verification with the production key and tampered-payload rejection remain pending checkpoint 3B.
+The installed Tauri CLI and the [official CLI reference](https://v2.tauri.app/reference/cli/#signer) expose `signer sign` and `signer generate`, but no `signer verify`. Do not invent that command. `node scripts/verify-update.mjs APPIMAGE SIGNATURE VERSION` runs the artifact scanner's envelope/pairing checks and the standalone Rust helper in `scripts/update-verifier`. The helper uses the same pinned `minisign-verify` library, Tauri base64 envelope decoding, and `PublicKey::verify(..., true)` operation as tauri-plugin-updater 2.11.0. This is offline public-key verification of Tauri's format, not a new cryptographic format or a Tauri CLI subcommand. Neither helper accepts a private key. Positive verification and both tamper-rejection checks passed for the original beta.1 pair and must be repeated for each new signed candidate.
 
 ## Advancing the beta channel
 

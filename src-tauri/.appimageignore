@@ -1,0 +1,8 @@
+# appimagetool reads this from Tauri's src-tauri working directory.
+# Keep the host Wayland client compatible with the host Mesa EGL driver.
+# Explicit library locations work with the pinned SquashFS wildcard syntax.
+usr/lib/libwayland-client.so*
+usr/lib/*/libwayland-client.so*
+usr/lib64/libwayland-client.so*
+lib/libwayland-client.so*
+lib64/libwayland-client.so*

@@ -11,6 +11,22 @@ const pkg = JSON.parse(read("package.json"));
 const config = JSON.parse(read("src-tauri/tauri.conf.json"));
 const overlay = JSON.parse(read("src-tauri/tauri.updater.conf.json"));
 
+test("AppImage filesystem exclusion is limited to the host Wayland client", () => {
+  const patterns = read("src-tauri/.appimageignore")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith("#"));
+  assert.deepEqual(patterns, [
+    "usr/lib/libwayland-client.so*",
+    "usr/lib/*/libwayland-client.so*",
+    "usr/lib64/libwayland-client.so*",
+    "lib/libwayland-client.so*",
+    "lib64/libwayland-client.so*",
+  ]);
+  assert.equal(config.bundle.linux.appimage.bundleMediaFramework, true);
+  assert.equal(config.bundle.resources["../LICENSE"], "LICENSE");
+});
+
 test("default and credential-free Linux packaging cannot produce AppImage", () => {
   assert.ok(!config.bundle.targets.includes("appimage"));
   assert.equal(pkg.scripts["release:linux"], "node scripts/build-release.mjs --bundles deb,rpm");
@@ -125,7 +141,13 @@ test("release/feed require exact signed assets and verification; CI has no AppIm
   const ci = read(".github/workflows/ci.yml");
   const release = read(".github/workflows/release.yml");
   const feed = read(".github/workflows/publish-update-feed.yml");
+  const signedLinuxJob = release.match(/\n  build-linux:\n([\s\S]*?)\n  draft-release:/)?.[1];
   assert.ok(!ci.includes(".AppImage"));
+  assert.ok(signedLinuxJob);
+  assert.match(signedLinuxJob, /runs-on: ubuntu-24\.04/);
+  assert.match(signedLinuxJob, /dpkg --compare-versions "\$webkit_version" ge "2\.52"/);
+  assert.match(signedLinuxJob, /GSTREAMER_PLUGINS_DIR: \$\{\{ runner\.temp \}\}\/cassette-gstreamer-plugins/);
+  assert.match(signedLinuxJob, /test ! -e "\$plugins_target\/libgstneonhttpsrc\.so"/);
   assert.match(release, /npm run release:linux:signed/);
   assert.match(release, /node scripts\/verify-update.mjs/);
   assert.match(release, /needs: \[preflight, build-linux\]/);

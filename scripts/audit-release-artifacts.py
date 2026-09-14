@@ -623,6 +623,18 @@ def verify_rpm(audit: Audit, path: Path, root: Path) -> None:
 def verify_appdir(audit: Audit, root: Path, label: str) -> None:
     require_linux_payload(audit, root, label)
     require_file_hash(audit, root, "usr/lib/Cassette/LICENSE", label)
+    verify_appdir_host_libraries(audit, root, label)
+
+
+def verify_appdir_host_libraries(audit: Audit, root: Path, label: str) -> None:
+    # Inspect names without dereferencing: dangling SONAME symlinks must fail too.
+    # This is independent of appimagetool's exclusion file and runs on the
+    # extracted final AppImage, after the packaging-tool exclusion is applied.
+    for path in root.rglob("libwayland-client.so*"):
+        audit.fail(
+            f"{label}: bundled host graphics dependency {path.relative_to(root)}; "
+            "libwayland-client must resolve from the host for Mesa compatibility"
+        )
 
 
 def verify_windows_payload(audit: Audit, root: Path, label: str) -> None:

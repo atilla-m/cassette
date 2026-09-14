@@ -75,7 +75,7 @@ jobs:
   build-linux:
     name: Build signed Linux x86_64 artifacts
     needs: preflight
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
@@ -138,6 +138,36 @@ jobs:
             gstreamer1.0-plugins-ugly
           patchelf --version
 
+      - name: Verify signed AppImage runtime baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          webkit_version="$(pkg-config --modversion webkit2gtk-4.1)"
+          gstreamer_version="$(pkg-config --modversion gstreamer-1.0)"
+          glib_version="$(pkg-config --modversion glib-2.0)"
+          printf 'WebKitGTK: %s\nGStreamer: %s\nGLib: %s\n' \
+            "$webkit_version" "$gstreamer_version" "$glib_version"
+          dpkg --compare-versions "$webkit_version" ge "2.52"
+
+      - name: Prepare local-file GStreamer plugins for AppImage
+        shell: bash
+        run: |
+          set -euo pipefail
+          multiarch="$(dpkg-architecture -qDEB_HOST_MULTIARCH)"
+          plugins_source="/usr/lib/${multiarch}/gstreamer-1.0"
+          plugins_target="$RUNNER_TEMP/cassette-gstreamer-plugins"
+          test -f "$plugins_source/libgstneonhttpsrc.so"
+          install -d "$plugins_target"
+          copied=0
+          for plugin in "$plugins_source"/*; do
+            test -f "$plugin" || continue
+            test "$(basename "$plugin")" = "libgstneonhttpsrc.so" && continue
+            cp -- "$plugin" "$plugins_target/"
+            copied=$((copied + 1))
+          done
+          test "$copied" -gt 0
+          test ! -e "$plugins_target/libgstneonhttpsrc.so"
+
       - run: npm ci
       - run: npm run build
       - run: npm run check
@@ -149,6 +179,7 @@ jobs:
 
       - name: Build signed Linux release bundles
         env:
+          GSTREAMER_PLUGINS_DIR: ${{ runner.temp }}/cassette-gstreamer-plugins
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         shell: bash
@@ -202,16 +233,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test -f release-assets/linux/Cassette_0.1.0-beta.1_amd64.deb
-          test -f release-assets/linux/Cassette-0.1.0-beta.1-1.x86_64.rpm
-          test -f release-assets/linux/Cassette_0.1.0-beta.1_amd64.AppImage
-          test -s release-assets/linux/Cassette_0.1.0-beta.1_amd64.AppImage.sig
+          test -f release-assets/linux/deb/Cassette_0.1.0-beta.1_amd64.deb
+          test -f release-assets/linux/rpm/Cassette-0.1.0-beta.1-1.x86_64.rpm
+          test -f release-assets/linux/appimage/Cassette_0.1.0-beta.1_amd64.AppImage
+          test -s release-assets/linux/appimage/Cassette_0.1.0-beta.1_amd64.AppImage.sig
           test "$(find release-assets -type f | wc -l)" -eq 4
           sha256sum \
-            release-assets/linux/Cassette_0.1.0-beta.1_amd64.deb \
-            release-assets/linux/Cassette-0.1.0-beta.1-1.x86_64.rpm \
-            release-assets/linux/Cassette_0.1.0-beta.1_amd64.AppImage \
-            release-assets/linux/Cassette_0.1.0-beta.1_amd64.AppImage.sig
+            release-assets/linux/deb/Cassette_0.1.0-beta.1_amd64.deb \
+            release-assets/linux/rpm/Cassette-0.1.0-beta.1-1.x86_64.rpm \
+            release-assets/linux/appimage/Cassette_0.1.0-beta.1_amd64.AppImage \
+            release-assets/linux/appimage/Cassette_0.1.0-beta.1_amd64.AppImage.sig
 
       - name: Create draft prerelease and upload exact Linux assets
         env:
@@ -245,10 +276,10 @@ jobs:
           fi
 
           gh release upload "$tag" \
-            release-assets/linux/Cassette_0.1.0-beta.1_amd64.deb \
-            release-assets/linux/Cassette-0.1.0-beta.1-1.x86_64.rpm \
-            release-assets/linux/Cassette_0.1.0-beta.1_amd64.AppImage \
-            release-assets/linux/Cassette_0.1.0-beta.1_amd64.AppImage.sig \
+            release-assets/linux/deb/Cassette_0.1.0-beta.1_amd64.deb \
+            release-assets/linux/rpm/Cassette-0.1.0-beta.1-1.x86_64.rpm \
+            release-assets/linux/appimage/Cassette_0.1.0-beta.1_amd64.AppImage \
+            release-assets/linux/appimage/Cassette_0.1.0-beta.1_amd64.AppImage.sig \
             --clobber
 
           actual_assets="$(gh api "repos/${GH_REPO}/releases/tags/${tag}" --jq '.assets[].name' | sort)"

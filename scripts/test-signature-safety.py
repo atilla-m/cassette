@@ -79,5 +79,34 @@ class SignatureSafety(unittest.TestCase):
         module.audit_artifact(audit, self.signature, extraction)
         self.assertEqual(audit.errors, set())
 
+    def test_appdir_rejects_wayland_client_files_and_symlinks_only(self):
+        spec = importlib.util.spec_from_file_location("artifact_audit", Path(__file__).with_name("audit-release-artifacts.py"))
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        root = Path(self.temp.name) / "AppDir"
+        library = root / "usr/lib/x86_64-linux-gnu"
+        library.mkdir(parents=True)
+        audit = module.Audit(root, VERSION, Path(__file__).resolve().parent.parent / "LICENSE")
+        for name in ("libwayland-cursor.so.0", "libwayland-egl.so.1", "libwayland-server.so.0"):
+            (library / name).touch()
+        module.verify_appdir_host_libraries(audit, root, "fixture")
+        self.assertEqual(audit.errors, set())
+        for name in ("libwayland-client.so", "libwayland-client.so.0", "libwayland-client.so.0.22.0"):
+            with self.subTest(name=name):
+                path = library / name
+                path.touch()
+                module.verify_appdir_host_libraries(audit, root, "fixture")
+                self.assertTrue(any(name in error for error in audit.errors))
+                path.unlink()
+                audit.errors.clear()
+        link = library / "libwayland-client.so.0"
+        try:
+            link.symlink_to("missing-versioned-library")
+        except OSError:
+            self.skipTest("symlink privilege unavailable")
+        module.verify_appdir_host_libraries(audit, root, "fixture")
+        self.assertTrue(any("libwayland-client.so.0" in error for error in audit.errors))
+
 
 if __name__ == "__main__": unittest.main()

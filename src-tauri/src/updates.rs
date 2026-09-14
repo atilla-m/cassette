@@ -140,7 +140,7 @@ mod detection {
         }
         let expected_executable = directory.join("usr/bin/cassette").canonicalize().ok()?;
         let app_run = directory.join("AppRun").canonicalize().ok()?;
-        let desktop = directory.join("cassette.desktop").canonicalize().ok()?;
+        let desktop = directory.join("Cassette.desktop").canonicalize().ok()?;
         if expected_executable != executable
             || !executable.starts_with(&directory)
             || !app_run.starts_with(&directory)
@@ -204,10 +204,16 @@ mod detection {
         Some(PathBuf::from(std::ffi::OsString::from_vec(bytes)))
     }
 
-    fn mount_matches(mountinfo: &str, directory: &Path, image: &Path) -> bool {
-        mountinfo.lines().any(|line| {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum MountEvidence {
+        ExactSource(u64),
+        BasenameSource(u64),
+    }
+
+    fn mount_evidence(mountinfo: &str, directory: &Path, image: &Path) -> Option<MountEvidence> {
+        mountinfo.lines().find_map(|line| {
             let Some((left, right)) = line.split_once(" - ") else {
-                return false;
+                return None;
             };
             let fields: Vec<_> = left.split_whitespace().collect();
             let fs_fields: Vec<_> = right.split_whitespace().collect();
@@ -216,16 +222,98 @@ mod detection {
                 || !fs_fields[0].starts_with("fuse")
                 || !fields[5].split(',').any(|option| option == "ro")
             {
-                return false;
+                return None;
             }
             let Some(mount) = mount_path(fields[4]).and_then(|p| canonical_absolute(&p)) else {
-                return false;
+                return None;
             };
-            let Some(source) = mount_path(fs_fields[1]).and_then(|p| canonical_absolute(&p)) else {
-                return false;
+            if mount != directory {
+                return None;
+            }
+            let (major, minor) = fields[2].split_once(':')?;
+            if major != "0" {
+                return None;
             };
-            mount == directory && source == image
+            let connection = minor.parse().ok()?;
+            let source = mount_path(fs_fields[1])?;
+            if source.is_absolute() {
+                return (canonical_absolute(&source).as_deref() == Some(image))
+                    .then_some(MountEvidence::ExactSource(connection));
+            }
+            if source.components().count() != 1 || source.file_name() != image.file_name() {
+                return None;
+            }
+            Some(MountEvidence::BasenameSource(connection))
         })
+    }
+
+    fn fdinfo_fuse_connection(fdinfo: &str) -> Option<u64> {
+        fdinfo.lines().find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            (name == "fuse_connection")
+                .then(|| value.trim().parse().ok())
+                .flatten()
+        })
+    }
+
+    fn runtime_holds_fuse_connection(
+        proc_root: &Path,
+        image: &FileIdentity,
+        connection: u64,
+    ) -> bool {
+        let Ok(processes) = fs::read_dir(proc_root) else {
+            return false;
+        };
+        for process in processes.flatten() {
+            if !process
+                .file_name()
+                .as_encoded_bytes()
+                .iter()
+                .all(u8::is_ascii_digit)
+            {
+                continue;
+            }
+            let process = process.path();
+            let Some(executable) = fs::metadata(process.join("exe"))
+                .ok()
+                .as_ref()
+                .and_then(FileIdentity::from_metadata)
+            else {
+                continue;
+            };
+            if executable != *image {
+                continue;
+            }
+            let Ok(fdinfo) = fs::read_dir(process.join("fdinfo")) else {
+                continue;
+            };
+            if fdinfo.flatten().any(|entry| {
+                fs::read_to_string(entry.path())
+                    .ok()
+                    .and_then(|contents| fdinfo_fuse_connection(&contents))
+                    == Some(connection)
+            }) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn mount_is_authorized(
+        mountinfo: &str,
+        proc_root: &Path,
+        directory: &Path,
+        image: &AppImageIdentity,
+    ) -> bool {
+        let Some(evidence) = mount_evidence(mountinfo, directory, image.path()) else {
+            return false;
+        };
+        let connection = match evidence {
+            MountEvidence::ExactSource(connection) | MountEvidence::BasenameSource(connection) => {
+                connection
+            }
+        };
+        runtime_holds_fuse_connection(proc_root, &image.file, connection)
     }
 
     pub(super) fn current() -> Option<AppImageIdentity> {
@@ -247,10 +335,11 @@ mod detection {
         // The kernel mount table binds the mounted AppDir to its backing image.
         // Extract-and-run and runtimes without identifiable FUSE evidence fall
         // back to download-only; environment variables alone never authorize.
-        mount_matches(
+        mount_is_authorized(
             &fs::read_to_string("/proc/self/mountinfo").ok()?,
+            Path::new("/proc"),
             &directory.canonicalize().ok()?,
-            image.path(),
+            &image,
         )
         .then_some(image)
     }
@@ -279,9 +368,16 @@ mod detection {
                 fs::create_dir_all(exe.parent().unwrap()).unwrap();
                 fs::write(&exe, b"test executable").unwrap();
                 fs::write(dir.join("AppRun"), b"test launcher").unwrap();
+                let installed_desktop = dir.join("usr/share/applications/Cassette.desktop");
+                fs::create_dir_all(installed_desktop.parent().unwrap()).unwrap();
                 fs::write(
-                    dir.join("cassette.desktop"),
+                    &installed_desktop,
                     b"[Desktop Entry]\nType=Application\nExec=cassette %U\n",
+                )
+                .unwrap();
+                symlink(
+                    Path::new("usr/share/applications/Cassette.desktop"),
+                    dir.join("Cassette.desktop"),
                 )
                 .unwrap();
                 let image = root.join("application-without-extension");
@@ -311,6 +407,17 @@ mod detection {
         #[test]
         fn valid_structure_without_filename_extension() {
             assert!(Fixture::new().valid());
+        }
+        #[test]
+        fn lowercase_desktop_name_is_rejected() {
+            let f = Fixture::new();
+            fs::remove_file(f.dir.join("Cassette.desktop")).unwrap();
+            fs::write(
+                f.dir.join("cassette.desktop"),
+                b"[Desktop Entry]\nType=Application\nExec=cassette %U\n",
+            )
+            .unwrap();
+            assert!(!f.valid());
         }
         #[test]
         fn unchanged_image_keeps_filesystem_identity() {
@@ -352,10 +459,105 @@ mod detection {
                 f.dir.display(),
                 f.image.display()
             );
-            assert!(mount_matches(&mount, &f.dir, &f.image));
-            assert!(!mount_matches(&mount, &f.dir, &other.image));
-            assert!(!mount_matches(&mount, &other.dir, &f.image));
-            assert!(!mount_matches("", &f.dir, &f.image));
+            assert_eq!(
+                mount_evidence(&mount, &f.dir, &f.image),
+                Some(MountEvidence::ExactSource(99))
+            );
+            assert_eq!(mount_evidence(&mount, &f.dir, &other.image), None);
+            assert_eq!(mount_evidence(&mount, &other.dir, &f.image), None);
+            assert_eq!(mount_evidence("", &f.dir, &f.image), None);
+        }
+        #[test]
+        fn basename_mount_source_requires_runtime_connection() {
+            let f = Fixture::new();
+            let filename = f.image.file_name().unwrap().to_string_lossy();
+            let mount = format!(
+                "123 45 0:87 / {} ro,nosuid - fuse.{filename} {filename} ro",
+                f.dir.display()
+            );
+            assert_eq!(
+                mount_evidence(&mount, &f.dir, &f.image),
+                Some(MountEvidence::BasenameSource(87))
+            );
+            assert_eq!(
+                mount_evidence(
+                    &mount.replace(&*filename, "different-image"),
+                    &f.dir,
+                    &f.image
+                ),
+                None
+            );
+            assert_eq!(
+                mount_evidence(&mount.replacen("0:87", "1:87", 1), &f.dir, &f.image),
+                None
+            );
+        }
+        #[test]
+        fn runtime_connection_is_bound_to_opened_image_identity() {
+            let f = Fixture::new();
+            let identity = detect(&f.image, &f.dir, &f.exe).unwrap();
+            let proc_root = f.root.join("proc");
+            let process = proc_root.join("123");
+            fs::create_dir_all(process.join("fdinfo")).unwrap();
+            symlink(&f.image, process.join("exe")).unwrap();
+            fs::write(
+                process.join("fdinfo/5"),
+                b"pos:\t0\nflags:\t0100002\nfuse_connection:\t87\n",
+            )
+            .unwrap();
+            let absolute_mount = format!(
+                "123 45 0:87 / {} ro,nosuid - fuse.AppImage {} ro",
+                f.dir.display(),
+                f.image.display()
+            );
+            let filename = f.image.file_name().unwrap().to_string_lossy();
+            let basename_mount = format!(
+                "123 45 0:87 / {} ro,nosuid - fuse.{filename} {filename} ro",
+                f.dir.display()
+            );
+            assert!(mount_is_authorized(
+                &absolute_mount,
+                &proc_root,
+                &f.dir,
+                &identity
+            ));
+            assert!(mount_is_authorized(
+                &basename_mount,
+                &proc_root,
+                &f.dir,
+                &identity
+            ));
+            assert!(!mount_is_authorized(
+                &absolute_mount.replacen("0:87", "0:88", 1),
+                &proc_root,
+                &f.dir,
+                &identity
+            ));
+
+            let other = Fixture::new();
+            let other_identity = detect(&other.image, &other.dir, &other.exe).unwrap();
+            assert!(!runtime_holds_fuse_connection(
+                &proc_root,
+                &other_identity.file,
+                87
+            ));
+
+            fs::remove_dir_all(&process).unwrap();
+            assert!(!mount_is_authorized(
+                &absolute_mount,
+                &proc_root,
+                &f.dir,
+                &identity
+            ));
+            fs::create_dir_all(process.join("fdinfo")).unwrap();
+            symlink(&other.image, process.join("exe")).unwrap();
+            fs::write(process.join("fdinfo/5"), b"fuse_connection:\t87\n").unwrap();
+            assert!(!mount_is_authorized(
+                &absolute_mount,
+                &proc_root,
+                &f.dir,
+                &identity
+            ));
         }
         #[test]
         fn arbitrary_file_directory_rejected() {
@@ -401,6 +603,19 @@ mod detection {
             assert!(!f.valid());
             let other = Fixture::new();
             assert!(detect(&f.image, &other.dir, &f.exe).is_none());
+        }
+        #[test]
+        fn escaped_desktop_symlink_rejected() {
+            let f = Fixture::new();
+            let outside = f.root.join("outside.desktop");
+            fs::write(
+                &outside,
+                b"[Desktop Entry]\nType=Application\nExec=cassette %U\n",
+            )
+            .unwrap();
+            fs::remove_file(f.dir.join("Cassette.desktop")).unwrap();
+            symlink(outside, f.dir.join("Cassette.desktop")).unwrap();
+            assert!(!f.valid());
         }
     }
 }
