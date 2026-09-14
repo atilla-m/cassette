@@ -137,11 +137,8 @@ test("native-only installation and recoverable initialization remain mandatory",
   assert.match(native, /operation_id/);
 });
 
-test("release/feed require exact signed assets and verification; CI has no AppImage", () => {
-  const ci = read(".github/workflows/ci.yml");
-  const release = read(".github/workflows/release.yml");
-  const feed = read(".github/workflows/publish-update-feed.yml");
-  const signedLinuxJob = release.match(/\n  build-linux:\n([\s\S]*?)\n  draft-release:/)?.[1];
+function assertReleaseWorkflowPolicy(ci, release, feed, generator) {
+  const signedLinuxJob = release.match(/\r?\n  build-linux:\r?\n([\s\S]*?)\r?\n  draft-release:/)?.[1];
   assert.ok(!ci.includes(".AppImage"));
   assert.ok(signedLinuxJob);
   assert.match(signedLinuxJob, /runs-on: ubuntu-24\.04/);
@@ -156,11 +153,39 @@ test("release/feed require exact signed assets and verification; CI has no AppIm
   assert.match(feed, /types: \[published\]/);
   assert.match(feed, /github.event.release.prerelease == true/);
   assert.match(feed, /APPIMAGE_FILE:/);
-  const generator = read("scripts/generate-update-feed.mjs");
   assert.match(generator, /verifyUpdate\(snapshot.image, snapshot.signature/);
   assert.match(generator, /readFileSync\(snapshot.signature/);
   assert.ok(!feed.includes("contents: write"));
+}
+
+test("release/feed require exact signed assets and verification; CI has no AppImage", () => {
+  assertReleaseWorkflowPolicy(
+    read(".github/workflows/ci.yml"),
+    read(".github/workflows/release.yml"),
+    read(".github/workflows/publish-update-feed.yml"),
+    read("scripts/generate-update-feed.mjs"),
+  );
 });
+
+for (const [name, ending] of [["LF", "\n"], ["CRLF", "\r\n"]]) {
+  test(`release/feed policy accepts ${name} and rejects a downgraded AppImage runner`, () => {
+    const withEnding = (text) => text.replace(/\r?\n/g, ending);
+    const ci = withEnding(read(".github/workflows/ci.yml"));
+    const release = withEnding(read(".github/workflows/release.yml"));
+    const feed = withEnding(read(".github/workflows/publish-update-feed.yml"));
+    const generator = withEnding(read("scripts/generate-update-feed.mjs"));
+    assert.doesNotThrow(() => assertReleaseWorkflowPolicy(ci, release, feed, generator));
+
+    const downgraded = release.replace("runs-on: ubuntu-24.04", "runs-on: ubuntu-22.04");
+    assert.notEqual(downgraded, release);
+    assert.throws(
+      () => assertReleaseWorkflowPolicy(ci, downgraded, feed, generator),
+      (error) => error.code === "ERR_ASSERTION"
+        && error.expected instanceof RegExp
+        && error.expected.source === "runs-on: ubuntu-24\\.04",
+    );
+  });
+}
 
 test("feed snapshot cannot publish a signature changed after verification", () => {
   const directory = mkdtempSync(join(tmpdir(), "cassette-feed-snapshot-test-"));
