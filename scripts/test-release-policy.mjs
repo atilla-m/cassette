@@ -161,6 +161,11 @@ function assertReleaseWorkflowPolicy(ci, release, feed, generator) {
   assert.match(release, /node scripts\/verify-update.mjs/);
   assert.match(release, /needs: \[preflight, build-linux\]/);
   assert.match(release, /--draft/);
+  assert.match(release, /gh api --paginate --slurp "repos\/\$\{GH_REPO\}\/releases\?per_page=100"/);
+  assert.match(release, /test "\$release_count" -eq 1/);
+  assert.match(release, /gh api "repos\/\$\{GH_REPO\}\/releases\/\$\{release_id\}"/);
+  assert.match(release, /test "\$\(jq -r '\.published_at == null'/);
+  assert.ok(!release.includes("releases/tags/${tag}"));
   assert.ok(!release.includes("release:windows"));
   assert.match(feed, /types: \[published\]/);
   assert.match(feed, /github.event.release.prerelease == true/);
@@ -217,6 +222,15 @@ for (const [name, ending] of [["LF", "\n"], ["CRLF", "\r\n"]]) {
       (error) => error.code === "ERR_ASSERTION"
         && error.expected instanceof RegExp
         && error.expected.source === "runs-on: ubuntu-24\\.04",
+    );
+
+    const unpaginated = release.replace("gh api --paginate --slurp", "gh api --slurp");
+    assert.notEqual(unpaginated, release);
+    assert.throws(
+      () => assertReleaseWorkflowPolicy(ci, unpaginated, feed, generator),
+      (error) => error.code === "ERR_ASSERTION"
+        && error.expected instanceof RegExp
+        && error.expected.source.includes("--paginate"),
     );
   });
 }

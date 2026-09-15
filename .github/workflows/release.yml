@@ -254,26 +254,41 @@ jobs:
           tag="$GITHUB_REF_NAME"
           test "$tag" = "v$RELEASE_VERSION"
 
-          if gh release view "$tag" >/dev/null 2>&1; then
-            is_draft="$(gh api "repos/${GH_REPO}/releases/tags/${tag}" --jq '.draft')"
-            is_prerelease="$(gh api "repos/${GH_REPO}/releases/tags/${tag}" --jq '.prerelease')"
-            test "$is_draft" = "true"
-            test "$is_prerelease" = "true"
+          list_releases() {
+            gh api --paginate --slurp "repos/${GH_REPO}/releases?per_page=100"
+          }
 
-            while IFS= read -r asset; do
-              case "$asset" in
-                Cassette_0.1.0-beta.2_amd64.deb|Cassette-0.1.0-beta.2-1.x86_64.rpm|Cassette_0.1.0-beta.2_amd64.AppImage|Cassette_0.1.0-beta.2_amd64.AppImage.sig) ;;
-                *) echo "Refusing to reuse draft with unexpected asset: $asset" >&2; exit 1 ;;
-              esac
-            done < <(gh api "repos/${GH_REPO}/releases/tags/${tag}" --jq '.assets[].name')
-          else
+          release_pages="$(list_releases)"
+          release_count="$(jq --arg tag "$tag" '[.[][] | select(.tag_name == $tag)] | length' <<<"$release_pages")"
+          if test "$release_count" -eq 0; then
             gh release create "$tag" \
               --draft \
               --prerelease \
               --verify-tag \
               --title "Cassette ${tag#v}" \
               --notes "Draft Linux prerelease. Complete docs/RELEASING.md before publishing."
+          elif test "$release_count" -ne 1; then
+            echo "Expected zero or one release for ${tag}, found ${release_count}." >&2
+            exit 1
           fi
+
+          release_pages="$(list_releases)"
+          release_count="$(jq --arg tag "$tag" '[.[][] | select(.tag_name == $tag)] | length' <<<"$release_pages")"
+          test "$release_count" -eq 1
+          release_id="$(jq -r --arg tag "$tag" '[.[][] | select(.tag_name == $tag)][0].id' <<<"$release_pages")"
+          [[ "$release_id" =~ ^[1-9][0-9]*$ ]]
+          release_json="$(gh api "repos/${GH_REPO}/releases/${release_id}")"
+          test "$(jq -r '.tag_name' <<<"$release_json")" = "$tag"
+          test "$(jq -r '.draft' <<<"$release_json")" = "true"
+          test "$(jq -r '.prerelease' <<<"$release_json")" = "true"
+          test "$(jq -r '.published_at == null' <<<"$release_json")" = "true"
+
+          while IFS= read -r asset; do
+            case "$asset" in
+              Cassette_0.1.0-beta.2_amd64.deb|Cassette-0.1.0-beta.2-1.x86_64.rpm|Cassette_0.1.0-beta.2_amd64.AppImage|Cassette_0.1.0-beta.2_amd64.AppImage.sig) ;;
+              *) echo "Refusing to reuse draft with unexpected asset: $asset" >&2; exit 1 ;;
+            esac
+          done < <(jq -r '.assets[].name' <<<"$release_json")
 
           gh release upload "$tag" \
             release-assets/linux/deb/Cassette_0.1.0-beta.2_amd64.deb \
@@ -282,7 +297,12 @@ jobs:
             release-assets/linux/appimage/Cassette_0.1.0-beta.2_amd64.AppImage.sig \
             --clobber
 
-          actual_assets="$(gh api "repos/${GH_REPO}/releases/tags/${tag}" --jq '.assets[].name' | sort)"
+          release_json="$(gh api "repos/${GH_REPO}/releases/${release_id}")"
+          test "$(jq -r '.tag_name' <<<"$release_json")" = "$tag"
+          test "$(jq -r '.draft' <<<"$release_json")" = "true"
+          test "$(jq -r '.prerelease' <<<"$release_json")" = "true"
+          test "$(jq -r '.published_at == null' <<<"$release_json")" = "true"
+          actual_assets="$(jq -r '.assets[].name' <<<"$release_json" | sort)"
           expected_assets="$(printf '%s\n' \
             Cassette-0.1.0-beta.2-1.x86_64.rpm \
             Cassette_0.1.0-beta.2_amd64.AppImage \
