@@ -18,6 +18,14 @@ The beta uses the stock Tauri desktop icons as an accepted known limitation. DEB
 
 The AppImage is the recommended download. It can run without replacing a system package. The production updater public key and endpoint are configured, but automatic updating must not be advertised as operational until the beta.2 signed older-to-newer update test passes. Updates are never forced, and development builds do not contact the update feed.
 
+A clean Ubuntu 24.04 installation required the FUSE 2 compatibility library before the AppImage could mount and run:
+
+```sh
+sudo apt install libfuse2t64
+```
+
+This prerequisite applies to the AppImage. It records the tested Ubuntu 24.04 setup and does not imply the same package name or requirement on other distributions.
+
 Automatic checks are limited to one attempt per 24 hours across restarts, including network failures; manual checks remain available. AppImage installation requires native runtime verification and explicit confirmation. Downloads cannot be cancelled after confirmation in beta.2. `npm run release:linux` and ordinary CI build DEB/RPM only; `npm run release:linux:signed` is the sole supported distributable AppImage build and requires the production configuration and credentials. See [the update handoff](docs/UPDATES.md) for signature verification, publication, and key rotation.
 
 Install a downloaded RPM on Fedora:
