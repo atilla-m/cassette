@@ -63,12 +63,16 @@
     AUTOMATIC_UPDATE_SETTING_KEY,
     LAST_SUCCESSFUL_UPDATE_CHECK_KEY,
     LAST_AUTOMATIC_UPDATE_ATTEMPT_KEY,
+    type AppImageMenuStatus,
     type CassetteUpdate,
+    addAppImageToMenu,
     checkForCassetteUpdate,
+    getAppImageMenuStatus,
     getUpdateRuntimeInfo,
     installAppImageUpdate,
     loadUpdaterStorage,
     persistUpdaterStorage,
+    removeAppImageFromMenu,
     shouldRunAutomaticUpdateCheck,
     updateReleaseUrl,
     type UpdateDownloadProgress,
@@ -436,6 +440,10 @@
   let automaticUpdateChecksEnabled = $state(true);
   let lastSuccessfulUpdateCheck = $state<number | null>(null);
   let updateRuntime = $state<UpdateRuntimeInfo | null>(null);
+  let appImageMenuStatus = $state<AppImageMenuStatus | null>(null);
+  let appImageMenuBusy = $state(false);
+  let appImageMenuMessage = $state<string | null>(null);
+  let appImageMenuIsError = $state(false);
   let updateCheckState = $state<"idle" | "checking" | "confirming" | "available" | "current" | "downloading" | "installing" | "error">("idle");
   let updateStatusMessage = $state<string | null>(null);
   let updateStatusIsError = $state(false);
@@ -1255,6 +1263,15 @@
       return;
     }
 
+    if (!updateRuntime.development && updateRuntime.packageKind === "appimage") {
+      try {
+        appImageMenuStatus = await getAppImageMenuStatus();
+      } catch (error) {
+        appImageMenuIsError = true;
+        appImageMenuMessage = `Could not inspect the applications-menu launcher: ${safeUpdateError(error)}`;
+      }
+    }
+
     if (
       !updateRuntime.development
       && updateRuntime.platform === "linux"
@@ -1362,6 +1379,44 @@
 
   async function handleManualUpdateCheck() {
     await runUpdateCheck("manual");
+  }
+
+  async function handleAddAppImageToMenu() {
+    if (appImageMenuBusy || updateIsBusy || updateRuntime?.packageKind !== "appimage") return;
+    appImageMenuBusy = true;
+    appImageMenuMessage = null;
+    try {
+      appImageMenuStatus = await addAppImageToMenu();
+      if (!appImageMenuStatus.installed || appImageMenuStatus.needsRefresh) {
+        throw new Error("The launcher or icon is not ready; please retry.");
+      }
+      appImageMenuIsError = false;
+      appImageMenuMessage = "Cassette's AppImage launcher and icon are ready in your applications menu.";
+    } catch (error) {
+      appImageMenuIsError = true;
+      appImageMenuMessage = `Could not add the applications-menu launcher: ${safeUpdateError(error)}`;
+    } finally {
+      appImageMenuBusy = false;
+    }
+  }
+
+  async function handleRemoveAppImageFromMenu() {
+    if (appImageMenuBusy || updateIsBusy || updateRuntime?.packageKind !== "appimage") return;
+    appImageMenuBusy = true;
+    appImageMenuMessage = null;
+    try {
+      appImageMenuStatus = await removeAppImageFromMenu();
+      if (appImageMenuStatus.installed) {
+        throw new Error("The launcher is still installed; please retry.");
+      }
+      appImageMenuIsError = false;
+      appImageMenuMessage = "Cassette's managed AppImage launcher and icon were removed.";
+    } catch (error) {
+      appImageMenuIsError = true;
+      appImageMenuMessage = `Could not remove the applications-menu launcher: ${safeUpdateError(error)}`;
+    } finally {
+      appImageMenuBusy = false;
+    }
   }
 
   async function handleViewUpdateDownload() {
@@ -8614,6 +8669,43 @@
                   {updateCheckState === "checking" ? "Checking..." : "Check for updates"}
                 </button>
               </div>
+
+              {#if updateRuntime?.packageKind === "appimage" && !updateRuntime.development}
+                <div class="settings-control-list">
+                  <div>
+                    <span>Applications menu</span>
+                    <strong>
+                      {appImageMenuStatus?.needsRefresh
+                        ? "Launcher needs refresh"
+                        : appImageMenuStatus?.installed
+                          ? "Cassette AppImage launcher added"
+                          : "Launcher not added"}
+                    </strong>
+                    <small>
+                      The launcher points to this AppImage's current location. If you move or delete the AppImage,
+                      launch it from the new location and add or refresh the launcher again.
+                    </small>
+                    {#if appImageMenuStatus}
+                      <small>Current AppImage: {appImageMenuStatus.imagePath}</small>
+                    {/if}
+                  </div>
+                </div>
+                <div class="settings-actions">
+                  <button type="button" disabled={appImageMenuBusy || updateIsBusy} onclick={handleAddAppImageToMenu}>
+                    {appImageMenuBusy ? "Working..." : appImageMenuStatus?.installed ? "Refresh applications-menu launcher" : "Add to applications menu"}
+                  </button>
+                  {#if appImageMenuStatus?.installed}
+                    <button class="danger" type="button" disabled={appImageMenuBusy || updateIsBusy} onclick={handleRemoveAppImageFromMenu}>
+                      Remove AppImage launcher
+                    </button>
+                  {/if}
+                </div>
+                {#if appImageMenuMessage}
+                  <p class="form-message" class:error={appImageMenuIsError} role={appImageMenuIsError ? "alert" : "status"}>
+                    {appImageMenuMessage}
+                  </p>
+                {/if}
+              {/if}
 
               {#if unavailableUpdateMessage(updateRuntime)}
                 <p class="settings-note">{unavailableUpdateMessage(updateRuntime)}</p>

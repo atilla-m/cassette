@@ -24,6 +24,24 @@ export type UpdateRuntimeInfo = {
   updaterAvailable: boolean;
 };
 
+export type AppImageMenuStatus = {
+  installed: boolean;
+  needsRefresh: boolean;
+  imagePath: string;
+};
+
+export async function getAppImageMenuStatus(): Promise<AppImageMenuStatus> {
+  return invoke<AppImageMenuStatus>("get_appimage_menu_status");
+}
+
+export async function addAppImageToMenu(): Promise<AppImageMenuStatus> {
+  return invoke<AppImageMenuStatus>("add_appimage_to_menu");
+}
+
+export async function removeAppImageFromMenu(): Promise<AppImageMenuStatus> {
+  return invoke<AppImageMenuStatus>("remove_appimage_from_menu");
+}
+
 export type UpdateDownloadProgress = {
   downloadedBytes: number;
   totalBytes: number | null;

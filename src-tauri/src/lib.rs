@@ -8563,6 +8563,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_platform_capabilities,
             updates::get_update_runtime_info,
+            updates::get_appimage_menu_status,
+            updates::add_appimage_to_menu,
+            updates::remove_appimage_from_menu,
             updates::check_cassette_update,
             updates::install_cassette_update,
             get_library_cache,

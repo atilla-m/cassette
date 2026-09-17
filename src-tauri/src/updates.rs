@@ -23,6 +23,14 @@ pub struct RuntimeInfo {
     updater_available: bool,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MenuStatus {
+    installed: bool,
+    needs_refresh: bool,
+    image_path: String,
+}
+
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateInfo {
@@ -105,7 +113,6 @@ mod detection {
             &self.path
         }
 
-        #[cfg(any(test, feature = "signed-updater"))]
         pub(super) fn still_matches_path(&self) -> bool {
             capture_path_identity(&self.path).as_ref() == Some(&self.file)
         }
@@ -617,6 +624,45 @@ mod detection {
             symlink(outside, f.dir.join("Cassette.desktop")).unwrap();
             assert!(!f.valid());
         }
+    }
+}
+
+#[cfg(target_os = "linux")]
+mod appimage_menu;
+
+#[tauri::command]
+pub fn get_appimage_menu_status() -> Result<MenuStatus, String> {
+    #[cfg(target_os = "linux")]
+    {
+        appimage_menu::status()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Err("Applications-menu setup is available only for Linux AppImages.".into())
+    }
+}
+
+#[tauri::command]
+pub fn add_appimage_to_menu() -> Result<MenuStatus, String> {
+    #[cfg(target_os = "linux")]
+    {
+        appimage_menu::install()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Err("Applications-menu setup is available only for Linux AppImages.".into())
+    }
+}
+
+#[tauri::command]
+pub fn remove_appimage_from_menu() -> Result<MenuStatus, String> {
+    #[cfg(target_os = "linux")]
+    {
+        appimage_menu::remove()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Err("Applications-menu setup is available only for Linux AppImages.".into())
     }
 }
 
