@@ -18,6 +18,7 @@
     "preview": "vite preview",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
+    "test:lyrics": "node --test --experimental-test-isolation=none --experimental-strip-types scripts/test-synced-lyrics.mjs scripts/test-playback-seek.mjs",
     "test:updater": "node --test --experimental-test-isolation=none scripts/test-update-policy.mjs scripts/test-release-policy.mjs",
     "release:linux": "node scripts/build-release.mjs --bundles deb,rpm",
     "release:linux:signed": "node scripts/build-release.mjs --features signed-updater --bundles appimage,deb,rpm --config src-tauri/tauri.updater.conf.json --ci",

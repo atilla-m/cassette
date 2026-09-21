@@ -17,8 +17,8 @@ export async function getPlaybackStatus(): Promise<PlaybackStatus> {
   return invoke<PlaybackStatus>("get_playback_status");
 }
 
-export async function seekPlayback(positionSeconds: number): Promise<PlaybackStatus> {
-  return invoke<PlaybackStatus>("seek_playback", { positionSeconds });
+export async function seekPlayback(positionSeconds: number, expectedFilePath: string): Promise<PlaybackStatus> {
+  return invoke<PlaybackStatus>("seek_playback", { positionSeconds, expectedFilePath });
 }
 
 export async function setPlaybackVolume(volume: number): Promise<PlaybackStatus> {

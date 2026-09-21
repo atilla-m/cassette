@@ -4824,6 +4824,7 @@ fn get_playback_status(
 #[tauri::command]
 fn seek_playback(
     position_seconds: f64,
+    expected_file_path: String,
     playback: State<'_, Mutex<PlaybackState>>,
     mpris: State<'_, MprisState>,
 ) -> Result<PlaybackStatus, String> {
@@ -4831,7 +4832,7 @@ fn seek_playback(
         .lock()
         .map_err(|_| "Playback state is unavailable.".to_owned())?;
 
-    let status = playback.seek(position_seconds)?;
+    let status = playback.seek(position_seconds, &expected_file_path)?;
     mpris.update_playback(status.is_playing, status.position_seconds, status.volume);
 
     Ok(status)
@@ -4933,24 +4934,26 @@ impl PlaybackState {
         Ok(())
     }
 
-    fn seek(&mut self, position_seconds: f64) -> Result<PlaybackStatus, String> {
+    fn seek(
+        &mut self,
+        position_seconds: f64,
+        expected_file_path: &str,
+    ) -> Result<PlaybackStatus, String> {
         if !position_seconds.is_finite() {
-            return Ok(self.status());
+            return Err("Seek position must be a finite number.".to_owned());
         }
 
-        if self.current_path.is_none() {
-            return Ok(self.status());
-        }
+        ensure_seek_track_matches(self.current_path.as_deref(), expected_file_path)?;
 
         let Some(playbin) = self.playbin.as_ref() else {
-            return Ok(self.status());
+            return Err("Playback is not initialized for seeking.".to_owned());
         };
 
         let Some(duration) = playbin
             .query_duration::<gst::ClockTime>()
             .filter(|duration| *duration > gst::ClockTime::ZERO)
         else {
-            return Ok(self.status());
+            return Err("Could not determine the current track duration for seeking.".to_owned());
         };
         let clamped_position_seconds = position_seconds.clamp(0.0, duration.seconds_f64());
         let seek_position = gst::ClockTime::try_from_seconds_f64(clamped_position_seconds)
@@ -4964,7 +4967,13 @@ impl PlaybackState {
             .map_err(|error| format!("Could not seek track: {error}"))?;
         self.has_ended = false;
 
-        Ok(self.status())
+        // A flushing seek is accepted before the pipeline necessarily exposes
+        // its new clock position. Report the accepted target instead of a
+        // transient zero/stale query from that hand-off window.
+        Ok(status_with_accepted_seek_position(
+            self.status(),
+            clamped_position_seconds,
+        ))
     }
 
     fn set_volume(&mut self, volume: f64) -> Result<PlaybackStatus, String> {
@@ -5021,6 +5030,55 @@ impl PlaybackState {
             duration_seconds,
             volume,
         }
+    }
+}
+
+fn ensure_seek_track_matches(
+    current_file_path: Option<&str>,
+    expected_file_path: &str,
+) -> Result<(), String> {
+    if current_file_path == Some(expected_file_path) {
+        Ok(())
+    } else {
+        Err("The current track changed before the seek could be applied.".to_owned())
+    }
+}
+
+fn status_with_accepted_seek_position(
+    mut status: PlaybackStatus,
+    position_seconds: f64,
+) -> PlaybackStatus {
+    status.position_seconds = position_seconds.floor() as u64;
+    status
+}
+
+#[cfg(test)]
+mod playback_seek_tests {
+    use super::*;
+
+    fn status_at(position_seconds: u64) -> PlaybackStatus {
+        PlaybackStatus {
+            file_path: Some("/music/track.flac".to_owned()),
+            is_playing: true,
+            has_ended: false,
+            position_seconds,
+            duration_seconds: Some(60),
+            volume: 1.0,
+        }
+    }
+
+    #[test]
+    fn accepted_seek_target_replaces_a_transient_zero_position() {
+        let status = status_with_accepted_seek_position(status_at(0), 23.75);
+
+        assert_eq!(status.position_seconds, 23);
+    }
+
+    #[test]
+    fn seek_requires_the_track_captured_by_the_caller() {
+        assert!(ensure_seek_track_matches(Some("/music/track.flac"), "/music/track.flac").is_ok());
+        assert!(ensure_seek_track_matches(Some("/music/other.flac"), "/music/track.flac").is_err());
+        assert!(ensure_seek_track_matches(None, "/music/track.flac").is_err());
     }
 }
 

@@ -123,6 +123,17 @@
   } from "$lib/types/library";
   import { sendLinuxPlaybackNotification } from "$lib/utils/linuxNotifications";
   import { localImageSource } from "$lib/utils/localImage";
+  import {
+    PlaybackSeekCoordinator,
+    failedSeekRecoveryPosition,
+    type PlaybackSeekRequest,
+  } from "$lib/utils/playbackSeek";
+  import {
+    parseLrcLyrics,
+    resolveSyncedLyricsState,
+    startsSyncedLyricBreak,
+    type SyncedLyricCue,
+  } from "$lib/utils/syncedLyrics";
   import { listen } from "@tauri-apps/api/event";
   import { ask } from "@tauri-apps/plugin-dialog";
   import { openPath, openUrl } from "@tauri-apps/plugin-opener";
@@ -205,10 +216,6 @@
     genre: Genre;
     totalPlays: number;
     songCount: number;
-  };
-  type SyncedLyricLine = {
-    timeSeconds: number;
-    text: string;
   };
   type ShortcutItem = {
     keys: string[];
@@ -490,6 +497,9 @@
   let playbackSessionListenedSeconds = 0;
   let playbackSessionStartedAtMs: number | null = null;
   let positionSeconds = $state(0);
+  let lastConfirmedPlaybackPositionSeconds = 0;
+  const playbackSeekCoordinator = new PlaybackSeekCoordinator();
+  let playbackSeekLoop: Promise<void> | null = null;
   let durationSeconds = $state<number | null>(null);
   let volume = $state(1);
   let contextMenu = $state<ContextMenuState | null>(null);
@@ -664,8 +674,14 @@
   let currentTrackDuration = $derived(durationSeconds ?? currentTrack?.durationSeconds ?? null);
   let syncedLyricLines = $derived(currentLyrics?.kind === "synced" ? parseLrcLyrics(currentLyrics.text) : []);
   let lyricsOffsetSeconds = $derived(currentLyrics?.offsetSeconds ?? 0);
-  let adjustedLyricPositionSeconds = $derived(positionSeconds - lyricsOffsetSeconds);
-  let activeLyricIndex = $derived(activeSyncedLyricIndex(syncedLyricLines, adjustedLyricPositionSeconds));
+  let syncedLyricsState = $derived(resolveSyncedLyricsState(syncedLyricLines, positionSeconds, lyricsOffsetSeconds));
+  let activeLyricsScrollKey = $derived(
+    syncedLyricsState.kind === "intro"
+      ? "intro"
+      : syncedLyricsState.activeCueIndex >= 0
+        ? `cue-${syncedLyricsState.activeCueIndex}`
+        : null,
+  );
   let lyricsBadgeLabel = $derived(currentLyrics ? lyricsStatusText(currentLyrics) : null);
   let cachedLyricsLabel = $derived(currentLyrics?.source === "lrclib" ? cachedLyricsStatus(currentLyrics) : null);
   let canPlayPrevious = $derived(
@@ -793,12 +809,13 @@
   });
 
   $effect(() => {
-    if (activeLyricIndex < 0 || !lyricsPanelElement) {
+    if (!activeLyricsScrollKey || !lyricsPanelElement) {
       return;
     }
 
     const activeLine = lyricsPanelElement.querySelector<HTMLElement>("[data-active='true']");
-    activeLine?.scrollIntoView({ block: "center", behavior: "smooth" });
+    const prefersReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    activeLine?.scrollIntoView({ block: "center", behavior: prefersReducedMotion ? "auto" : "smooth" });
   });
 
   $effect(() => {
@@ -855,17 +872,29 @@
         return;
       }
 
+      const statusTrackPath = currentTrack.filePath;
+      const positionSnapshot = playbackSeekCoordinator.capturePositionUpdate(statusTrackPath);
+
       try {
         const status = await getPlaybackStatus();
-        applyPlaybackStatus(status);
-        await handlePlaybackStatusUpdate(status, "status");
+
+        if (currentTrack?.filePath !== statusTrackPath || status.filePath !== statusTrackPath) {
+          return;
+        }
+
+        const applyPosition = playbackSeekCoordinator.allowsPositionUpdate(positionSnapshot);
+        applyPlaybackStatus(status, { applyPosition });
+
+        if (applyPosition) {
+          await handlePlaybackStatusUpdate(status, "status");
+        }
       } catch (error) {
         playbackError = error instanceof Error ? error.message : String(error);
       }
     }, 1000);
 
     const progressIntervalId = window.setInterval(() => {
-      if (!currentTrack || !isPlaying) {
+      if (!currentTrack || !isPlaying || playbackSeekCoordinator.hasPendingSeek(currentTrack.filePath)) {
         return;
       }
 
@@ -1038,6 +1067,7 @@
     }
 
     isLoadingLyrics = true;
+    currentLyrics = null;
     isAutoFindingLyrics = false;
     lyricsLookupMessage = null;
     lyricsLookupError = null;
@@ -4163,6 +4193,8 @@
     currentTrackIndex = trackIndex >= 0 ? trackIndex : null;
     currentQueueIndex = queueIndex;
     durationSeconds = track.durationSeconds;
+    playbackSeekCoordinator.reset(track.filePath);
+    lastConfirmedPlaybackPositionSeconds = 0;
     positionSeconds = 0;
     isPlaying = false;
     hasCurrentTrackEnded = false;
@@ -4173,6 +4205,10 @@
 
     try {
       const status = await playTrack(track.filePath);
+      if (currentTrack?.filePath !== track.filePath || status.filePath !== track.filePath) {
+        return;
+      }
+
       applyPlaybackStatus(status);
       durationSeconds = status.durationSeconds ?? track.durationSeconds;
       await notifyTrackPlaybackStarted(track, currentPlaybackStartId);
@@ -4637,6 +4673,8 @@
       return;
     }
 
+    const playbackTrackPath = currentTrack.filePath;
+    const positionSnapshot = playbackSeekCoordinator.capturePositionUpdate(playbackTrackPath);
     playbackError = null;
 
     if (!isPlaying && hasCurrentTrackEnded) {
@@ -4657,7 +4695,14 @@
       }
 
       const status = isPlaying ? await pausePlayback() : await resumePlayback();
-      applyPlaybackStatus(status);
+
+      if (currentTrack?.filePath !== playbackTrackPath || status.filePath !== playbackTrackPath) {
+        return;
+      }
+
+      applyPlaybackStatus(status, {
+        applyPosition: playbackSeekCoordinator.allowsPositionUpdate(positionSnapshot),
+      });
       await maybeRecordTrackPlay();
     } catch (error) {
       playbackError = error instanceof Error ? error.message : String(error);
@@ -4685,14 +4730,22 @@
       return;
     }
 
+    const playbackTrackPath = currentTrack.filePath;
+    const positionSnapshot = playbackSeekCoordinator.capturePositionUpdate(playbackTrackPath);
     playbackError = null;
 
     try {
-      applyPlaybackStatus(await pausePlayback());
+      const status = await pausePlayback();
+
+      if (currentTrack?.filePath !== playbackTrackPath || status.filePath !== playbackTrackPath) {
+        return;
+      }
+
+      applyPlaybackStatus(status, {
+        applyPosition: playbackSeekCoordinator.allowsPositionUpdate(positionSnapshot),
+      });
       await maybeRecordTrackPlay();
-      applyPlaybackStatus(await seekPlayback(0));
-      positionSeconds = 0;
-      hasCurrentTrackEnded = false;
+      await handleSeek(0);
     } catch (error) {
       playbackError = error instanceof Error ? error.message : String(error);
     }
@@ -4706,36 +4759,123 @@
     }
 
     const clampedPositionSeconds = Math.min(Math.max(nextPositionSeconds, 0), duration);
+    const playbackTrackPath = currentTrack.filePath;
     playbackError = null;
+    playbackSeekCoordinator.request(playbackTrackPath, clampedPositionSeconds);
+    positionSeconds = clampedPositionSeconds;
+    hasCurrentTrackEnded = false;
 
-    try {
-      applyPlaybackStatus(await seekPlayback(clampedPositionSeconds));
-      await maybeRecordTrackPlay();
-      hasCurrentTrackEnded = false;
-    } catch (error) {
-      playbackError = error instanceof Error ? error.message : String(error);
+    if (!playbackSeekLoop) {
+      playbackSeekLoop = drainPlaybackSeekQueue();
     }
+
+    await playbackSeekLoop;
   }
 
   function handleLyricLineSeek(timeSeconds: number) {
     void handleSeek(Math.max(0, timeSeconds + lyricsOffsetSeconds));
   }
 
+  async function drainPlaybackSeekQueue() {
+    try {
+      let request: PlaybackSeekRequest | null;
+
+      while ((request = playbackSeekCoordinator.takeNext()) !== null) {
+        await performPlaybackSeek(request);
+      }
+    } finally {
+      playbackSeekLoop = null;
+    }
+  }
+
+  async function performPlaybackSeek(request: PlaybackSeekRequest) {
+    try {
+      const status = await seekPlayback(request.positionSeconds, request.contextKey);
+      lastConfirmedPlaybackPositionSeconds = request.positionSeconds;
+      const shouldApply = playbackSeekCoordinator.complete(request);
+
+      if (!shouldApply || currentTrack?.filePath !== request.contextKey || status.filePath !== request.contextKey) {
+        return;
+      }
+
+      applyPlaybackStatus(status, { positionOverride: request.positionSeconds });
+      await maybeRecordTrackPlay();
+      hasCurrentTrackEnded = false;
+    } catch (error) {
+      await recoverFromFailedPlaybackSeek(request, error);
+    }
+  }
+
+  async function recoverFromFailedPlaybackSeek(request: PlaybackSeekRequest, seekError: unknown) {
+    let recoveredStatus: PlaybackStatus | null = null;
+
+    try {
+      const status = await getPlaybackStatus();
+
+      if (status.filePath === request.contextKey) {
+        recoveredStatus = status;
+      }
+    } catch {
+      // The original seek error remains the actionable failure. If status
+      // recovery is also unavailable, restore the last confirmed position.
+    }
+
+    const shouldApply = playbackSeekCoordinator.complete(request);
+
+    if (!shouldApply || currentTrack?.filePath !== request.contextKey) {
+      return;
+    }
+
+    const recoveryPositionSeconds = failedSeekRecoveryPosition(
+      recoveredStatus?.positionSeconds ?? null,
+      lastConfirmedPlaybackPositionSeconds,
+    );
+
+    if (recoveredStatus) {
+      applyPlaybackStatus(recoveredStatus, { positionOverride: recoveryPositionSeconds });
+    } else {
+      positionSeconds = recoveryPositionSeconds;
+    }
+
+    playbackError = seekError instanceof Error ? seekError.message : String(seekError);
+  }
+
   async function handleVolumeChange(nextVolume: number) {
+    const playbackTrackPath = currentTrack?.filePath ?? null;
+    const positionSnapshot = playbackTrackPath
+      ? playbackSeekCoordinator.capturePositionUpdate(playbackTrackPath)
+      : null;
     playbackError = null;
     volume = nextVolume;
 
     try {
-      applyPlaybackStatus(await setPlaybackVolume(nextVolume));
+      const status = await setPlaybackVolume(nextVolume);
+      const applyPosition = Boolean(
+        playbackTrackPath
+        && positionSnapshot
+        && currentTrack?.filePath === playbackTrackPath
+        && status.filePath === playbackTrackPath
+        && playbackSeekCoordinator.allowsPositionUpdate(positionSnapshot),
+      );
+      applyPlaybackStatus(status, { applyPosition });
     } catch (error) {
       playbackError = error instanceof Error ? error.message : String(error);
     }
   }
 
-  function applyPlaybackStatus(status: PlaybackStatus) {
+  function applyPlaybackStatus(
+    status: PlaybackStatus,
+    options: { applyPosition?: boolean; positionOverride?: number } = {},
+  ) {
     updatePlaybackListenClock(status.isPlaying);
     isPlaying = status.isPlaying;
-    positionSeconds = status.positionSeconds;
+
+    if (options.applyPosition !== false) {
+      const nextPositionSeconds = options.positionOverride ?? status.positionSeconds;
+      positionSeconds = nextPositionSeconds;
+      lastConfirmedPlaybackPositionSeconds = nextPositionSeconds;
+    }
+
     durationSeconds = status.durationSeconds ?? currentTrack?.durationSeconds ?? null;
     volume = status.volume;
 
@@ -4976,53 +5116,13 @@
     return `${value.toFixed(value >= 10 ? 1 : 2)} ${units[unitIndex]}`;
   }
 
-  function parseLrcLyrics(text: string): SyncedLyricLine[] {
-    return text
-      .split(/\r?\n/)
-      .flatMap((line) => parseLrcLine(line))
-      .sort((left, right) => left.timeSeconds - right.timeSeconds || compareText(left.text, right.text));
-  }
-
-  function parseLrcLine(line: string): SyncedLyricLine[] {
-    const timestampPattern = /\[(\d{1,2}):(\d{2})(?:\.(\d{1,3}))?\]/g;
-    const timestamps: number[] = [];
-    let match: RegExpExecArray | null;
-
-    while ((match = timestampPattern.exec(line)) !== null) {
-      const minutes = Number.parseInt(match[1], 10);
-      const seconds = Number.parseInt(match[2], 10);
-      const fraction = match[3] ? Number.parseFloat(`0.${match[3].padEnd(3, "0")}`) : 0;
-
-      if (Number.isFinite(minutes) && Number.isFinite(seconds)) {
-        timestamps.push(minutes * 60 + seconds + fraction);
-      }
+  function lyricBreakLabel(cue: SyncedLyricCue | null) {
+    if (!cue) {
+      return "Intro before lyrics";
     }
 
-    if (timestamps.length === 0) {
-      return [];
-    }
-
-    const text = line.replace(timestampPattern, "").trim();
-
-    if (!text) {
-      return [];
-    }
-
-    return timestamps.map((timeSeconds) => ({ timeSeconds, text }));
-  }
-
-  function activeSyncedLyricIndex(lines: SyncedLyricLine[], currentPositionSeconds: number) {
-    let activeIndex = -1;
-
-    for (let index = 0; index < lines.length; index += 1) {
-      if (lines[index].timeSeconds <= currentPositionSeconds + 0.15) {
-        activeIndex = index;
-      } else {
-        break;
-      }
-    }
-
-    return activeIndex;
+    const breakKind = cue.breakSource === "instrumental" ? "Instrumental break" : "Lyrics break";
+    return `${breakKind} at ${formatPlaybackTime(Math.max(0, cue.timeSeconds + lyricsOffsetSeconds))}`;
   }
 
   function lyricsKindLabel(lyrics: TrackLyrics) {
@@ -6284,15 +6384,42 @@
                   </div>
                 {:else if currentLyrics?.kind === "synced" && syncedLyricLines.length > 0}
                   <div class="synced-lyrics" bind:this={lyricsPanelElement}>
-                    {#each syncedLyricLines as line, index}
+                    {#if syncedLyricsState.kind === "intro"}
                       <button
-                        class:active={index === activeLyricIndex}
-                        data-active={index === activeLyricIndex ? "true" : undefined}
+                        class="lyrics-break-cue active"
+                        data-active="true"
                         type="button"
-                        onclick={() => handleLyricLineSeek(line.timeSeconds)}
+                        aria-label={lyricBreakLabel(null)}
+                        aria-current="true"
+                        onclick={() => void handleSeek(0)}
                       >
-                        {line.text}
+                        <span aria-hidden="true">♪</span>
                       </button>
+                    {/if}
+                    {#each syncedLyricLines as line, index}
+                      {#if startsSyncedLyricBreak(syncedLyricLines, index)}
+                        <button
+                          class:active={syncedLyricsState.kind === "break" && index === syncedLyricsState.activeCueIndex}
+                          class="lyrics-break-cue"
+                          data-active={syncedLyricsState.kind === "break" && index === syncedLyricsState.activeCueIndex ? "true" : undefined}
+                          type="button"
+                          aria-label={lyricBreakLabel(line)}
+                          aria-current={syncedLyricsState.kind === "break" && index === syncedLyricsState.activeCueIndex ? "true" : undefined}
+                          onclick={() => handleLyricLineSeek(line.timeSeconds)}
+                        >
+                          <span aria-hidden="true">♪</span>
+                        </button>
+                      {:else}
+                        <button
+                          class:active={syncedLyricsState.kind === "lyric" && index === syncedLyricsState.activeCueIndex}
+                          data-active={syncedLyricsState.kind === "lyric" && index === syncedLyricsState.activeCueIndex ? "true" : undefined}
+                          type="button"
+                          aria-current={syncedLyricsState.kind === "lyric" && index === syncedLyricsState.activeCueIndex ? "true" : undefined}
+                          onclick={() => handleLyricLineSeek(line.timeSeconds)}
+                        >
+                          {line.text}
+                        </button>
+                      {/if}
                     {/each}
                   </div>
                 {:else if currentLyrics?.kind === "plain"}
@@ -10838,6 +10965,54 @@
       0 0 28px rgba(158, 227, 217, 0.18),
       0 0 52px color-mix(in srgb, var(--accent) 14%, transparent);
     transform: scale(1.025);
+  }
+
+  .synced-lyrics button.lyrics-break-cue {
+    display: grid;
+    place-items: center;
+    min-width: 46px;
+    height: 44px;
+    min-height: 44px;
+    padding: 0 15px;
+    color: var(--text-soft);
+    cursor: pointer;
+    font-size: clamp(0.9rem, 1.15vw, 1.08rem);
+    font-weight: 720;
+    line-height: 1.4;
+    opacity: 0.58;
+  }
+
+  .synced-lyrics button.lyrics-break-cue:hover {
+    background: transparent;
+    color: var(--text);
+    opacity: 1;
+  }
+
+  .synced-lyrics button.lyrics-break-cue:focus-visible {
+    background: transparent;
+    color: var(--text);
+    outline: none;
+    opacity: 1;
+  }
+
+  .synced-lyrics button.lyrics-break-cue.active {
+    color: var(--text);
+    text-shadow: 0 0 18px color-mix(in srgb, var(--accent) 26%, transparent);
+    transform: none;
+    opacity: 1;
+  }
+
+  .lyrics-break-cue span {
+    font-size: clamp(1.3rem, 1.6vw, 1.55rem);
+    line-height: 1;
+  }
+
+  .lyrics-break-cue:hover span,
+  .lyrics-break-cue:focus-visible span,
+  .lyrics-break-cue.active span {
+    filter:
+      drop-shadow(0 0 4px color-mix(in srgb, var(--text) 68%, transparent))
+      drop-shadow(0 0 12px color-mix(in srgb, var(--accent) 42%, transparent));
   }
 
   .plain-lyrics {
