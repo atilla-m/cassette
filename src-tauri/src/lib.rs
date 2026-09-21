@@ -575,6 +575,45 @@ struct PlatformCapabilities {
     dvd_video: bool,
 }
 
+struct LinuxPlaybackNotificationState {
+    #[cfg(target_os = "linux")]
+    request_sender: Option<std::sync::mpsc::Sender<LinuxPlaybackNotificationRequest>>,
+    #[cfg(target_os = "linux")]
+    startup_error: Option<String>,
+}
+
+#[cfg(target_os = "linux")]
+struct LinuxPlaybackNotificationRequest {
+    title: String,
+    body: String,
+    response: std::sync::mpsc::SyncSender<Result<(), String>>,
+}
+
+impl LinuxPlaybackNotificationState {
+    fn new() -> Self {
+        #[cfg(target_os = "linux")]
+        {
+            let (request_sender, request_receiver) = std::sync::mpsc::channel();
+            return match std::thread::Builder::new()
+                .name("cassette-notifications".to_owned())
+                .spawn(move || playback_notification_worker(request_receiver))
+            {
+                Ok(_) => Self {
+                    request_sender: Some(request_sender),
+                    startup_error: None,
+                },
+                Err(error) => Self {
+                    request_sender: None,
+                    startup_error: Some(error.to_string()),
+                },
+            };
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        Self {}
+    }
+}
+
 #[tauri::command]
 fn get_platform_capabilities() -> PlatformCapabilities {
     let is_linux = cfg!(target_os = "linux");
@@ -597,49 +636,176 @@ fn get_library_cache(library: State<'_, Mutex<LibraryDatabase>>) -> Result<Libra
     library.load_cache()
 }
 
+fn playback_notification_replacement_id(replacement_id: Option<u32>) -> u32 {
+    replacement_id.unwrap_or_default()
+}
+
+fn record_playback_notification_id(
+    last_notification_id: &mut Option<u32>,
+    notification_id: u32,
+) -> Result<(), String> {
+    if notification_id == 0 {
+        *last_notification_id = None;
+        return Err("Desktop notification service returned an invalid zero ID.".to_owned());
+    }
+
+    *last_notification_id = Some(notification_id);
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn send_playback_notification_over_dbus(
+    connection: &zbus::blocking::Connection,
+    title: &str,
+    body: &str,
+    replacement_id: Option<u32>,
+) -> zbus::Result<u32> {
+    use zbus::zvariant::Value;
+
+    let proxy = zbus::blocking::Proxy::new(
+        connection,
+        "org.freedesktop.Notifications",
+        "/org/freedesktop/Notifications",
+        "org.freedesktop.Notifications",
+    )?;
+    let actions: Vec<&str> = Vec::new();
+    let mut hints = HashMap::new();
+    hints.insert("desktop-entry", Value::from("io.github.atilla.cassette"));
+    hints.insert("transient", Value::from(true));
+    hints.insert("urgency", Value::from(1_u8));
+
+    proxy.call(
+        "Notify",
+        &(
+            "Cassette",
+            playback_notification_replacement_id(replacement_id),
+            "",
+            title,
+            body,
+            actions,
+            hints,
+            -1_i32,
+        ),
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn playback_notification_worker(
+    requests: std::sync::mpsc::Receiver<LinuxPlaybackNotificationRequest>,
+) {
+    let mut connection: Option<zbus::blocking::Connection> = None;
+    let mut last_notification_id = None;
+
+    for request in requests {
+        if connection.is_none() {
+            match zbus::blocking::Connection::session() {
+                Ok(new_connection) => connection = Some(new_connection),
+                Err(error) => {
+                    let _ = request.response.send(Err(format!(
+                        "Desktop notification service is unavailable: {error}"
+                    )));
+                    continue;
+                }
+            }
+        }
+
+        let result = send_playback_notification_over_dbus(
+            connection
+                .as_ref()
+                .expect("notification connection was initialized"),
+            &request.title,
+            &request.body,
+            last_notification_id,
+        );
+        let result = match result {
+            Ok(notification_id) => {
+                record_playback_notification_id(&mut last_notification_id, notification_id)
+            }
+            Err(error) => {
+                connection = None;
+                last_notification_id = None;
+                Err(format!("Desktop notification service failed: {error}"))
+            }
+        };
+        let _ = request.response.send(result);
+    }
+}
+
 #[tauri::command]
-fn send_linux_notification(title: String, body: String) -> Result<(), String> {
+fn send_linux_playback_notification(
+    title: String,
+    body: String,
+    notifications: State<'_, LinuxPlaybackNotificationState>,
+) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
-        let output = Command::new("notify-send")
-            .arg("--app-name=Cassette")
-            .arg(title)
-            .arg(body)
-            .output()
-            .map_err(|error| {
-                if error.kind() == io::ErrorKind::NotFound {
-                    "notify-send is unavailable.".to_owned()
-                } else {
-                    format!("Could not run notify-send: {error}")
-                }
-            })?;
-
-        if output.status.success() {
-            return Ok(());
-        }
-
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-
-        if stderr.is_empty() {
-            Err(format!(
-                "notify-send exited unsuccessfully with status {}.",
-                output
-                    .status
-                    .code()
-                    .map_or_else(|| "unknown".to_owned(), |code| code.to_string())
-            ))
-        } else {
-            Err(format!("notify-send failed: {stderr}"))
-        }
+        // Keep one process-owned D-Bus connection so the desktop sees a
+        // stable sender for playback notifications. The worker serializes
+        // rapid playback/test requests so each request replaces the ID
+        // returned by the immediately preceding one.
+        let request_sender = notifications.request_sender.as_ref().ok_or_else(|| {
+            format!(
+                "Desktop notification service is unavailable: {}",
+                notifications
+                    .startup_error
+                    .as_deref()
+                    .unwrap_or("notification worker could not be initialized")
+            )
+        })?;
+        let (response, response_receiver) = std::sync::mpsc::sync_channel(1);
+        request_sender
+            .send(LinuxPlaybackNotificationRequest {
+                title,
+                body,
+                response,
+            })
+            .map_err(|_| "Desktop notification service worker stopped unexpectedly.".to_owned())?;
+        response_receiver.recv().map_err(|_| {
+            "Desktop notification service worker stopped without returning a result.".to_owned()
+        })?
     }
 
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = (title, body);
+        let _ = (title, body, notifications);
         Err(
             "Desktop notifications are available only on Linux in Cassette 0.1.0-beta.2."
                 .to_owned(),
         )
+    }
+}
+
+#[cfg(test)]
+mod playback_notification_tests {
+    use super::{playback_notification_replacement_id, record_playback_notification_id};
+
+    #[test]
+    fn first_playback_notification_does_not_replace_an_unrelated_id() {
+        assert_eq!(playback_notification_replacement_id(None), 0);
+    }
+
+    #[test]
+    fn later_playback_notification_replaces_the_returned_id() {
+        assert_eq!(playback_notification_replacement_id(Some(42)), 42);
+    }
+
+    #[test]
+    fn server_replacement_id_supersedes_a_stale_requested_id() {
+        let mut last_notification_id = Some(42);
+        record_playback_notification_id(&mut last_notification_id, 84).expect("new server ID");
+
+        assert_eq!(
+            playback_notification_replacement_id(last_notification_id),
+            84
+        );
+    }
+
+    #[test]
+    fn zero_server_id_clears_the_previous_replacement_id() {
+        let mut last_notification_id = Some(42);
+
+        assert!(record_playback_notification_id(&mut last_notification_id, 0).is_err());
+        assert_eq!(last_notification_id, None);
     }
 }
 
@@ -1119,13 +1285,14 @@ fn toggle_track_favorite(
 #[tauri::command]
 fn record_track_play(
     id: String,
+    event_id: String,
     library: State<'_, Mutex<LibraryDatabase>>,
 ) -> Result<Track, String> {
-    let library = library
+    let mut library = library
         .lock()
         .map_err(|_| "Library cache is unavailable.".to_owned())?;
 
-    library.record_play(&id)
+    library.record_play(&id, &event_id)
 }
 
 #[tauri::command]
@@ -3011,7 +3178,7 @@ impl LibraryDatabase {
         connection
             .execute_batch("PRAGMA foreign_keys = ON;")
             .map_err(|error| format!("Could not configure library cache: {error}"))?;
-        let database = Self { connection };
+        let mut database = Self { connection };
         database
             .migrate()
             .map_err(|error| format!("Could not initialize library cache: {error}"))?;
@@ -3019,7 +3186,7 @@ impl LibraryDatabase {
         Ok(database)
     }
 
-    fn migrate(&self) -> rusqlite::Result<()> {
+    fn migrate(&mut self) -> rusqlite::Result<()> {
         self.connection.execute_batch(
             "
             CREATE TABLE IF NOT EXISTS tracks (
@@ -3198,7 +3365,73 @@ impl LibraryDatabase {
             )?;
         }
 
+        self.migrate_detailed_play_history()?;
+
         Ok(())
+    }
+
+    fn migrate_detailed_play_history(&mut self) -> rusqlite::Result<()> {
+        let migration_started_at = unix_timestamp();
+        let transaction = self.connection.transaction()?;
+        transaction.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS track_play_events (
+                event_id TEXT PRIMARY KEY NOT NULL,
+                track_id TEXT NOT NULL,
+                played_at_utc INTEGER NOT NULL,
+                recorded_at_utc INTEGER NOT NULL,
+                source TEXT NOT NULL CHECK(source IN ('qualified_play', 'legacy_last_played'))
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_track_play_events_played_at_utc
+                ON track_play_events (played_at_utc);
+            CREATE INDEX IF NOT EXISTS idx_track_play_events_track_played_at_utc
+                ON track_play_events (track_id, played_at_utc);
+            ",
+        )?;
+
+        let detailed_history_already_initialized = transaction
+            .query_row(
+                "SELECT 1 FROM library_meta WHERE key = 'detailed_play_history_started_at_utc'",
+                [],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+
+        if !detailed_history_already_initialized {
+            // Existing totals predate the event ledger. Preserve the one
+            // timestamp that is known (the most recent play), but never
+            // manufacture dates for the remaining legacy count.
+            transaction.execute(
+                "
+                INSERT OR IGNORE INTO track_play_events (
+                    event_id,
+                    track_id,
+                    played_at_utc,
+                    recorded_at_utc,
+                    source
+                )
+                SELECT
+                    'legacy-last-played:' || lower(hex(CAST(id AS BLOB))) || ':' || last_played_at,
+                    id,
+                    last_played_at,
+                    ?1,
+                    'legacy_last_played'
+                FROM tracks
+                WHERE play_count > 0 AND last_played_at IS NOT NULL AND last_played_at >= 0
+                ",
+                [migration_started_at],
+            )?;
+            transaction.execute(
+                "
+                INSERT INTO library_meta (key, value)
+                VALUES ('detailed_play_history_started_at_utc', ?1)
+                ",
+                [migration_started_at.to_string()],
+            )?;
+        }
+        transaction.commit()
     }
 
     fn has_column(&self, table: &str, column: &str) -> rusqlite::Result<bool> {
@@ -4009,10 +4242,50 @@ impl LibraryDatabase {
         Ok(())
     }
 
-    fn record_play(&self, id: &str) -> Result<Track, String> {
+    fn record_play(&mut self, id: &str, event_id: &str) -> Result<Track, String> {
+        validate_play_event_id(event_id)?;
         let played_at = unix_timestamp();
-        let updated = self
+        let transaction = self
             .connection
+            .transaction()
+            .map_err(|error| format!("Could not begin playback history update: {error}"))?;
+        let inserted = transaction
+            .execute(
+                "
+                INSERT OR IGNORE INTO track_play_events (
+                    event_id,
+                    track_id,
+                    played_at_utc,
+                    recorded_at_utc,
+                    source
+                ) VALUES (?1, ?2, ?3, ?3, 'qualified_play')
+                ",
+                params![event_id, id, played_at],
+            )
+            .map_err(|error| format!("Could not record playback event: {error}"))?;
+
+        if inserted == 0 {
+            let existing_track_id = transaction
+                .query_row(
+                    "SELECT track_id FROM track_play_events WHERE event_id = ?1",
+                    [event_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(|error| format!("Could not verify playback event: {error}"))?;
+
+            if existing_track_id != id {
+                return Err("Playback event identifier belongs to another track.".to_owned());
+            }
+
+            transaction
+                .commit()
+                .map_err(|error| format!("Could not finish playback history update: {error}"))?;
+            return self
+                .track_by_id(id)?
+                .ok_or_else(|| "Track is not in the library cache.".to_owned());
+        }
+
+        let updated = transaction
             .execute(
                 "
                 UPDATE tracks
@@ -4022,11 +4295,15 @@ impl LibraryDatabase {
                 ",
                 params![id, played_at],
             )
-            .map_err(|error| format!("Could not update playback history: {error}"))?;
+            .map_err(|error| format!("Could not update playback total: {error}"))?;
 
         if updated == 0 {
             return Err("Track is not in the library cache.".to_owned());
         }
+
+        transaction
+            .commit()
+            .map_err(|error| format!("Could not save playback history: {error}"))?;
 
         self.track_by_id(id)?
             .ok_or_else(|| "Track is not in the library cache.".to_owned())
@@ -7668,6 +7945,18 @@ fn clean_text(value: Option<String>) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+fn validate_play_event_id(event_id: &str) -> Result<(), String> {
+    if !(8..=128).contains(&event_id.len())
+        || !event_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b':'))
+    {
+        return Err("Playback event identifier is invalid.".to_owned());
+    }
+
+    Ok(())
+}
+
 fn title_from_path(path: &Path) -> String {
     path.file_stem()
         .and_then(|stem| stem.to_str())
@@ -7682,6 +7971,287 @@ fn video_title_from_path(path: &Path) -> String {
         .map(|stem| stem.replace(['_', '-'], " "))
         .filter(|title| !title.trim().is_empty())
         .unwrap_or_else(|| "Untitled Video".into())
+}
+
+#[cfg(test)]
+mod play_history_tests {
+    use super::*;
+
+    struct TestLibrary {
+        directory: PathBuf,
+        database_path: PathBuf,
+    }
+
+    impl TestLibrary {
+        fn new(label: &str) -> Self {
+            let directory = std::env::temp_dir().join(format!(
+                "cassette-play-history-{label}-{}-{}",
+                std::process::id(),
+                unique_timestamp_nanos()
+            ));
+            fs::create_dir(&directory).expect("create play-history test directory");
+            let database_path = directory.join("library.sqlite3");
+            Self {
+                directory,
+                database_path,
+            }
+        }
+
+        fn open(&self) -> LibraryDatabase {
+            LibraryDatabase::open(self.database_path.clone()).expect("open test library")
+        }
+    }
+
+    impl Drop for TestLibrary {
+        fn drop(&mut self) {
+            if !std::thread::panicking() {
+                fs::remove_dir_all(&self.directory).expect("remove play-history test directory");
+            }
+        }
+    }
+
+    fn test_track(path: &str) -> Track {
+        Track {
+            id: path.to_owned(),
+            file_path: path.to_owned(),
+            file_name: Path::new(path)
+                .file_name()
+                .expect("test filename")
+                .to_string_lossy()
+                .into_owned(),
+            extension: "flac".to_owned(),
+            title: "Test track".to_owned(),
+            artist: Some("Test artist".to_owned()),
+            album: Some("Test album".to_owned()),
+            album_artist: None,
+            genres: vec!["Test".to_owned()],
+            track_number: Some(1),
+            disc_number: Some(1),
+            year: Some(2026),
+            duration_seconds: Some(60),
+            modified_time: Some(1_700_000_000),
+            file_size: Some(1024),
+            scanned_at: Some(1_700_000_000),
+            cover_art_path: None,
+            lyrics_path: None,
+            lyrics_kind: None,
+            is_favorite: false,
+            play_count: 0,
+            last_played_at: None,
+        }
+    }
+
+    fn seed_tracks(database: &mut LibraryDatabase, tracks: &mut [Track]) {
+        database
+            .replace_library(Path::new("/synthetic-music"), tracks, 1_700_000_000)
+            .expect("seed tracks");
+    }
+
+    fn event_count(database: &LibraryDatabase) -> i64 {
+        database
+            .connection
+            .query_row("SELECT COUNT(*) FROM track_play_events", [], |row| {
+                row.get(0)
+            })
+            .expect("count play events")
+    }
+
+    #[test]
+    fn repeated_callback_event_is_idempotent_and_atomic() {
+        let library = TestLibrary::new("duplicate");
+        let mut database = library.open();
+        let mut tracks = vec![test_track("/synthetic-music/one.flac")];
+        seed_tracks(&mut database, &mut tracks);
+
+        let first = database
+            .record_play(&tracks[0].id, "play-event-0001")
+            .expect("record first callback");
+        let repeated = database
+            .record_play(&tracks[0].id, "play-event-0001")
+            .expect("repeat same callback");
+
+        assert_eq!(first.play_count, 1);
+        assert_eq!(repeated.play_count, 1);
+        assert_eq!(event_count(&database), 1);
+
+        let missing_error = database
+            .record_play("/synthetic-music/missing.flac", "play-event-0002")
+            .expect_err("missing track must roll back event");
+        assert!(missing_error.contains("not in the library cache"));
+        assert_eq!(event_count(&database), 1);
+    }
+
+    #[test]
+    fn events_survive_restart_rescan_and_tag_metadata_refresh() {
+        let library = TestLibrary::new("persistence");
+        let track_id = "/synthetic-music/persistent.flac";
+        {
+            let mut database = library.open();
+            let mut tracks = vec![test_track(track_id)];
+            seed_tracks(&mut database, &mut tracks);
+            database
+                .record_play(track_id, "play-event-persist")
+                .expect("record persistent event");
+        }
+
+        let mut database = library.open();
+        assert_eq!(event_count(&database), 1);
+        let mut rescanned = vec![test_track(track_id)];
+        rescanned[0].title = "Rescanned title".to_owned();
+        database
+            .replace_library(Path::new("/synthetic-music"), &mut rescanned, 1_700_000_100)
+            .expect("rescan library");
+        assert_eq!(rescanned[0].play_count, 1);
+        assert_eq!(event_count(&database), 1);
+
+        let mut retagged = test_track(track_id);
+        retagged.title = "Tag-edited title".to_owned();
+        database
+            .update_cached_track(&mut retagged)
+            .expect("refresh tag-edited track");
+        assert_eq!(retagged.play_count, 1);
+        assert_eq!(event_count(&database), 1);
+    }
+
+    #[test]
+    fn migration_preserves_totals_and_only_the_known_legacy_timestamp() {
+        let library = TestLibrary::new("migration");
+        let track_id = "/synthetic-music/legacy.flac";
+        {
+            let mut database = library.open();
+            let mut tracks = vec![
+                test_track(track_id),
+                test_track("/synthetic-music/undated-legacy.flac"),
+            ];
+            seed_tracks(&mut database, &mut tracks);
+            database
+                .connection
+                .execute(
+                    "UPDATE tracks SET play_count = 7, last_played_at = 1_700_123_456 WHERE id = ?1",
+                    [track_id],
+                )
+                .expect("create legacy total");
+            database
+                .connection
+                .execute(
+                    "UPDATE tracks SET play_count = 3, last_played_at = NULL WHERE id = ?1",
+                    ["/synthetic-music/undated-legacy.flac"],
+                )
+                .expect("create undated legacy total");
+            database
+                .connection
+                .execute_batch(
+                    "
+                    DROP TABLE track_play_events;
+                    DELETE FROM library_meta WHERE key = 'detailed_play_history_started_at_utc';
+                    ",
+                )
+                .expect("restore pre-ledger schema");
+        }
+
+        let database = library.open();
+        let total: i64 = database
+            .connection
+            .query_row(
+                "SELECT play_count FROM tracks WHERE id = ?1",
+                [track_id],
+                |row| row.get(0),
+            )
+            .expect("read preserved total");
+        let legacy_event: (String, i64) = database
+            .connection
+            .query_row(
+                "SELECT source, played_at_utc FROM track_play_events WHERE track_id = ?1",
+                [track_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("read migrated timestamp");
+        let undated_total: i64 = database
+            .connection
+            .query_row(
+                "SELECT play_count FROM tracks WHERE id = ?1",
+                ["/synthetic-music/undated-legacy.flac"],
+                |row| row.get(0),
+            )
+            .expect("read undated legacy total");
+
+        assert_eq!(total, 7);
+        assert_eq!(undated_total, 3);
+        assert_eq!(event_count(&database), 1);
+        assert_eq!(
+            legacy_event,
+            ("legacy_last_played".to_owned(), 1_700_123_456)
+        );
+        assert!(database
+            .meta_value("detailed_play_history_started_at_utc")
+            .expect("read tracking start")
+            .is_some());
+    }
+
+    #[test]
+    fn date_ranges_are_start_inclusive_and_end_exclusive() {
+        let library = TestLibrary::new("date-range");
+        let database = library.open();
+        for (event_id, track_id, timestamp) in [
+            ("range-event-0099", "track-a", 99),
+            ("range-event-0100", "track-a", 100),
+            ("range-event-0199", "track-a", 199),
+            ("range-event-0200", "track-a", 200),
+            ("range-event-other", "track-b", 150),
+        ] {
+            database
+                .connection
+                .execute(
+                    "
+                    INSERT INTO track_play_events (
+                        event_id, track_id, played_at_utc, recorded_at_utc, source
+                    ) VALUES (?1, ?2, ?3, ?3, 'qualified_play')
+                    ",
+                    params![event_id, track_id, timestamp],
+                )
+                .expect("insert boundary event");
+        }
+
+        let track_count: i64 = database
+            .connection
+            .query_row(
+                "
+                SELECT COUNT(*)
+                FROM track_play_events
+                WHERE track_id = ?1 AND played_at_utc >= ?2 AND played_at_utc < ?3
+                ",
+                params!["track-a", 100, 200],
+                |row| row.get(0),
+            )
+            .expect("query track date range");
+        let all_count: i64 = database
+            .connection
+            .query_row(
+                "
+                SELECT COUNT(*)
+                FROM track_play_events
+                WHERE played_at_utc >= ?1 AND played_at_utc < ?2
+                ",
+                params![100, 200],
+                |row| row.get(0),
+            )
+            .expect("query overall date range");
+        let indexes = database
+            .connection
+            .prepare(
+                "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'track_play_events'",
+            )
+            .expect("prepare index query")
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("query play-history indexes")
+            .collect::<rusqlite::Result<HashSet<_>>>()
+            .expect("collect play-history indexes");
+
+        assert_eq!(track_count, 2);
+        assert_eq!(all_count, 3);
+        assert!(indexes.contains("idx_track_play_events_played_at_utc"));
+        assert!(indexes.contains("idx_track_play_events_track_played_at_utc"));
+    }
 }
 
 #[cfg(test)]
@@ -8535,6 +9105,7 @@ pub fn run() {
         .manage(Mutex::new(PlaybackState::default()))
         .manage(Mutex::new(VideoPlaybackState::default()))
         .manage(Mutex::new(TagWriteState::default()))
+        .manage(LinuxPlaybackNotificationState::new())
         .setup(|app| {
             let db_path = app
                 .path()
@@ -8569,7 +9140,7 @@ pub fn run() {
             updates::check_cassette_update,
             updates::install_cassette_update,
             get_library_cache,
-            send_linux_notification,
+            send_linux_playback_notification,
             get_video_library,
             scan_video_folder,
             update_video_info,

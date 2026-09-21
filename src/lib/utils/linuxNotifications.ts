@@ -4,13 +4,13 @@ export type LinuxNotificationResult =
   | { ok: true }
   | { ok: false; error: string; unavailable: boolean };
 
-export async function sendLinuxNotification(title: string, body: string): Promise<LinuxNotificationResult> {
+export async function sendLinuxPlaybackNotification(title: string, body: string): Promise<LinuxNotificationResult> {
   if (!isTauriRuntime()) {
     return { ok: false, error: "Tauri runtime is unavailable.", unavailable: true };
   }
 
   try {
-    await invoke("send_linux_notification", { title, body });
+    await invoke("send_linux_playback_notification", { title, body });
     return { ok: true };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -18,7 +18,7 @@ export async function sendLinuxNotification(title: string, body: string): Promis
     return {
       ok: false,
       error: message,
-      unavailable: message.toLowerCase().includes("notify-send is unavailable"),
+      unavailable: message.toLowerCase().includes("desktop notification service is unavailable"),
     };
   }
 }

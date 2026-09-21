@@ -121,7 +121,7 @@
     VideoPlaybackStatus,
     VideoType,
   } from "$lib/types/library";
-  import { sendLinuxNotification } from "$lib/utils/linuxNotifications";
+  import { sendLinuxPlaybackNotification } from "$lib/utils/linuxNotifications";
   import { localImageSource } from "$lib/utils/localImage";
   import { listen } from "@tauri-apps/api/event";
   import { ask } from "@tauri-apps/plugin-dialog";
@@ -258,10 +258,8 @@
   const TRACK_NOTIFICATIONS_SETTING_KEY = "cassette:track-change-notifications";
   const THEME_SETTING_KEY = "cassette:theme";
   const DEFAULT_THEME: ThemeId = "cassette-teal";
-  const VALID_THEME_IDS: readonly ThemeId[] = [
+  const SELECTABLE_THEME_IDS: readonly ThemeId[] = [
     "cassette-teal",
-    "rose-noir",
-    "royal-gold",
     "glacier",
     "obsidian",
   ];
@@ -271,18 +269,6 @@
       name: "Cassette Teal",
       description: "Near-black, charcoal, and Cassette teal.",
       swatches: ["#0d0f13", "#151a21", "#2f8f83"],
-    },
-    {
-      id: "rose-noir",
-      name: "Rose Noir",
-      description: "Dark plum, wine panels, and rose accent.",
-      swatches: ["#120911", "#21101b", "#c85b78"],
-    },
-    {
-      id: "royal-gold",
-      name: "Royal Gold",
-      description: "Warm black, charcoal, and muted gold.",
-      swatches: ["#0f0d09", "#1b1710", "#c8a452"],
     },
     {
       id: "glacier",
@@ -500,6 +486,7 @@
   let hasCurrentTrackEnded = $state(false);
   let countedPlaybackTrackId = $state<string | null>(null);
   let playbackSessionTrackId: string | null = null;
+  let playbackSessionEventId: string | null = null;
   let playbackSessionListenedSeconds = 0;
   let playbackSessionStartedAtMs: number | null = null;
   let positionSeconds = $state(0);
@@ -746,7 +733,7 @@
   });
 
   function isThemeId(value: string | null): value is ThemeId {
-    return VALID_THEME_IDS.some((themeId) => themeId === value);
+    return SELECTABLE_THEME_IDS.some((themeId) => themeId === value);
   }
 
   function savedThemeOrDefault(value: string | null): ThemeId {
@@ -764,6 +751,34 @@
     applyTheme(theme);
     window.localStorage.setItem(THEME_SETTING_KEY, theme);
   }
+
+  function initializeSavedTheme() {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    let storedTheme: string | null = null;
+    try {
+      storedTheme = window.localStorage.getItem(THEME_SETTING_KEY);
+    } catch {
+      // A denied Storage object must not prevent the default theme rendering.
+    }
+
+    selectedTheme = savedThemeOrDefault(storedTheme);
+    applyTheme(selectedTheme);
+
+    if (storedTheme !== selectedTheme) {
+      try {
+        window.localStorage.setItem(THEME_SETTING_KEY, selectedTheme);
+      } catch {
+        // The in-memory default still applies for this session.
+      }
+    }
+  }
+
+  // Normalize hidden legacy selections before the component is mounted, so
+  // Rose Noir or Royal Gold is never applied during startup.
+  initializeSavedTheme();
 
   $effect(() => {
     void loadCurrentTrackLyrics(currentTrack?.filePath ?? null);
@@ -793,12 +808,6 @@
   });
 
   onMount(() => {
-    const storedTheme = window.localStorage.getItem(THEME_SETTING_KEY);
-    selectedTheme = savedThemeOrDefault(storedTheme);
-    applyTheme(selectedTheme);
-    if (storedTheme !== selectedTheme) {
-      window.localStorage.setItem(THEME_SETTING_KEY, selectedTheme);
-    }
     autoFindLyricsEnabled = window.localStorage.getItem(AUTO_LYRICS_SETTING_KEY) !== "off";
     trackNotificationsEnabled = window.localStorage.getItem(TRACK_NOTIFICATIONS_SETTING_KEY) === "on";
     try {
@@ -1523,7 +1532,7 @@
     trackNotificationStatus = null;
     trackNotificationStatusIsError = false;
 
-    const result = await sendLinuxNotification("Cassette", "Notifications are working.");
+    const result = await sendLinuxPlaybackNotification("Cassette", "Notifications are working.");
 
     if (result.ok) {
       trackNotificationStatus = "Notification sent.";
@@ -1532,7 +1541,7 @@
 
     trackNotificationStatusIsError = true;
     trackNotificationStatus = result.unavailable
-      ? "notify-send is unavailable."
+      ? "Desktop notification service is unavailable."
       : `Notification failed: ${safeNotificationError(result.error)}`;
   }
 
@@ -4185,7 +4194,7 @@
 
     lastNotifiedTrackKey = trackKey;
     lastNotifiedPlaybackStartId = currentPlaybackStartId;
-    const result = await sendLinuxNotification(track.title, trackNotificationBody(track));
+    const result = await sendLinuxPlaybackNotification(track.title, trackNotificationBody(track));
 
     if (!result.ok) {
       console.warn("Track notification failed:", safeNotificationError(result.error));
@@ -4275,6 +4284,7 @@
   async function maybeRecordTrackPlay() {
     if (
       !currentTrack
+      || !playbackSessionEventId
       || countedPlaybackTrackId === currentTrack.id
       || !hasReachedPlayCountThreshold(currentTrack)
     ) {
@@ -4284,7 +4294,7 @@
     countedPlaybackTrackId = currentTrack.id;
 
     try {
-      applyUpdatedTrack(await recordTrackPlay(currentTrack.id));
+      applyUpdatedTrack(await recordTrackPlay(currentTrack.id, playbackSessionEventId));
     } catch (error) {
       countedPlaybackTrackId = null;
       playbackError = error instanceof Error ? error.message : String(error);
@@ -4298,6 +4308,7 @@
 
   function resetPlaybackListenSession(track: Track | null) {
     playbackSessionTrackId = track?.id ?? null;
+    playbackSessionEventId = track ? crypto.randomUUID() : null;
     playbackSessionListenedSeconds = 0;
     playbackSessionStartedAtMs = null;
     countedPlaybackTrackId = null;
@@ -4308,6 +4319,7 @@
 
     if (!currentTrack) {
       playbackSessionTrackId = null;
+      playbackSessionEventId = null;
       playbackSessionListenedSeconds = 0;
       playbackSessionStartedAtMs = null;
       return;
@@ -4315,6 +4327,7 @@
 
     if (playbackSessionTrackId !== currentTrack.id) {
       playbackSessionTrackId = currentTrack.id;
+      playbackSessionEventId = crypto.randomUUID();
       playbackSessionListenedSeconds = 0;
       playbackSessionStartedAtMs = null;
       countedPlaybackTrackId = null;
@@ -8506,7 +8519,7 @@
                   <div>
                     <span>Notification support</span>
                     <strong>Linux only</strong>
-                    <small>Uses the system notify-send command.</small>
+                    <small>Uses the system desktop notification service.</small>
                   </div>
                 {:else}
                   <div>
@@ -8593,11 +8606,6 @@
               </div>
 
               <div class="settings-control-list">
-                <div>
-                  <span>Compact mode</span>
-                  <strong>Off</strong>
-                  <small>Coming later</small>
-                </div>
                 <div>
                   <span>Album track numbers</span>
                   <strong>Enabled</strong>

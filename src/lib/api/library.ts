@@ -148,8 +148,8 @@ export async function toggleTrackFavorite(id: string): Promise<boolean> {
   return invoke<boolean>("toggle_track_favorite", { id });
 }
 
-export async function recordTrackPlay(id: string): Promise<Track> {
-  return invoke<Track>("record_track_play", { id });
+export async function recordTrackPlay(id: string, eventId: string): Promise<Track> {
+  return invoke<Track>("record_track_play", { id, eventId });
 }
 
 export async function getTrackTagEditorData(trackId: string): Promise<TrackTagEditorData> {

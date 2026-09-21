@@ -6,7 +6,7 @@ Cassette is a private, local-first desktop music library and player. It scans fo
 
 Cassette `0.1.0-beta.2` is planned as a Linux-first beta for x86_64. Windows build infrastructure remains in CI, but Windows installer qualification and release are deferred to a later beta. No release has been published yet, so there are no download links in this document.
 
-This beta includes the current Cassette interface and all five existing themes: Cassette Teal, Rose Noir, Royal Gold, Glacier, and Obsidian. Playback, scanning, the queue, shuffle and repeat, playlists, favorites, lyrics, FLAC tag editing, CD ripping, MPRIS, and notifications retain their current behavior.
+This beta includes the current Cassette interface. Cassette Teal is the default user-selectable theme, alongside Glacier and Obsidian. The hidden Rose Noir and Royal Gold implementations remain in the source for possible later reactivation. Playback, scanning, the queue, shuffle and repeat, playlists, favorites, lyrics, FLAC tag editing, CD ripping, and MPRIS retain their current behavior. Optional track-change banners use standard transient Linux notifications and replace the prior Cassette playback banner instead of accumulating in notification history.
 
 Modern UI work is reserved for a future release. This beta does not include a Modern/Legacy interface switch or promise the rejected Modern design. Experimental video and DVD functionality is disabled and unsupported in this beta; hidden backend code and tools such as `lsdvd`, `ffmpeg`, `ffprobe`, and `mpv` are not part of the beta runtime contract.
 
@@ -49,6 +49,10 @@ CD detection and ripping remain an optional Linux feature and use `cdparanoia`, 
 ### Data and uninstall
 
 Cassette stores Linux application data under `$XDG_DATA_HOME/io.github.atilla.cassette`, defaulting to `~/.local/share/io.github.atilla.cassette`. The library database is `library.sqlite3` in that directory; cached cover art and other application-managed data are stored alongside it.
+
+Detailed play-history tracking begins when this database is first opened by a build containing the `track_play_events` ledger. The exact start is stored as a UTC Unix timestamp in `library_meta` under `detailed_play_history_started_at_utc`. Events use Cassette's existing track identity and remain stored independently of the limited Recently Played display, rescans, and metadata refreshes. Existing all-time play counts are preserved. When an older track has a usable `last_played_at` value, migration preserves that one known event timestamp; it does not invent dates for the rest of the legacy total.
+
+Play events are stored in UTC. Future calendar statistics should convert the user's requested local period boundaries to UTC and query a half-open interval (`start <= played_at_utc < end`). This keeps daylight-saving and timezone handling at the reporting boundary instead of permanently assigning a local date to an event. Undated legacy plays remain part of all-time totals only.
 
 Application binaries and user data are separate. A signed AppImage replacement, DEB/RPM update, or uninstall must not remove or replace the library database, settings, playlists, favorites, cached artwork, or other application data.
 
