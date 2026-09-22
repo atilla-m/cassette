@@ -13,6 +13,7 @@ export function buildAlbums(tracks: Track[]): Album[] {
 
     if (existing) {
       existing.trackCount += 1;
+      existing.playCount += track.playCount;
       existing.year ??= track.year;
       existing.coverArtPath ??= track.coverArtPath;
       continue;
@@ -24,6 +25,7 @@ export function buildAlbums(tracks: Track[]): Album[] {
       artist,
       year: track.year,
       trackCount: 1,
+      playCount: track.playCount,
       color: colorFor(key),
       coverArtPath: track.coverArtPath,
     });
@@ -35,17 +37,21 @@ export function buildAlbums(tracks: Track[]): Album[] {
 }
 
 export function buildArtists(tracks: Track[]): Artist[] {
-  const countsByArtist = new Map<string, number>();
+  const statsByArtist = new Map<string, { trackCount: number; playCount: number }>();
 
   for (const track of tracks) {
     const artist = track.artist ?? track.albumArtist ?? "Unknown Artist";
-    countsByArtist.set(artist, (countsByArtist.get(artist) ?? 0) + 1);
+    const stats = statsByArtist.get(artist) ?? { trackCount: 0, playCount: 0 };
+    stats.trackCount += 1;
+    stats.playCount += track.playCount;
+    statsByArtist.set(artist, stats);
   }
 
-  return [...countsByArtist.entries()]
-    .map(([name, trackCount]) => ({
+  return [...statsByArtist.entries()]
+    .map(([name, stats]) => ({
       name,
-      detail: `${trackCount} ${trackCount === 1 ? "song" : "songs"}`,
+      detail: `${stats.trackCount} ${stats.trackCount === 1 ? "song" : "songs"}`,
+      playCount: stats.playCount,
       color: colorFor(name),
     }))
     .sort((left, right) => left.name.localeCompare(right.name));
@@ -57,6 +63,7 @@ export function buildGenres(tracks: Track[]): Genre[] {
     songCount: number;
     artists: Set<string>;
     albums: Set<string>;
+    playCount: number;
   }>();
 
   for (const track of tracks) {
@@ -66,12 +73,14 @@ export function buildGenres(tracks: Track[]): Genre[] {
         songCount: 0,
         artists: new Set<string>(),
         albums: new Set<string>(),
+        playCount: 0,
       };
       const artist = track.artist ?? track.albumArtist ?? "Unknown Artist";
       const album = track.album ?? "Unknown Album";
       const albumArtist = track.albumArtist ?? track.artist ?? "Unknown Artist";
 
       existing.songCount += 1;
+      existing.playCount += track.playCount;
       existing.artists.add(artist);
       existing.albums.add(`${albumArtist.toLowerCase()}\u0000${album.toLowerCase()}`);
       genresByName.set(genreName, existing);
@@ -84,6 +93,7 @@ export function buildGenres(tracks: Track[]): Genre[] {
       songCount: genre.songCount,
       artistCount: genre.artists.size,
       albumCount: genre.albums.size,
+      playCount: genre.playCount,
       detail: `${genre.songCount} ${genre.songCount === 1 ? "song" : "songs"}`,
       color: colorFor(genre.name),
     }))

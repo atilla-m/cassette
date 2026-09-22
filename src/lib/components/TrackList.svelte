@@ -546,7 +546,8 @@
   }
 
   .album-link {
-    width: 100%;
+    width: fit-content;
+    max-width: 100%;
     margin: 0;
     color: var(--text-soft);
     font-size: 0.9rem;
@@ -554,7 +555,7 @@
   }
 
   .track-row.library .album-link {
-    justify-self: stretch;
+    justify-self: start;
   }
 
   .track-link:hover,

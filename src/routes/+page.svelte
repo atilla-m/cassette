@@ -134,6 +134,16 @@
     startsSyncedLyricBreak,
     type SyncedLyricCue,
   } from "$lib/utils/syncedLyrics";
+  import {
+    STATS_PAGE_SIZE,
+    nextStatsLimit,
+    rankMostPlayedTracks,
+    rankRecentlyPlayedTracks,
+    sortAlbumsByPlayCount,
+    sortArtistsByPlayCount,
+    sortGenresByPlayCount,
+    visibleStatsItems,
+  } from "$lib/utils/playStats";
   import { listen } from "@tauri-apps/api/event";
   import { ask } from "@tauri-apps/plugin-dialog";
   import { openPath, openUrl } from "@tauri-apps/plugin-opener";
@@ -141,9 +151,9 @@
   import packageInfo from "../../package.json";
 
   type SongSortKey = "title" | "artist" | "album" | "duration" | "recentlyAdded" | "recentlyPlayed" | "playCount";
-  type AlbumSortKey = "title" | "artist" | "year" | "trackCount";
-  type ArtistSortKey = "name" | "songCount" | "albumCount";
-  type GenreSortKey = "name" | "songCount" | "artistCount" | "albumCount";
+  type AlbumSortKey = "title" | "artist" | "year" | "trackCount" | "mostPlayed" | "leastPlayed";
+  type ArtistSortKey = "name" | "songCount" | "albumCount" | "mostPlayed" | "leastPlayed";
+  type GenreSortKey = "name" | "songCount" | "artistCount" | "albumCount" | "mostPlayed" | "leastPlayed";
   type VideoSortKey = "title" | "artist" | "year" | "recentlyPlayed" | "duration";
   type VideoTypeFilter = "all" | "music_video" | "live" | "interview_documentary" | "behind_the_scenes" | "other";
   type SortDirection = "asc" | "desc";
@@ -217,6 +227,7 @@
     totalPlays: number;
     songCount: number;
   };
+  type StatsSectionId = "tracks" | "artists" | "albums" | "genres" | "recent";
   type ShortcutItem = {
     keys: string[];
     description: string;
@@ -263,6 +274,17 @@
   const AUTO_LYRICS_COOLDOWN_MS = 7 * 24 * 60 * 60 * 1000;
   const AUTO_LYRICS_SETTING_KEY = "cassette:auto-find-lyrics";
   const TRACK_NOTIFICATIONS_SETTING_KEY = "cassette:track-change-notifications";
+  const ALBUM_PLAY_COUNTS_SETTING_KEY = "cassette:show-album-play-counts";
+  const ARTIST_PLAY_COUNTS_SETTING_KEY = "cassette:show-artist-play-counts";
+  const GENRE_PLAY_COUNTS_SETTING_KEY = "cassette:show-genre-play-counts";
+  const ALBUM_TRACK_PLAY_COUNTS_SETTING_KEY = "cassette:show-album-track-play-counts";
+  const STATS_PREVIEW_LIMITS: Record<StatsSectionId, number> = {
+    tracks: 10,
+    artists: 8,
+    albums: 8,
+    genres: 8,
+    recent: 10,
+  };
   const THEME_SETTING_KEY = "cassette:theme";
   const DEFAULT_THEME: ThemeId = "cassette-teal";
   const SELECTABLE_THEME_IDS: readonly ThemeId[] = [
@@ -480,6 +502,18 @@
   let artistSortDirection = $state<SortDirection>("asc");
   let genreSort = $state<GenreSortKey>("name");
   let genreSortDirection = $state<SortDirection>("asc");
+  let showAlbumPlayCounts = $state(true);
+  let showArtistPlayCounts = $state(true);
+  let showGenrePlayCounts = $state(true);
+  let showAlbumTrackPlayCounts = $state(true);
+  let expandedStatsSections = $state<StatsSectionId[]>([]);
+  let statsVisibleLimits = $state<Record<StatsSectionId, number>>({
+    tracks: STATS_PAGE_SIZE,
+    artists: STATS_PAGE_SIZE,
+    albums: STATS_PAGE_SIZE,
+    genres: STATS_PAGE_SIZE,
+    recent: STATS_PAGE_SIZE,
+  });
   let albumGenreDraft = $state("");
   let artistGenreDraft = $state("");
   let isSavingGenreAssignment = $state(false);
@@ -547,11 +581,16 @@
   let sortedAlbums = $derived(sortAlbums(displayAlbums, albumSort, albumSortDirection));
   let sortedArtists = $derived(sortArtists(displayArtists, artistSort, artistSortDirection));
   let sortedGenres = $derived(sortGenres(displayGenres, genreSort, genreSortDirection));
-  let statsTopTracks = $derived(mostPlayed(tracks).slice(0, 10));
-  let statsRecentlyPlayedTracks = $derived(recentlyPlayed(tracks).slice(0, 10));
-  let statsTopArtists = $derived(buildTopArtistStats(tracks, displayArtists).slice(0, 8));
-  let statsTopAlbums = $derived(buildTopAlbumStats(tracks, displayAlbums).slice(0, 8));
-  let statsTopGenres = $derived(buildTopGenreStats(tracks, displayGenres).slice(0, 8));
+  let allStatsTopTracks = $derived(mostPlayed(tracks));
+  let allStatsRecentlyPlayedTracks = $derived(recentlyPlayed(tracks));
+  let allStatsTopArtists = $derived(buildTopArtistStats(tracks, displayArtists));
+  let allStatsTopAlbums = $derived(buildTopAlbumStats(tracks, displayAlbums));
+  let allStatsTopGenres = $derived(buildTopGenreStats(tracks, displayGenres));
+  let statsTopTracks = $derived(visibleStatsItems(allStatsTopTracks, statsSectionExpanded("tracks"), statsVisibleLimits.tracks, STATS_PREVIEW_LIMITS.tracks));
+  let statsRecentlyPlayedTracks = $derived(visibleStatsItems(allStatsRecentlyPlayedTracks, statsSectionExpanded("recent"), statsVisibleLimits.recent, STATS_PREVIEW_LIMITS.recent));
+  let statsTopArtists = $derived(visibleStatsItems(allStatsTopArtists, statsSectionExpanded("artists"), statsVisibleLimits.artists, STATS_PREVIEW_LIMITS.artists));
+  let statsTopAlbums = $derived(visibleStatsItems(allStatsTopAlbums, statsSectionExpanded("albums"), statsVisibleLimits.albums, STATS_PREVIEW_LIMITS.albums));
+  let statsTopGenres = $derived(visibleStatsItems(allStatsTopGenres, statsSectionExpanded("genres"), statsVisibleLimits.genres, STATS_PREVIEW_LIMITS.genres));
   let statsTotalPlays = $derived(tracks.reduce((total, track) => total + track.playCount, 0));
   let statsRecentlyPlayedCount = $derived(tracks.filter((track) => track.lastPlayedAt !== null).length);
   let songFormatOptions = $derived<DropdownOption[]>(availableFormats.map((format) => ({ value: format, label: format })));
@@ -827,6 +866,10 @@
   onMount(() => {
     autoFindLyricsEnabled = window.localStorage.getItem(AUTO_LYRICS_SETTING_KEY) !== "off";
     trackNotificationsEnabled = window.localStorage.getItem(TRACK_NOTIFICATIONS_SETTING_KEY) === "on";
+    showAlbumPlayCounts = window.localStorage.getItem(ALBUM_PLAY_COUNTS_SETTING_KEY) !== "off";
+    showArtistPlayCounts = window.localStorage.getItem(ARTIST_PLAY_COUNTS_SETTING_KEY) !== "off";
+    showGenrePlayCounts = window.localStorage.getItem(GENRE_PLAY_COUNTS_SETTING_KEY) !== "off";
+    showAlbumTrackPlayCounts = window.localStorage.getItem(ALBUM_TRACK_PLAY_COUNTS_SETTING_KEY) !== "off";
     try {
       const updaterStorage = loadUpdaterStorage(window.localStorage);
       automaticUpdateChecksEnabled = updaterStorage.automaticChecksEnabled;
@@ -1256,6 +1299,31 @@
     trackNotificationStatus = null;
     trackNotificationStatusIsError = false;
     window.localStorage.setItem(TRACK_NOTIFICATIONS_SETTING_KEY, trackNotificationsEnabled ? "on" : "off");
+  }
+
+  function updatePlayCountVisibility(
+    event: Event,
+    setting: "albums" | "artists" | "genres" | "albumTracks",
+  ) {
+    if (!(event.currentTarget instanceof HTMLInputElement)) {
+      return;
+    }
+
+    const enabled = event.currentTarget.checked;
+
+    if (setting === "albums") {
+      showAlbumPlayCounts = enabled;
+      window.localStorage.setItem(ALBUM_PLAY_COUNTS_SETTING_KEY, enabled ? "on" : "off");
+    } else if (setting === "artists") {
+      showArtistPlayCounts = enabled;
+      window.localStorage.setItem(ARTIST_PLAY_COUNTS_SETTING_KEY, enabled ? "on" : "off");
+    } else if (setting === "genres") {
+      showGenrePlayCounts = enabled;
+      window.localStorage.setItem(GENRE_PLAY_COUNTS_SETTING_KEY, enabled ? "on" : "off");
+    } else {
+      showAlbumTrackPlayCounts = enabled;
+      window.localStorage.setItem(ALBUM_TRACK_PLAY_COUNTS_SETTING_KEY, enabled ? "on" : "off");
+    }
   }
 
   function handleAutomaticUpdateSettingChange(event: Event) {
@@ -5766,22 +5834,46 @@
   }
 
   function recentlyPlayed(libraryTracks: Track[]) {
-    return [...libraryTracks]
-      .filter((track) => track.lastPlayedAt !== null)
-      .sort((left, right) =>
-        (right.lastPlayedAt ?? 0) - (left.lastPlayedAt ?? 0)
-        || compareText(left.title, right.title),
-      );
+    return rankRecentlyPlayedTracks(libraryTracks);
   }
 
   function mostPlayed(libraryTracks: Track[]) {
-    return [...libraryTracks]
-      .filter((track) => track.playCount > 0)
-      .sort((left, right) =>
-        right.playCount - left.playCount
-        || (right.lastPlayedAt ?? 0) - (left.lastPlayedAt ?? 0)
-        || compareText(left.title, right.title),
-      );
+    return rankMostPlayedTracks(libraryTracks);
+  }
+
+  function statsSectionExpanded(section: StatsSectionId) {
+    return expandedStatsSections.includes(section);
+  }
+
+  function toggleStatsSection(section: StatsSectionId) {
+    if (statsSectionExpanded(section)) {
+      expandedStatsSections = expandedStatsSections.filter((value) => value !== section);
+      statsVisibleLimits[section] = STATS_PAGE_SIZE;
+      return;
+    }
+
+    expandedStatsSections = [...expandedStatsSections, section];
+    statsVisibleLimits[section] = STATS_PAGE_SIZE;
+  }
+
+  function loadMoreStats(section: StatsSectionId, total: number) {
+    statsVisibleLimits[section] = nextStatsLimit(statsVisibleLimits[section], total);
+  }
+
+  function statsViewAllLabel(section: StatsSectionId, total: number) {
+    if (statsSectionExpanded(section)) {
+      return "Show less";
+    }
+
+    if (total > STATS_PREVIEW_LIMITS[section]) {
+      return "View all";
+    }
+
+    return section === "recent" ? "Most recent" : "All time";
+  }
+
+  function hasMoreStats(section: StatsSectionId, total: number) {
+    return statsSectionExpanded(section) && statsVisibleLimits[section] < total;
   }
 
   function buildTopArtistStats(libraryTracks: Track[], artists: Artist[]): TopArtistStat[] {
@@ -5878,6 +5970,10 @@
   }
 
   function sortAlbums(albums: Album[], sortKey: AlbumSortKey, direction: SortDirection) {
+    if (sortKey === "mostPlayed" || sortKey === "leastPlayed") {
+      return sortAlbumsByPlayCount(albums, sortKey);
+    }
+
     return [...albums].sort((left, right) => {
       let result = 0;
 
@@ -5903,6 +5999,10 @@
   }
 
   function sortArtists(artists: Artist[], sortKey: ArtistSortKey, direction: SortDirection) {
+    if (sortKey === "mostPlayed" || sortKey === "leastPlayed") {
+      return sortArtistsByPlayCount(artists, sortKey);
+    }
+
     return [...artists].sort((left, right) => {
       let result = 0;
 
@@ -5922,6 +6022,10 @@
   }
 
   function sortGenres(genres: Genre[], sortKey: GenreSortKey, direction: SortDirection) {
+    if (sortKey === "mostPlayed" || sortKey === "leastPlayed") {
+      return sortGenresByPlayCount(genres, sortKey);
+    }
+
     return [...genres].sort((left, right) => {
       let result = 0;
 
@@ -6593,7 +6697,11 @@
             </div>
           </div>
 
-          <LibrarySection title="Top Tracks" viewAllLabel="All time">
+          <LibrarySection
+            title="Top Tracks"
+            viewAllLabel={statsViewAllLabel("tracks", allStatsTopTracks.length)}
+            onViewAll={allStatsTopTracks.length > STATS_PREVIEW_LIMITS.tracks ? () => toggleStatsSection("tracks") : undefined}
+          >
             {#if statsTopTracks.length === 0}
               <div class="group-empty">
                 <h3>No top tracks yet</h3>
@@ -6610,11 +6718,23 @@
                 onAlbumSelect={handleTrackAlbumSelect}
                 onToggleFavorite={handleToggleFavorite}
               />
+              {#if statsSectionExpanded("tracks")}
+                <div class="stats-pagination" aria-live="polite">
+                  <span>Showing {statsTopTracks.length} of {allStatsTopTracks.length}</span>
+                  {#if hasMoreStats("tracks", allStatsTopTracks.length)}
+                    <button type="button" onclick={() => loadMoreStats("tracks", allStatsTopTracks.length)}>Load 50 more</button>
+                  {/if}
+                </div>
+              {/if}
             {/if}
           </LibrarySection>
 
           <div class="stats-section-grid">
-            <LibrarySection title="Top Artists" viewAllLabel="By total plays">
+            <LibrarySection
+              title="Top Artists"
+              viewAllLabel={statsViewAllLabel("artists", allStatsTopArtists.length)}
+              onViewAll={allStatsTopArtists.length > STATS_PREVIEW_LIMITS.artists ? () => toggleStatsSection("artists") : undefined}
+            >
               {#if statsTopArtists.length === 0}
                 <div class="group-empty compact">
                   <h3>No artist play data yet</h3>
@@ -6635,10 +6755,22 @@
                     </button>
                   {/each}
                 </div>
+                {#if statsSectionExpanded("artists")}
+                  <div class="stats-pagination" aria-live="polite">
+                    <span>Showing {statsTopArtists.length} of {allStatsTopArtists.length}</span>
+                    {#if hasMoreStats("artists", allStatsTopArtists.length)}
+                      <button type="button" onclick={() => loadMoreStats("artists", allStatsTopArtists.length)}>Load 50 more</button>
+                    {/if}
+                  </div>
+                {/if}
               {/if}
             </LibrarySection>
 
-            <LibrarySection title="Top Albums" viewAllLabel="By total plays">
+            <LibrarySection
+              title="Top Albums"
+              viewAllLabel={statsViewAllLabel("albums", allStatsTopAlbums.length)}
+              onViewAll={allStatsTopAlbums.length > STATS_PREVIEW_LIMITS.albums ? () => toggleStatsSection("albums") : undefined}
+            >
               {#if statsTopAlbums.length === 0}
                 <div class="group-empty compact">
                   <h3>No album play data yet</h3>
@@ -6668,10 +6800,22 @@
                     </button>
                   {/each}
                 </div>
+                {#if statsSectionExpanded("albums")}
+                  <div class="stats-pagination" aria-live="polite">
+                    <span>Showing {statsTopAlbums.length} of {allStatsTopAlbums.length}</span>
+                    {#if hasMoreStats("albums", allStatsTopAlbums.length)}
+                      <button type="button" onclick={() => loadMoreStats("albums", allStatsTopAlbums.length)}>Load 50 more</button>
+                    {/if}
+                  </div>
+                {/if}
               {/if}
             </LibrarySection>
 
-            <LibrarySection title="Top Genres" viewAllLabel="By total plays">
+            <LibrarySection
+              title="Top Genres"
+              viewAllLabel={statsViewAllLabel("genres", allStatsTopGenres.length)}
+              onViewAll={allStatsTopGenres.length > STATS_PREVIEW_LIMITS.genres ? () => toggleStatsSection("genres") : undefined}
+            >
               {#if statsTopGenres.length === 0}
                 <div class="group-empty compact">
                   <h3>No genre play data yet</h3>
@@ -6692,10 +6836,22 @@
                     </button>
                   {/each}
                 </div>
+                {#if statsSectionExpanded("genres")}
+                  <div class="stats-pagination" aria-live="polite">
+                    <span>Showing {statsTopGenres.length} of {allStatsTopGenres.length}</span>
+                    {#if hasMoreStats("genres", allStatsTopGenres.length)}
+                      <button type="button" onclick={() => loadMoreStats("genres", allStatsTopGenres.length)}>Load 50 more</button>
+                    {/if}
+                  </div>
+                {/if}
               {/if}
             </LibrarySection>
 
-            <LibrarySection title="Recently Played" viewAllLabel="Most recent">
+            <LibrarySection
+              title="Recently Played"
+              viewAllLabel={statsViewAllLabel("recent", allStatsRecentlyPlayedTracks.length)}
+              onViewAll={allStatsRecentlyPlayedTracks.length > STATS_PREVIEW_LIMITS.recent ? () => toggleStatsSection("recent") : undefined}
+            >
               {#if statsRecentlyPlayedTracks.length === 0}
                 <div class="group-empty compact">
                   <h3>No playback history yet</h3>
@@ -6735,6 +6891,14 @@
                     </button>
                   {/each}
                 </div>
+                {#if statsSectionExpanded("recent")}
+                  <div class="stats-pagination" aria-live="polite">
+                    <span>Showing {statsRecentlyPlayedTracks.length} of {allStatsRecentlyPlayedTracks.length} unique tracks</span>
+                    {#if hasMoreStats("recent", allStatsRecentlyPlayedTracks.length)}
+                      <button type="button" onclick={() => loadMoreStats("recent", allStatsRecentlyPlayedTracks.length)}>Load 50 more</button>
+                    {/if}
+                  </div>
+                {/if}
               {/if}
             </LibrarySection>
           </div>
@@ -6842,6 +7006,7 @@
                     {#each group.tracks as track (track.id)}
                       <div
                         class:active={track.id === currentTrack?.id}
+                        class:with-play-counts={showAlbumTrackPlayCounts}
                         class="album-track-row"
                         role="button"
                         tabindex="0"
@@ -6859,6 +7024,9 @@
                             {track.artist ?? "Unknown Artist"}
                           </button>
                         </div>
+                        {#if showAlbumTrackPlayCounts}
+                          <span class="album-track-play-count">{playsLabel(track.playCount)}</span>
+                        {/if}
                         <span class="album-track-duration">{track.durationSeconds === null ? "" : formatTrackDuration(track.durationSeconds)}</span>
                         <button
                           class:active={track.isFavorite}
@@ -6888,16 +7056,20 @@
                   <option value="artist">Artist</option>
                   <option value="year">Year</option>
                   <option value="trackCount">Song count</option>
+                  <option value="mostPlayed">Most played</option>
+                  <option value="leastPlayed">Least played</option>
                 </select>
               </label>
-              <button
-                class="direction-toggle"
-                type="button"
-                aria-label={`Album sort direction: ${sortDirectionLabel(albumSortDirection)}`}
-                onclick={() => albumSortDirection = nextSortDirection(albumSortDirection)}
-              >
-                {sortDirectionLabel(albumSortDirection)}
-              </button>
+              {#if albumSort !== "mostPlayed" && albumSort !== "leastPlayed"}
+                <button
+                  class="direction-toggle"
+                  type="button"
+                  aria-label={`Album sort direction: ${sortDirectionLabel(albumSortDirection)}`}
+                  onclick={() => albumSortDirection = nextSortDirection(albumSortDirection)}
+                >
+                  {sortDirectionLabel(albumSortDirection)}
+                </button>
+              {/if}
             </div>
             {#if visibleAlbums.length === 0}
               <div class="group-empty">
@@ -6940,7 +7112,7 @@
                       </div>
                       <button class="album-card-copy" type="button" onclick={() => handleAlbumSelect(album)}>
                         <strong>{album.title}</strong>
-                        <small>{albumDetail(album)}</small>
+                        <small>{albumDetail(album)}{showAlbumPlayCounts ? ` · ${playsLabel(album.playCount)}` : ""}</small>
                       </button>
                     </div>
                   </article>
@@ -7044,16 +7216,20 @@
                   <option value="name">Artist name</option>
                   <option value="songCount">Song count</option>
                   <option value="albumCount">Album count</option>
+                  <option value="mostPlayed">Most played</option>
+                  <option value="leastPlayed">Least played</option>
                 </select>
               </label>
-              <button
-                class="direction-toggle"
-                type="button"
-                aria-label={`Artist sort direction: ${sortDirectionLabel(artistSortDirection)}`}
-                onclick={() => artistSortDirection = nextSortDirection(artistSortDirection)}
-              >
-                {sortDirectionLabel(artistSortDirection)}
-              </button>
+              {#if artistSort !== "mostPlayed" && artistSort !== "leastPlayed"}
+                <button
+                  class="direction-toggle"
+                  type="button"
+                  aria-label={`Artist sort direction: ${sortDirectionLabel(artistSortDirection)}`}
+                  onclick={() => artistSortDirection = nextSortDirection(artistSortDirection)}
+                >
+                  {sortDirectionLabel(artistSortDirection)}
+                </button>
+              {/if}
             </div>
             {#if visibleArtists.length === 0}
               <div class="group-empty">
@@ -7069,7 +7245,7 @@
                     </div>
                     <div>
                       <h3>{artist.name}</h3>
-                      <p>{artistSongCount(artist)}</p>
+                      <p>{artistSongCount(artist)}{showArtistPlayCounts ? ` · ${playsLabel(artist.playCount)}` : ""}</p>
                     </div>
                   </button>
                 {/each}
@@ -7192,16 +7368,20 @@
                   <option value="songCount">Song count</option>
                   <option value="artistCount">Artist count</option>
                   <option value="albumCount">Album count</option>
+                  <option value="mostPlayed">Most played</option>
+                  <option value="leastPlayed">Least played</option>
                 </select>
               </label>
-              <button
-                class="direction-toggle"
-                type="button"
-                aria-label={`Genre sort direction: ${sortDirectionLabel(genreSortDirection)}`}
-                onclick={() => genreSortDirection = nextSortDirection(genreSortDirection)}
-              >
-                {sortDirectionLabel(genreSortDirection)}
-              </button>
+              {#if genreSort !== "mostPlayed" && genreSort !== "leastPlayed"}
+                <button
+                  class="direction-toggle"
+                  type="button"
+                  aria-label={`Genre sort direction: ${sortDirectionLabel(genreSortDirection)}`}
+                  onclick={() => genreSortDirection = nextSortDirection(genreSortDirection)}
+                >
+                  {sortDirectionLabel(genreSortDirection)}
+                </button>
+              {/if}
             </div>
             {#if visibleGenres.length === 0}
               <div class="group-empty">
@@ -7217,7 +7397,7 @@
                     </div>
                     <div>
                       <h3>{genre.name}</h3>
-                      <p>{genreDetail(genre)}</p>
+                      <p>{genreDetail(genre)}{showGenrePlayCounts ? ` · ${playsLabel(genre.playCount)}` : ""}</p>
                     </div>
                   </button>
                 {/each}
@@ -8738,6 +8918,30 @@
                   <strong>Enabled</strong>
                   <small>Always shown in album detail</small>
                 </div>
+                <label class="settings-toggle-row">
+                  <span>Album play totals</span>
+                  <input type="checkbox" checked={showAlbumPlayCounts} onchange={(event) => updatePlayCountVisibility(event, "albums")} />
+                  <strong>{showAlbumPlayCounts ? "Shown" : "Hidden"}</strong>
+                  <small>Sum of the play counts for tracks on each album.</small>
+                </label>
+                <label class="settings-toggle-row">
+                  <span>Artist play totals</span>
+                  <input type="checkbox" checked={showArtistPlayCounts} onchange={(event) => updatePlayCountVisibility(event, "artists")} />
+                  <strong>{showArtistPlayCounts ? "Shown" : "Hidden"}</strong>
+                  <small>Sum of play counts for tracks credited to each artist.</small>
+                </label>
+                <label class="settings-toggle-row">
+                  <span>Genre play totals</span>
+                  <input type="checkbox" checked={showGenrePlayCounts} onchange={(event) => updatePlayCountVisibility(event, "genres")} />
+                  <strong>{showGenrePlayCounts ? "Shown" : "Hidden"}</strong>
+                  <small>Each track contributes its plays to every assigned genre.</small>
+                </label>
+                <label class="settings-toggle-row">
+                  <span>Album track play counts</span>
+                  <input type="checkbox" checked={showAlbumTrackPlayCounts} onchange={(event) => updatePlayCountVisibility(event, "albumTracks")} />
+                  <strong>{showAlbumTrackPlayCounts ? "Shown" : "Hidden"}</strong>
+                  <small>Show individual all-time counts in album detail.</small>
+                </label>
               </div>
             </section>
 
@@ -11727,6 +11931,19 @@
       box-shadow 140ms ease;
   }
 
+  .album-track-row.with-play-counts {
+    grid-template-columns: 42px minmax(180px, 1fr) minmax(74px, auto) minmax(56px, auto) auto auto;
+  }
+
+  .album-track-play-count {
+    justify-self: end;
+    color: var(--text-soft);
+    font-size: 0.8rem;
+    font-variant-numeric: tabular-nums;
+    font-weight: 750;
+    white-space: nowrap;
+  }
+
   .album-track-row:hover,
   .album-track-row:focus-visible {
     border-color: var(--accent-strong);
@@ -12880,6 +13097,37 @@
     white-space: nowrap;
   }
 
+  .stats-pagination {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-top: 10px;
+    color: var(--text-soft);
+    font-size: 0.82rem;
+    font-weight: 750;
+  }
+
+  .stats-pagination button {
+    min-height: 34px;
+    border: 1px solid var(--border-strong);
+    border-radius: 8px;
+    background: var(--panel-strong);
+    color: var(--text-muted);
+    cursor: default;
+    font: inherit;
+    font-weight: 800;
+    padding: 0 12px;
+  }
+
+  .stats-pagination button:hover,
+  .stats-pagination button:focus-visible {
+    border-color: var(--accent-strong);
+    background: var(--panel-hover);
+    color: var(--text);
+    outline: none;
+  }
+
   .stats-rank-copy strong {
     color: var(--text);
     font-size: 0.95rem;
@@ -13099,6 +13347,11 @@
     width: 18px;
     height: 18px;
     accent-color: var(--accent);
+  }
+
+  .settings-toggle-row small {
+    grid-column: 1 / -1;
+    margin-top: 0;
   }
 
   .updates-section .settings-toggle-row small {
@@ -14876,6 +15129,10 @@
       grid-template-columns: 36px minmax(0, 1fr) auto auto;
     }
 
+    .album-track-row.with-play-counts {
+      grid-template-columns: 36px minmax(0, 1fr) minmax(70px, auto) auto auto;
+    }
+
     .album-track-format {
       display: none;
     }
@@ -15128,6 +15385,10 @@
 
     .album-track-duration {
       display: none;
+    }
+
+    .album-track-row.with-play-counts {
+      grid-template-columns: 32px minmax(0, 1fr) minmax(64px, auto) auto;
     }
 
     .shortcuts-modal,

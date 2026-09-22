@@ -60,6 +60,7 @@ export type Album = {
   artist: string;
   year: number | null;
   trackCount: number;
+  playCount: number;
   color: string;
   coverArtPath: string | null;
 };
@@ -67,6 +68,7 @@ export type Album = {
 export type Artist = {
   name: string;
   detail: string;
+  playCount: number;
   color: string;
 };
 
@@ -75,6 +77,7 @@ export type Genre = {
   songCount: number;
   artistCount: number;
   albumCount: number;
+  playCount: number;
   detail: string;
   color: string;
 };
