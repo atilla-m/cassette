@@ -2,6 +2,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import type {
   AutoLyricsResult,
+  AlbumTagEditorData,
+  AlbumTagUpdateResult,
   CdCoverLookupResult,
   CdDetectResult,
   CdMetadataLookupResult,
@@ -19,6 +21,7 @@ import type {
   TrackTagEditorData,
   TrackLyrics,
   UpdateTrackTagsRequest,
+  UpdateAlbumTagsRequest,
   VideoEntry,
   VideoInfoUpdate,
   VideoLibrary,
@@ -156,8 +159,16 @@ export async function getTrackTagEditorData(trackId: string): Promise<TrackTagEd
   return invoke<TrackTagEditorData>("get_track_tag_editor_data", { trackId });
 }
 
+export async function getAlbumTagEditorData(albumId: string): Promise<AlbumTagEditorData> {
+  return invoke<AlbumTagEditorData>("get_album_tag_editor_data", { albumId });
+}
+
 export async function updateTrackTags(request: UpdateTrackTagsRequest): Promise<Track> {
   return invoke<Track>("update_track_tags", { request });
+}
+
+export async function updateAlbumTags(request: UpdateAlbumTagsRequest): Promise<AlbumTagUpdateResult> {
+  return invoke<AlbumTagUpdateResult>("update_album_tags", { request });
 }
 
 export async function setAlbumGenres(albumId: string, genres: string[]): Promise<Track[]> {

@@ -8,14 +8,15 @@ use lofty::flac::FlacFile;
 use lofty::ogg::VorbisComments;
 use lofty::picture::{MimeType, Picture, PictureType};
 use lofty::probe::Probe;
-use lofty::tag::items::Timestamp;
 use lofty::tag::{Accessor, ItemKey, Tag, TagType};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 #[cfg(target_os = "linux")]
 use std::ffi::CStr;
 use std::fs;
+use std::hash::Hasher;
 use std::io::{self, BufRead, BufReader, Read, Write};
 #[cfg(target_os = "linux")]
 use std::os::raw::{c_char, c_int, c_uint, c_void};
@@ -120,6 +121,91 @@ struct TrackTagEditorData {
     genre_override_active: bool,
     tag_editing_supported: bool,
     unsupported_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(tag = "mode", content = "value", rename_all = "camelCase")]
+enum TagFieldUpdate<T> {
+    Unchanged,
+    Set(T),
+    Clear,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateAlbumTagsRequest {
+    album_id: String,
+    album: TagFieldUpdate<String>,
+    album_artist: TagFieldUpdate<String>,
+    artist: TagFieldUpdate<String>,
+    genre: TagFieldUpdate<String>,
+    year: TagFieldUpdate<u16>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SharedTagValue<T> {
+    mixed: bool,
+    value: Option<T>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AlbumSharedTagValues {
+    album: SharedTagValue<String>,
+    album_artist: SharedTagValue<String>,
+    artist: SharedTagValue<String>,
+    genre: SharedTagValue<String>,
+    year: SharedTagValue<u16>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AlbumTagEditorTrack {
+    track: Track,
+    editable: bool,
+    exclusion_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AlbumTagEditorData {
+    album_id: String,
+    tracks: Vec<AlbumTagEditorTrack>,
+    editable_track_count: usize,
+    excluded_track_count: usize,
+    shared_values: AlbumSharedTagValues,
+    genre_override_active: bool,
+    preflight_errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AlbumTagUpdateProgress {
+    phase: String,
+    completed: usize,
+    total: usize,
+    file_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AlbumTagTrackResult {
+    track_id: String,
+    file_name: String,
+    status: String,
+    message: String,
+    backup_path: Option<String>,
+    recovery_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AlbumTagUpdateResult {
+    outcome: String,
+    summary: String,
+    updated_tracks: Vec<Track>,
+    track_results: Vec<AlbumTagTrackResult>,
 }
 
 #[derive(Debug)]
@@ -1204,6 +1290,138 @@ fn get_track_tag_editor_data(
         tag_editing_supported,
         unsupported_reason,
     })
+}
+
+#[tauri::command]
+fn get_album_tag_editor_data(
+    album_id: String,
+    library: State<'_, Mutex<LibraryDatabase>>,
+) -> Result<AlbumTagEditorData, String> {
+    let (tracks, root_path, genre_assignments) = {
+        let library = library
+            .lock()
+            .map_err(|_| "Library cache is unavailable.".to_owned())?;
+        let tracks = cached_album_tracks(&library, &album_id)?;
+        let root_path = library
+            .meta_value("last_scanned_folder")?
+            .ok_or_else(|| "No active library folder is configured.".to_owned())?;
+        let genre_assignments = library.genre_assignments()?;
+
+        (tracks, PathBuf::from(root_path), genre_assignments)
+    };
+
+    let mut editor_tracks = Vec::with_capacity(tracks.len());
+    let mut editable_values = Vec::new();
+    let mut preflight_errors = Vec::new();
+
+    for track in tracks {
+        if !tag_editing_safely_validated_for_path(Path::new(&track.file_path)) {
+            editor_tracks.push(AlbumTagEditorTrack {
+                track,
+                editable: false,
+                exclusion_reason: Some(
+                    "Only FLAC files are editable; this track remains read-only.".to_owned(),
+                ),
+            });
+            continue;
+        }
+
+        let inspection = validated_cached_track_path(&track, &root_path).and_then(|path| {
+            let tagged_file = read_tagged_file(&path)?;
+            if !tag_editing_supported(&tagged_file) {
+                return Err("This FLAC tag container is not writable.".to_owned());
+            }
+            Ok(track_tag_values_from_file(&tagged_file))
+        });
+
+        match inspection {
+            Ok(values) => {
+                editable_values.push(values);
+                editor_tracks.push(AlbumTagEditorTrack {
+                    track,
+                    editable: true,
+                    exclusion_reason: None,
+                });
+            }
+            Err(error) => {
+                preflight_errors.push(format!("{}: {error}", track.file_name));
+                editor_tracks.push(AlbumTagEditorTrack {
+                    track,
+                    editable: false,
+                    exclusion_reason: Some(error),
+                });
+            }
+        }
+    }
+
+    let editable_track_count = editor_tracks.iter().filter(|item| item.editable).count();
+    let excluded_track_count = editor_tracks.len().saturating_sub(editable_track_count);
+    if editable_track_count == 0 && preflight_errors.is_empty() {
+        preflight_errors.push("This album has no editable FLAC tracks.".to_owned());
+    }
+
+    let genre_override_active = editor_tracks.iter().any(|item| {
+        genre_assignments
+            .albums
+            .contains_key(&album_key_for_track(&item.track))
+            || genre_assignments
+                .artists
+                .contains_key(&artist_key_for_track(&item.track))
+    });
+
+    Ok(AlbumTagEditorData {
+        album_id,
+        tracks: editor_tracks,
+        editable_track_count,
+        excluded_track_count,
+        shared_values: shared_album_tag_values(&editable_values),
+        genre_override_active,
+        preflight_errors,
+    })
+}
+
+#[tauri::command]
+fn update_album_tags(
+    request: UpdateAlbumTagsRequest,
+    app: AppHandle,
+    library: State<'_, Mutex<LibraryDatabase>>,
+    playback: State<'_, Mutex<PlaybackState>>,
+    mpris: State<'_, MprisState>,
+    tag_writes: State<'_, Mutex<TagWriteState>>,
+) -> Result<AlbumTagUpdateResult, String> {
+    let result = update_album_tags_batch(
+        &request,
+        &app,
+        library.inner(),
+        tag_writes.inner(),
+        app.path()
+            .app_data_dir()
+            .ok()
+            .map(|path| path.join("cover-art")),
+    )?;
+
+    if !result.updated_tracks.is_empty() {
+        let current_status = playback.lock().ok().map(|playback| playback.status());
+        if let Some(current_path) = current_status
+            .as_ref()
+            .and_then(|status| status.file_path.as_deref())
+        {
+            if let Some(updated_track) = result
+                .updated_tracks
+                .iter()
+                .find(|track| track.file_path == current_path)
+            {
+                mpris.update_track(
+                    Some(MprisTrack::from(updated_track)),
+                    current_status
+                        .map(|status| status.is_playing)
+                        .unwrap_or(false),
+                );
+            }
+        }
+    }
+
+    Ok(result)
 }
 
 #[tauri::command]
@@ -3998,19 +4216,31 @@ impl LibraryDatabase {
     }
 
     fn update_cached_track(&mut self, track: &mut Track) -> Result<(), String> {
+        self.update_cached_tracks(std::slice::from_mut(track))
+    }
+
+    fn update_cached_tracks(&mut self, tracks: &mut [Track]) -> Result<(), String> {
         let favorite_track_ids = favorite_track_ids(&self.connection)
             .map_err(|error| format!("Could not read favorite tracks: {error}"))?;
         let playback_history = playback_history_by_id(&self.connection)
             .map_err(|error| format!("Could not read playback history: {error}"))?;
-        track.is_favorite = track.is_favorite || favorite_track_ids.contains(&track.id);
-        if let Some(history) = playback_history.get(&track.id) {
-            track.play_count = history.play_count;
-            track.last_played_at = history.last_played_at;
+        let genre_assignments = self.genre_assignments()?;
+
+        for track in tracks.iter_mut() {
+            track.is_favorite = track.is_favorite || favorite_track_ids.contains(&track.id);
+            if let Some(history) = playback_history.get(&track.id) {
+                track.play_count = history.play_count;
+                track.last_played_at = history.last_played_at;
+            }
         }
 
-        let genres_json = serde_json::to_string(&track.genres).unwrap_or_else(|_| "[]".to_owned());
-        self.connection
-            .execute(
+        let transaction = self
+            .connection
+            .transaction()
+            .map_err(|error| format!("Could not start cached track update: {error}"))?;
+        {
+            let mut statement = transaction
+                .prepare(
                 "
                 INSERT INTO tracks (
                     id,
@@ -4059,35 +4289,46 @@ impl LibraryDatabase {
                     play_count = excluded.play_count,
                     last_played_at = excluded.last_played_at
                 ",
-                params![
-                    &track.id,
-                    &track.title,
-                    &track.artist,
-                    &track.album,
-                    &track.album_artist,
-                    &genres_json,
-                    track.track_number,
-                    track.disc_number,
-                    track.year,
-                    track.duration_seconds,
-                    &track.file_path,
-                    &track.file_name,
-                    &track.extension,
-                    track.modified_time,
-                    track.file_size,
-                    track.scanned_at,
-                    &track.cover_art_path,
-                    &track.lyrics_path,
-                    &track.lyrics_kind,
-                    track.is_favorite,
-                    track.play_count,
-                    track.last_played_at,
-                ],
             )
-            .map_err(|error| format!("Could not update cached track: {error}"))?;
+                .map_err(|error| format!("Could not prepare cached track update: {error}"))?;
 
-        let genre_assignments = self.genre_assignments()?;
-        apply_genre_assignments(std::slice::from_mut(track), &genre_assignments);
+            for track in tracks.iter() {
+                let genres_json =
+                    serde_json::to_string(&track.genres).unwrap_or_else(|_| "[]".to_owned());
+                statement
+                    .execute(params![
+                        &track.id,
+                        &track.title,
+                        &track.artist,
+                        &track.album,
+                        &track.album_artist,
+                        &genres_json,
+                        track.track_number,
+                        track.disc_number,
+                        track.year,
+                        track.duration_seconds,
+                        &track.file_path,
+                        &track.file_name,
+                        &track.extension,
+                        track.modified_time,
+                        track.file_size,
+                        track.scanned_at,
+                        &track.cover_art_path,
+                        &track.lyrics_path,
+                        &track.lyrics_kind,
+                        track.is_favorite,
+                        track.play_count,
+                        track.last_played_at,
+                    ])
+                    .map_err(|error| format!("Could not update cached track: {error}"))?;
+            }
+        }
+
+        transaction
+            .commit()
+            .map_err(|error| format!("Could not commit cached track update: {error}"))?;
+
+        apply_genre_assignments(tracks, &genre_assignments);
 
         Ok(())
     }
@@ -6594,6 +6835,809 @@ fn apply_genre_assignments(tracks: &mut [Track], assignments: &GenreAssignmentMa
     }
 }
 
+fn cached_album_tracks(library: &LibraryDatabase, album_id: &str) -> Result<Vec<Track>, String> {
+    if album_id.trim().is_empty() {
+        return Err("Album is not in the library cache.".to_owned());
+    }
+
+    let tracks = library
+        .load_cache()?
+        .tracks
+        .into_iter()
+        .filter(|track| album_key_for_track(track) == album_id)
+        .collect::<Vec<_>>();
+
+    if tracks.is_empty() {
+        Err("Album is not in the library cache.".to_owned())
+    } else {
+        Ok(tracks)
+    }
+}
+
+fn shared_tag_value<T: Clone + PartialEq>(
+    values: impl IntoIterator<Item = Option<T>>,
+) -> SharedTagValue<T> {
+    let mut values = values.into_iter();
+    let Some(first) = values.next() else {
+        return SharedTagValue {
+            mixed: false,
+            value: None,
+        };
+    };
+    let mixed = values.any(|value| value != first);
+
+    SharedTagValue {
+        mixed,
+        value: if mixed { None } else { first },
+    }
+}
+
+fn shared_album_tag_values(values: &[TrackTagValues]) -> AlbumSharedTagValues {
+    AlbumSharedTagValues {
+        album: shared_tag_value(values.iter().map(|value| value.album.clone())),
+        album_artist: shared_tag_value(values.iter().map(|value| value.album_artist.clone())),
+        artist: shared_tag_value(values.iter().map(|value| value.artist.clone())),
+        genre: shared_tag_value(values.iter().map(|value| value.genre.clone())),
+        year: shared_tag_value(values.iter().map(|value| value.year)),
+    }
+}
+
+fn validate_text_field_update(field: &TagFieldUpdate<String>, label: &str) -> Result<(), String> {
+    if let TagFieldUpdate::Set(value) = field {
+        if normalized_request_text(Some(value)).is_none() {
+            return Err(format!(
+                "{label} cannot be blank when set. Choose Clear to remove it."
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_update_album_tags_request(request: &UpdateAlbumTagsRequest) -> Result<(), String> {
+    if request.album_id.trim().is_empty() {
+        return Err("Album is not in the library cache.".to_owned());
+    }
+
+    validate_text_field_update(&request.album, "Album title")?;
+    validate_text_field_update(&request.album_artist, "Album artist")?;
+    validate_text_field_update(&request.artist, "Artist")?;
+    validate_text_field_update(&request.genre, "Genre")?;
+    if matches!(request.year, TagFieldUpdate::Set(0)) {
+        return Err("Year must be a positive integer.".to_owned());
+    }
+
+    if album_tag_field_mask(request) == TagFieldMask::default() {
+        return Err("Choose at least one album field to change.".to_owned());
+    }
+
+    Ok(())
+}
+
+fn apply_text_field_update(
+    current: Option<String>,
+    update: &TagFieldUpdate<String>,
+) -> Option<String> {
+    match update {
+        TagFieldUpdate::Unchanged => current,
+        TagFieldUpdate::Set(value) => normalized_request_text(Some(value)),
+        TagFieldUpdate::Clear => None,
+    }
+}
+
+fn apply_year_field_update(current: Option<u16>, update: &TagFieldUpdate<u16>) -> Option<u16> {
+    match update {
+        TagFieldUpdate::Unchanged => current,
+        TagFieldUpdate::Set(value) => Some(*value),
+        TagFieldUpdate::Clear => None,
+    }
+}
+
+fn album_tag_request_for_track(
+    track_id: &str,
+    values: TrackTagValues,
+    changes: &UpdateAlbumTagsRequest,
+) -> UpdateTrackTagsRequest {
+    UpdateTrackTagsRequest {
+        track_id: track_id.to_owned(),
+        title: values.title,
+        artist: apply_text_field_update(values.artist, &changes.artist),
+        album: apply_text_field_update(values.album, &changes.album),
+        album_artist: apply_text_field_update(values.album_artist, &changes.album_artist),
+        genre: apply_text_field_update(values.genre, &changes.genre),
+        year: apply_year_field_update(values.year, &changes.year),
+        track_number: values.track_number,
+        disc_number: values.disc_number,
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct TagFieldMask {
+    title: bool,
+    artist: bool,
+    album: bool,
+    album_artist: bool,
+    genre: bool,
+    year: bool,
+    track_number: bool,
+    disc_number: bool,
+}
+
+impl TagFieldMask {
+    fn all() -> Self {
+        Self {
+            title: true,
+            artist: true,
+            album: true,
+            album_artist: true,
+            genre: true,
+            year: true,
+            track_number: true,
+            disc_number: true,
+        }
+    }
+}
+
+fn album_tag_field_mask(request: &UpdateAlbumTagsRequest) -> TagFieldMask {
+    TagFieldMask {
+        artist: !matches!(request.artist, TagFieldUpdate::Unchanged),
+        album: !matches!(request.album, TagFieldUpdate::Unchanged),
+        album_artist: !matches!(request.album_artist, TagFieldUpdate::Unchanged),
+        genre: !matches!(request.genre, TagFieldUpdate::Unchanged),
+        year: !matches!(request.year, TagFieldUpdate::Unchanged),
+        ..TagFieldMask::default()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FileContentFingerprint {
+    size: u64,
+    hash: u64,
+}
+
+fn file_content_fingerprint(path: &Path) -> Result<FileContentFingerprint, String> {
+    let mut file = fs::File::open(path)
+        .map_err(|error| format!("Could not open selected track for verification: {error}"))?;
+    let mut buffer = [0_u8; 64 * 1024];
+    let mut hasher = DefaultHasher::new();
+    let mut size = 0_u64;
+
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|error| format!("Could not verify selected track bytes: {error}"))?;
+        if read == 0 {
+            break;
+        }
+        size = size.saturating_add(read as u64);
+        hasher.write(&buffer[..read]);
+    }
+
+    Ok(FileContentFingerprint {
+        size,
+        hash: hasher.finish(),
+    })
+}
+
+fn validate_album_target_preflight(track: &Track, path: &Path) -> Result<(), String> {
+    let metadata =
+        fs::metadata(path).map_err(|error| format!("Could not read selected track: {error}"))?;
+    if metadata.permissions().readonly() {
+        return Err("Selected track is read-only.".to_owned());
+    }
+    if track
+        .file_size
+        .is_some_and(|size| size != metadata.len() as i64)
+    {
+        return Err("Selected track changed outside Cassette since the library scan.".to_owned());
+    }
+    let modified_time = metadata.modified().ok().and_then(system_time_to_unix);
+    if track.modified_time.is_some() && track.modified_time != modified_time {
+        return Err("Selected track changed outside Cassette since the library scan.".to_owned());
+    }
+
+    Ok(())
+}
+
+struct PreparedAlbumTagEdit {
+    track: Track,
+    path: PathBuf,
+    request: UpdateTrackTagsRequest,
+    mask: TagFieldMask,
+    original_fingerprint: FileContentFingerprint,
+    temp_path: PathBuf,
+    backup_path: PathBuf,
+}
+
+fn prepare_album_tag_edit(
+    track: Track,
+    path: PathBuf,
+    changes: &UpdateAlbumTagsRequest,
+    mask: TagFieldMask,
+) -> Result<PreparedAlbumTagEdit, String> {
+    validate_album_target_preflight(&track, &path)?;
+    let original_fingerprint = file_content_fingerprint(&path)?;
+    let tagged_file = read_tagged_file(&path)?;
+    if !tag_editing_supported(&tagged_file) {
+        return Err("This FLAC tag container is not writable.".to_owned());
+    }
+    let request =
+        album_tag_request_for_track(&track.id, track_tag_values_from_file(&tagged_file), changes);
+    validate_update_track_tags_request(&request)?;
+
+    let original_metadata =
+        fs::metadata(&path).map_err(|error| format!("Could not read selected track: {error}"))?;
+    let temp_path = unique_sidecar_path(&path, "tmp")?;
+    let backup_path = unique_sidecar_path(&path, "backup")?;
+    if let Err(error) = fs::copy(&path, &temp_path) {
+        cleanup_file(&temp_path);
+        return Err(format!("Could not create safe editing copy: {error}"));
+    }
+    if let Err(error) = fs::set_permissions(&temp_path, original_metadata.permissions()) {
+        cleanup_file(&temp_path);
+        return Err(format!("Could not preserve file permissions: {error}"));
+    }
+    if let Err(error) = write_tags_to_temp_file(&temp_path, &request, mask)
+        .and_then(|()| {
+            sync_file(&temp_path).map_err(|error| format!("Could not flush edited tags: {error}"))
+        })
+        .and_then(|()| verify_tag_values(&temp_path, &request, mask))
+    {
+        cleanup_file(&temp_path);
+        return Err(error);
+    }
+
+    Ok(PreparedAlbumTagEdit {
+        track,
+        path,
+        request,
+        mask,
+        original_fingerprint,
+        temp_path,
+        backup_path,
+    })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AlbumBatchStage {
+    BeforeReplace(usize),
+    AfterReplace(usize),
+    BeforeRollback(usize),
+}
+
+fn emit_album_tag_progress(
+    app: &AppHandle,
+    phase: &str,
+    completed: usize,
+    total: usize,
+    file_name: Option<String>,
+) {
+    let _ = app.emit(
+        "album-tag-update-progress",
+        AlbumTagUpdateProgress {
+            phase: phase.to_owned(),
+            completed,
+            total,
+            file_name,
+        },
+    );
+}
+
+fn cleanup_prepared_album_tag_edits(prepared: &[PreparedAlbumTagEdit]) {
+    for item in prepared {
+        cleanup_file(&item.temp_path);
+    }
+}
+
+#[derive(Debug)]
+struct AlbumRollbackFailure {
+    message: String,
+    backup_path: Option<String>,
+    recovery_path: Option<String>,
+}
+
+fn existing_recovery_path(path: &Path) -> Option<String> {
+    path.try_exists()
+        .ok()
+        .filter(|exists| *exists)
+        .map(|_| path.to_string_lossy().into_owned())
+}
+
+fn album_rollback_failure(
+    message: String,
+    backup_path: &Path,
+    recovery_path: &Path,
+) -> AlbumRollbackFailure {
+    AlbumRollbackFailure {
+        message,
+        backup_path: existing_recovery_path(backup_path),
+        recovery_path: existing_recovery_path(recovery_path),
+    }
+}
+
+fn rollback_prepared_album_tag_edit<F>(
+    index: usize,
+    item: &PreparedAlbumTagEdit,
+    hook: &mut F,
+) -> Result<(), AlbumRollbackFailure>
+where
+    F: FnMut(AlbumBatchStage) -> Result<(), String>,
+{
+    let failed_path = unique_sidecar_path(&item.path, "failed").map_err(|error| {
+        album_rollback_failure(
+            format!(
+                "Could not choose a recovery-copy path before restoring {}: {error}",
+                item.track.file_name
+            ),
+            &item.backup_path,
+            &item.path,
+        )
+    })?;
+    fs::rename(&item.path, &failed_path).map_err(|error| {
+        album_rollback_failure(
+            format!(
+                "Could not preserve the edited file at {} before restoring {}: {error}",
+                failed_path.display(),
+                item.track.file_name,
+            ),
+            &item.backup_path,
+            &item.path,
+        )
+    })?;
+
+    if let Err(error) = hook(AlbumBatchStage::BeforeRollback(index)) {
+        let edited_restore = fs::rename(&failed_path, &item.path);
+        let recovery_path = if edited_restore.is_ok() {
+            &item.path
+        } else {
+            &failed_path
+        };
+        return Err(album_rollback_failure(
+            format!(
+                "Could not restore {}: {error}; edited-file preservation result: {}",
+                item.track.file_name,
+                edited_restore
+                    .err()
+                    .map(|error| error.to_string())
+                    .unwrap_or_else(|| "edited file returned to its original path".to_owned())
+            ),
+            &item.backup_path,
+            recovery_path,
+        ));
+    }
+
+    if let Err(error) = fs::rename(&item.backup_path, &item.path) {
+        let edited_restore = fs::rename(&failed_path, &item.path);
+        let recovery_path = if edited_restore.is_ok() {
+            &item.path
+        } else {
+            &failed_path
+        };
+        return Err(album_rollback_failure(
+            format!(
+                "Could not restore {} from {}: {error}; edited-file restore result: {}",
+                item.track.file_name,
+                item.backup_path.display(),
+                edited_restore
+                    .err()
+                    .map(|error| error.to_string())
+                    .unwrap_or_else(|| "edited file returned to its original path".to_owned())
+            ),
+            &item.backup_path,
+            recovery_path,
+        ));
+    }
+
+    let restored_fingerprint = file_content_fingerprint(&item.path).map_err(|error| {
+        album_rollback_failure(
+            format!(
+                "Could not verify restored bytes for {}: {error}",
+                item.track.file_name
+            ),
+            &item.path,
+            &failed_path,
+        )
+    })?;
+    if restored_fingerprint != item.original_fingerprint {
+        return Err(album_rollback_failure(
+            format!(
+                "Restored bytes for {} could not be verified; both candidate files were preserved.",
+                item.track.file_name,
+            ),
+            &item.path,
+            &failed_path,
+        ));
+    }
+
+    cleanup_file(&failed_path);
+    Ok(())
+}
+
+fn album_tag_failure_result<F>(
+    prepared: &[PreparedAlbumTagEdit],
+    applied_count: usize,
+    failed_index: usize,
+    failure: String,
+    current_needs_rollback: bool,
+    current_recovery_required: bool,
+    hook: &mut F,
+) -> AlbumTagUpdateResult
+where
+    F: FnMut(AlbumBatchStage) -> Result<(), String>,
+{
+    let mut recovery_required = current_recovery_required;
+    let mut track_results = Vec::with_capacity(prepared.len());
+    let rollback_end = if current_needs_rollback {
+        applied_count.saturating_add(1)
+    } else {
+        applied_count
+    };
+    let mut restored_indices = HashSet::new();
+    let mut rollback_failures = HashMap::new();
+
+    for index in (0..rollback_end).rev() {
+        match rollback_prepared_album_tag_edit(index, &prepared[index], hook) {
+            Ok(()) => {
+                restored_indices.insert(index);
+            }
+            Err(error) => {
+                recovery_required = true;
+                rollback_failures.insert(index, error);
+            }
+        }
+    }
+
+    for (index, item) in prepared.iter().enumerate() {
+        if index >= rollback_end {
+            cleanup_file(&item.temp_path);
+        }
+        let rollback_failure = rollback_failures.get(&index);
+        let status = if index == failed_index && current_recovery_required {
+            "recovery_required"
+        } else if restored_indices.contains(&index) {
+            "rolled_back"
+        } else if rollback_failure.is_some() {
+            "recovery_required"
+        } else if index == failed_index {
+            "failed"
+        } else {
+            "not_attempted"
+        };
+        let message = if index == failed_index {
+            if restored_indices.contains(&index) {
+                format!("{failure} Original file restored and verified.")
+            } else {
+                rollback_failure
+                    .map(|rollback| format!("{failure} {}", rollback.message))
+                    .unwrap_or_else(|| failure.clone())
+            }
+        } else if restored_indices.contains(&index) {
+            "Original file restored and verified.".to_owned()
+        } else {
+            rollback_failure
+                .map(|rollback| rollback.message.clone())
+                .unwrap_or_else(|| "Not written because the batch stopped.".to_owned())
+        };
+        let fallback_backup_path = (status == "recovery_required")
+            .then(|| existing_recovery_path(&item.backup_path))
+            .flatten();
+        let fallback_recovery_path = (status == "recovery_required")
+            .then(|| {
+                existing_recovery_path(&item.temp_path)
+                    .or_else(|| existing_recovery_path(&item.path))
+            })
+            .flatten();
+        track_results.push(AlbumTagTrackResult {
+            track_id: item.track.id.clone(),
+            file_name: item.track.file_name.clone(),
+            status: status.to_owned(),
+            message,
+            backup_path: rollback_failure
+                .and_then(|rollback| rollback.backup_path.clone())
+                .or(fallback_backup_path),
+            recovery_path: rollback_failure
+                .and_then(|rollback| rollback.recovery_path.clone())
+                .or(fallback_recovery_path),
+        });
+    }
+
+    AlbumTagUpdateResult {
+        outcome: if recovery_required {
+            "recovery_required".to_owned()
+        } else {
+            "rolled_back".to_owned()
+        },
+        summary: if recovery_required {
+            "The batch failed and at least one original could not be restored automatically. Recovery paths are listed below.".to_owned()
+        } else {
+            "The batch failed. Every file already touched was restored and verified; the library cache was not changed.".to_owned()
+        },
+        updated_tracks: Vec::new(),
+        track_results,
+    }
+}
+
+fn replace_prepared_album_tag_edits<F, P>(
+    prepared: &[PreparedAlbumTagEdit],
+    hook: &mut F,
+    progress: &mut P,
+) -> Result<(), AlbumTagUpdateResult>
+where
+    F: FnMut(AlbumBatchStage) -> Result<(), String>,
+    P: FnMut(usize, &str),
+{
+    for (index, item) in prepared.iter().enumerate() {
+        if let Err(error) = hook(AlbumBatchStage::BeforeReplace(index)) {
+            return Err(album_tag_failure_result(
+                prepared, index, index, error, false, false, hook,
+            ));
+        }
+        match file_content_fingerprint(&item.path) {
+            Ok(fingerprint) if fingerprint == item.original_fingerprint => {}
+            Ok(_) => {
+                return Err(album_tag_failure_result(
+                    prepared,
+                    index,
+                    index,
+                    format!(
+                        "{} changed outside Cassette before it could be written.",
+                        item.track.file_name
+                    ),
+                    false,
+                    false,
+                    hook,
+                ));
+            }
+            Err(error) => {
+                return Err(album_tag_failure_result(
+                    prepared,
+                    index,
+                    index,
+                    format!(
+                        "Could not revalidate {} immediately before writing: {error}",
+                        item.track.file_name
+                    ),
+                    false,
+                    false,
+                    hook,
+                ));
+            }
+        }
+        if let Err(error) = fs::rename(&item.path, &item.backup_path) {
+            return Err(album_tag_failure_result(
+                prepared,
+                index,
+                index,
+                format!("Could not create retained backup: {error}"),
+                false,
+                false,
+                hook,
+            ));
+        }
+        if let Err(error) = fs::rename(&item.temp_path, &item.path) {
+            let restore = fs::rename(&item.backup_path, &item.path);
+            let (failure, current_recovery_required) = match restore {
+                Ok(()) => (
+                    format!("Could not install edited file; original was restored: {error}"),
+                    false,
+                ),
+                Err(restore_error) => (
+                    format!(
+                        "Could not install edited file and the original could not be restored: {error}; restore error: {restore_error}; backup remains at {}",
+                        item.backup_path.display()
+                    ),
+                    true,
+                ),
+            };
+            return Err(album_tag_failure_result(
+                prepared,
+                index,
+                index,
+                failure,
+                false,
+                current_recovery_required,
+                hook,
+            ));
+        }
+
+        let verification = verify_tag_values(&item.path, &item.request, item.mask)
+            .and_then(|()| hook(AlbumBatchStage::AfterReplace(index)));
+        if let Err(error) = verification {
+            return Err(album_tag_failure_result(
+                prepared,
+                index,
+                index,
+                format!("Edited file verification failed: {error}"),
+                true,
+                false,
+                hook,
+            ));
+        }
+        progress(index + 1, &item.track.file_name);
+    }
+
+    Ok(())
+}
+
+fn update_album_tags_batch(
+    request: &UpdateAlbumTagsRequest,
+    app: &AppHandle,
+    library: &Mutex<LibraryDatabase>,
+    tag_writes: &Mutex<TagWriteState>,
+    cover_art_dir: Option<PathBuf>,
+) -> Result<AlbumTagUpdateResult, String> {
+    let mut progress = |phase: &str, completed: usize, total: usize, file_name: Option<String>| {
+        emit_album_tag_progress(app, phase, completed, total, file_name);
+    };
+    update_album_tags_batch_with_hook(
+        request,
+        library,
+        tag_writes,
+        cover_art_dir,
+        &mut |_| Ok(()),
+        &mut progress,
+    )
+}
+
+fn update_album_tags_batch_with_hook<F, P>(
+    request: &UpdateAlbumTagsRequest,
+    library: &Mutex<LibraryDatabase>,
+    tag_writes: &Mutex<TagWriteState>,
+    cover_art_dir: Option<PathBuf>,
+    hook: &mut F,
+    progress: &mut P,
+) -> Result<AlbumTagUpdateResult, String>
+where
+    F: FnMut(AlbumBatchStage) -> Result<(), String>,
+    P: FnMut(&str, usize, usize, Option<String>),
+{
+    validate_update_album_tags_request(request)?;
+    let mask = album_tag_field_mask(request);
+    let (tracks, root_path) = {
+        let library = library
+            .lock()
+            .map_err(|_| "Library cache is unavailable.".to_owned())?;
+        let tracks = cached_album_tracks(&library, &request.album_id)?;
+        let root_path = library
+            .meta_value("last_scanned_folder")?
+            .ok_or_else(|| "No active library folder is configured.".to_owned())?;
+        (tracks, PathBuf::from(root_path))
+    };
+    let editable_tracks = tracks
+        .into_iter()
+        .filter(|track| tag_editing_safely_validated_for_path(Path::new(&track.file_path)))
+        .collect::<Vec<_>>();
+    if editable_tracks.is_empty() {
+        return Err("This album has no editable FLAC tracks.".to_owned());
+    }
+
+    let total = editable_tracks.len();
+    progress("preflight", 0, total, None);
+    let mut canonical_paths = HashSet::new();
+    let mut prepared = Vec::with_capacity(total);
+    let mut guards = Vec::with_capacity(total);
+
+    for (index, track) in editable_tracks.into_iter().enumerate() {
+        let path = validated_cached_track_path(&track, &root_path)
+            .map_err(|error| format!("{}: {error}", track.file_name))?;
+        let canonical_key = path.to_string_lossy().into_owned();
+        if !canonical_paths.insert(canonical_key.clone()) {
+            cleanup_prepared_album_tag_edits(&prepared);
+            return Err(format!(
+                "{} appears more than once in this album.",
+                track.file_name
+            ));
+        }
+        match TagWriteGuard::new(tag_writes, canonical_key) {
+            Ok(guard) => guards.push(guard),
+            Err(error) => {
+                cleanup_prepared_album_tag_edits(&prepared);
+                return Err(format!("{}: {error}", track.file_name));
+            }
+        }
+        let file_name = track.file_name.clone();
+        match prepare_album_tag_edit(track, path, request, mask) {
+            Ok(item) => prepared.push(item),
+            Err(error) => {
+                cleanup_prepared_album_tag_edits(&prepared);
+                return Err(format!("{file_name}: {error} No files were changed."));
+            }
+        }
+        progress("preflight", index + 1, total, Some(file_name));
+    }
+
+    for item in &prepared {
+        if file_content_fingerprint(&item.path)? != item.original_fingerprint {
+            cleanup_prepared_album_tag_edits(&prepared);
+            return Err(format!(
+                "{} changed while the batch was being prepared. No files were changed.",
+                item.track.file_name
+            ));
+        }
+    }
+
+    progress("writing", 0, total, None);
+    if let Err(result) =
+        replace_prepared_album_tag_edits(&prepared, hook, &mut |completed, file_name| {
+            progress("writing", completed, total, Some(file_name.to_owned()));
+        })
+    {
+        progress("failed", 0, total, None);
+        return Ok(result);
+    }
+
+    let scanned_at = unix_timestamp();
+    let mut updated_tracks = Vec::with_capacity(total);
+    for item in &prepared {
+        match rescan_single_track_after_tag_write(
+            &item.path,
+            scanned_at,
+            cover_art_dir.clone(),
+            item.track.cover_art_path.clone(),
+        ) {
+            Ok(track) => updated_tracks.push(track),
+            Err(error) => {
+                let result = album_tag_failure_result(
+                    &prepared,
+                    prepared.len(),
+                    prepared.len().saturating_sub(1),
+                    format!("Could not refresh edited metadata: {error}"),
+                    false,
+                    false,
+                    hook,
+                );
+                progress("failed", 0, total, None);
+                return Ok(result);
+            }
+        }
+    }
+
+    let cache_update = library
+        .lock()
+        .map_err(|_| "Library cache is unavailable.".to_owned())?
+        .update_cached_tracks(&mut updated_tracks);
+    if let Err(error) = cache_update {
+        let result = album_tag_failure_result(
+            &prepared,
+            prepared.len(),
+            prepared.len().saturating_sub(1),
+            format!("Could not refresh the library cache: {error}"),
+            false,
+            false,
+            hook,
+        );
+        progress("failed", 0, total, None);
+        return Ok(result);
+    }
+
+    let track_results = prepared
+        .iter()
+        .map(|item| AlbumTagTrackResult {
+            track_id: item.track.id.clone(),
+            file_name: item.track.file_name.clone(),
+            status: "updated".to_owned(),
+            message: "Tags written and verified.".to_owned(),
+            backup_path: None,
+            recovery_path: None,
+        })
+        .collect();
+    for item in &prepared {
+        cleanup_file(&item.backup_path);
+    }
+    drop(guards);
+    progress("complete", total, total, None);
+
+    Ok(AlbumTagUpdateResult {
+        outcome: "success".to_owned(),
+        summary: format!(
+            "Updated and verified {total} FLAC track{}.",
+            if total == 1 { "" } else { "s" }
+        ),
+        updated_tracks,
+        track_results,
+    })
+}
+
 struct TagWriteGuard<'a> {
     state: &'a Mutex<TagWriteState>,
     path: String,
@@ -6807,6 +7851,18 @@ fn safe_update_track_tags_with_hook<F>(
 where
     F: FnMut(TagWriteStage) -> Result<(), String>,
 {
+    safe_update_track_tags_masked_with_hook(path, request, TagFieldMask::all(), hook)
+}
+
+fn safe_update_track_tags_masked_with_hook<F>(
+    path: &Path,
+    request: &UpdateTrackTagsRequest,
+    mask: TagFieldMask,
+    hook: &mut F,
+) -> Result<(), String>
+where
+    F: FnMut(TagWriteStage) -> Result<(), String>,
+{
     let original_metadata =
         fs::metadata(path).map_err(|error| format!("Could not read selected track: {error}"))?;
 
@@ -6827,7 +7883,7 @@ where
         return Err(format!("Could not preserve file permissions: {error}"));
     }
 
-    if let Err(error) = write_tags_to_temp_file(&temp_path, request) {
+    if let Err(error) = write_tags_to_temp_file(&temp_path, request, mask) {
         cleanup_file(&temp_path);
         return Err(error);
     }
@@ -6837,7 +7893,7 @@ where
         return Err(format!("Could not flush edited tags: {error}"));
     }
 
-    if let Err(error) = verify_tag_values(&temp_path, request) {
+    if let Err(error) = verify_tag_values(&temp_path, request, mask) {
         cleanup_file(&temp_path);
         return Err(error);
     }
@@ -6849,18 +7905,26 @@ where
         ));
     }
 
-    replace_original_with_verified_temp(path, &temp_path, &backup_path, request, hook)
+    replace_original_with_verified_temp(path, &temp_path, &backup_path, request, mask, hook)
 }
 
-fn write_tags_to_temp_file(path: &Path, request: &UpdateTrackTagsRequest) -> Result<(), String> {
+fn write_tags_to_temp_file(
+    path: &Path,
+    request: &UpdateTrackTagsRequest,
+    mask: TagFieldMask,
+) -> Result<(), String> {
     if !tag_editing_safely_validated_for_path(path) {
         return Err(UNVALIDATED_TAG_FORMAT_MESSAGE.to_owned());
     }
 
-    write_tags_to_flac(path, request)
+    write_tags_to_flac(path, request, mask)
 }
 
-fn write_tags_to_flac(path: &Path, request: &UpdateTrackTagsRequest) -> Result<(), String> {
+fn write_tags_to_flac(
+    path: &Path,
+    request: &UpdateTrackTagsRequest,
+    mask: TagFieldMask,
+) -> Result<(), String> {
     let mut input = fs::File::open(path)
         .map_err(|error| format!("Could not open FLAC for tag editing: {error}"))?;
     let mut flac = FlacFile::read_from(&mut input, ParseOptions::new())
@@ -6873,38 +7937,57 @@ fn write_tags_to_flac(path: &Path, request: &UpdateTrackTagsRequest) -> Result<(
     let tag = flac
         .vorbis_comments_mut()
         .ok_or_else(|| "Could not prepare writable FLAC tag container.".to_owned())?;
-    apply_vorbis_tag_update_request(tag, request);
+    apply_vorbis_tag_update_request(tag, request, mask);
     flac.save_to_path(path, WriteOptions::default())
         .map_err(|error| format!("Could not write FLAC tags: {error}"))
 }
 
-fn apply_vorbis_tag_update_request(tag: &mut VorbisComments, request: &UpdateTrackTagsRequest) {
-    set_or_remove_vorbis_text(tag, "TITLE", request.title.as_deref());
-    set_or_remove_vorbis_text(tag, "ARTIST", request.artist.as_deref());
-    set_or_remove_vorbis_text(tag, "ALBUM", request.album.as_deref());
-    set_or_remove_vorbis_text(tag, "ALBUMARTIST", request.album_artist.as_deref());
-    drop(tag.remove("ALBUMARTISTS"));
-    set_or_remove_vorbis_text(tag, "GENRE", request.genre.as_deref());
-
-    if let Some(year) = request.year {
-        tag.set_date(Timestamp {
-            year,
-            ..Timestamp::default()
-        });
-    } else {
-        tag.remove_date();
+fn apply_vorbis_tag_update_request(
+    tag: &mut VorbisComments,
+    request: &UpdateTrackTagsRequest,
+    mask: TagFieldMask,
+) {
+    if mask.title {
+        set_or_remove_vorbis_text(tag, "TITLE", request.title.as_deref());
+    }
+    if mask.artist {
+        set_or_remove_vorbis_text(tag, "ARTIST", request.artist.as_deref());
+    }
+    if mask.album {
+        set_or_remove_vorbis_text(tag, "ALBUM", request.album.as_deref());
+    }
+    if mask.album_artist {
+        set_or_remove_vorbis_text(tag, "ALBUMARTIST", request.album_artist.as_deref());
+        drop(tag.remove("ALBUMARTISTS"));
+    }
+    if mask.genre {
+        set_or_remove_vorbis_text(tag, "GENRE", request.genre.as_deref());
     }
 
-    if let Some(track_number) = request.track_number {
-        tag.set_track(track_number);
-    } else {
-        tag.remove_track();
+    if mask.year {
+        if let Some(year) = request.year {
+            let mut timestamp = tag.date().unwrap_or_default();
+            timestamp.year = year;
+            tag.set_date(timestamp);
+        } else {
+            tag.remove_date();
+        }
     }
 
-    if let Some(disc_number) = request.disc_number {
-        tag.set_disk(disc_number);
-    } else {
-        tag.remove_disk();
+    if mask.track_number {
+        if let Some(track_number) = request.track_number {
+            tag.set_track(track_number);
+        } else {
+            tag.remove_track();
+        }
+    }
+
+    if mask.disc_number {
+        if let Some(disc_number) = request.disc_number {
+            tag.set_disk(disc_number);
+        } else {
+            tag.remove_disk();
+        }
     }
 }
 
@@ -6923,7 +8006,11 @@ fn normalized_request_text(value: Option<&str>) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn verify_tag_values(path: &Path, request: &UpdateTrackTagsRequest) -> Result<(), String> {
+fn verify_tag_values(
+    path: &Path,
+    request: &UpdateTrackTagsRequest,
+    mask: TagFieldMask,
+) -> Result<(), String> {
     let tagged_file = read_tagged_file(path)?;
     let actual = track_tag_values_from_file(&tagged_file);
     let expected = TrackTagValues {
@@ -6937,13 +8024,39 @@ fn verify_tag_values(path: &Path, request: &UpdateTrackTagsRequest) -> Result<()
         disc_number: request.disc_number,
     };
 
-    if tag_values_match(&actual, &expected) {
+    if masked_tag_values_match(&actual, &expected, mask) {
         Ok(())
     } else {
         Err("Tag verification failed after writing.".to_owned())
     }
 }
 
+fn masked_tag_values_match(
+    actual: &TrackTagValues,
+    expected: &TrackTagValues,
+    mask: TagFieldMask,
+) -> bool {
+    (!mask.title
+        || normalize_optional_text(actual.title.as_deref())
+            == normalize_optional_text(expected.title.as_deref()))
+        && (!mask.artist
+            || normalize_optional_text(actual.artist.as_deref())
+                == normalize_optional_text(expected.artist.as_deref()))
+        && (!mask.album
+            || normalize_optional_text(actual.album.as_deref())
+                == normalize_optional_text(expected.album.as_deref()))
+        && (!mask.album_artist
+            || normalize_optional_text(actual.album_artist.as_deref())
+                == normalize_optional_text(expected.album_artist.as_deref()))
+        && (!mask.genre
+            || normalize_optional_genre(actual.genre.as_deref())
+                == normalize_optional_genre(expected.genre.as_deref()))
+        && (!mask.year || actual.year == expected.year)
+        && (!mask.track_number || actual.track_number == expected.track_number)
+        && (!mask.disc_number || actual.disc_number == expected.disc_number)
+}
+
+#[cfg(test)]
 fn tag_values_match(actual: &TrackTagValues, expected: &TrackTagValues) -> bool {
     normalize_optional_text(actual.title.as_deref())
         == normalize_optional_text(expected.title.as_deref())
@@ -6990,6 +8103,7 @@ fn replace_original_with_verified_temp<F>(
     temp_path: &Path,
     backup_path: &Path,
     request: &UpdateTrackTagsRequest,
+    mask: TagFieldMask,
     hook: &mut F,
 ) -> Result<(), String>
 where
@@ -7036,7 +8150,7 @@ where
     }
 
     let final_verification = hook(TagWriteStage::DuringFinalVerification)
-        .and_then(|()| verify_tag_values(original_path, request));
+        .and_then(|()| verify_tag_values(original_path, request, mask));
     if let Err(error) = final_verification {
         return match restore_backup_after_failed_replacement(original_path, backup_path, hook) {
             Ok(()) => Err(format!("Final tag verification failed; original was restored: {error}")),
@@ -9083,6 +10197,512 @@ mod tag_editor_tests {
         assert_decodable(&test_file.path);
         assert_no_sidecars(&test_file);
     }
+
+    const SYNTHETIC_FLAC_BASE64: &str = "ZkxhQwAAACICQAJAAACTAACTAfQA8AAAAZCbGfA0kXS+fHG2JaA4ABUGhAAALg0AAABMYXZmNjIuMTIuMTAyAQAAABUAAABlbmNvZGVyPUxhdmY2Mi4xMi4xMDL/+HQIAAGPJEIAAAVr5rw0wAQAEMDh7cLIGEyZSywkJIZO9MkkkhQupZhhMmbeSYEkOaRJSSEhJQmJZzDCYS3TkhJIZ/oUJIQwmUs5kJCSeR0mQwOHtwsgYTJlLLCQkhk70ySSSFC6lmGEyZt5JgSQ5pElJISElCYlnMMJhLdOSEkhn+hQkhDCZSzmQkJJ5HSAo/4=";
+
+    struct SyntheticAlbumFixture {
+        directory: PathBuf,
+        library: Mutex<LibraryDatabase>,
+        writes: Mutex<TagWriteState>,
+        album_id: String,
+        flac_paths: Vec<PathBuf>,
+        excluded_path: PathBuf,
+    }
+
+    impl SyntheticAlbumFixture {
+        fn new() -> Self {
+            use base64::Engine;
+
+            let directory = std::env::temp_dir().join(format!(
+                "Cassette Synthetic Album Batch Test-{}-{}",
+                std::process::id(),
+                unique_timestamp_nanos(),
+            ));
+            fs::create_dir(&directory).expect("create synthetic album directory");
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(SYNTHETIC_FLAC_BASE64)
+                .expect("decode embedded synthetic FLAC");
+            let mut flac_paths = Vec::new();
+
+            for index in 1..=2 {
+                let path = directory.join(format!("track-{index:02}.flac"));
+                fs::write(&path, &bytes).expect("write synthetic FLAC");
+                let request = UpdateTrackTagsRequest {
+                    track_id: path.to_string_lossy().into_owned(),
+                    title: Some(format!("Synthetic Track {index}")),
+                    artist: Some(format!("Artist {index}")),
+                    album: Some("Mixed Source Album".to_owned()),
+                    album_artist: Some("Synthetic Ensemble".to_owned()),
+                    genre: Some(if index == 1 { "Ambient" } else { "Electronic" }.to_owned()),
+                    year: Some(if index == 1 { 2024 } else { 2025 }),
+                    track_number: Some(index),
+                    disc_number: Some(1),
+                };
+                update_track_tags_file(&path, &request).expect("seed synthetic FLAC tags");
+                flac_paths.push(path);
+            }
+            add_preservation_metadata(&flac_paths[0]);
+
+            let excluded_path = directory.join("read-only-format.wav");
+            fs::write(&excluded_path, &bytes).expect("write synthetic excluded-format fixture");
+            let excluded_request = UpdateTrackTagsRequest {
+                track_id: excluded_path.to_string_lossy().into_owned(),
+                title: Some("Excluded Track".to_owned()),
+                artist: Some("Artist 3".to_owned()),
+                album: Some("Mixed Source Album".to_owned()),
+                album_artist: Some("Synthetic Ensemble".to_owned()),
+                genre: Some("Ambient".to_owned()),
+                year: Some(2024),
+                track_number: Some(3),
+                disc_number: Some(1),
+            };
+            write_tags_to_flac(&excluded_path, &excluded_request, TagFieldMask::all())
+                .expect("seed excluded-format tags without using the production gate");
+
+            let database_path = directory.join("library.sqlite3");
+            let mut library = LibraryDatabase::open(database_path).expect("open synthetic library");
+            let scanned_at = unix_timestamp();
+            let mut tracks = scan_audio_directory_root(&directory, scanned_at, None)
+                .expect("scan synthetic album");
+            assert_eq!(tracks.len(), 3);
+            if let Some(excluded) = tracks.iter_mut().find(|track| track.extension == "wav") {
+                excluded.title = "Excluded Track".to_owned();
+                excluded.artist = Some("Artist 3".to_owned());
+                excluded.album = Some("Mixed Source Album".to_owned());
+                excluded.album_artist = Some("Synthetic Ensemble".to_owned());
+                excluded.genres = vec!["Ambient".to_owned()];
+                excluded.year = Some(2024);
+                excluded.track_number = Some(3);
+                excluded.disc_number = Some(1);
+            }
+            library
+                .replace_library(&directory, &mut tracks, scanned_at)
+                .expect("seed synthetic library cache");
+            let album_id = tracks
+                .iter()
+                .find(|track| track.extension == "flac")
+                .map(album_key_for_track)
+                .expect("synthetic FLAC album key");
+
+            Self {
+                directory,
+                library: Mutex::new(library),
+                writes: Mutex::new(TagWriteState::default()),
+                album_id,
+                flac_paths,
+                excluded_path,
+            }
+        }
+
+        fn request(&self) -> UpdateAlbumTagsRequest {
+            UpdateAlbumTagsRequest {
+                album_id: self.album_id.clone(),
+                album: TagFieldUpdate::Set("Retagged Album".to_owned()),
+                album_artist: TagFieldUpdate::Set("Retagged Ensemble".to_owned()),
+                artist: TagFieldUpdate::Unchanged,
+                genre: TagFieldUpdate::Set("Post-Rock; Test".to_owned()),
+                year: TagFieldUpdate::Set(2030),
+            }
+        }
+
+        fn sidecars(&self) -> Vec<PathBuf> {
+            fs::read_dir(&self.directory)
+                .expect("read synthetic fixture directory")
+                .filter_map(Result::ok)
+                .map(|entry| entry.path())
+                .filter(|path| {
+                    path.file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.contains(".cassette-"))
+                })
+                .collect()
+        }
+    }
+
+    impl Drop for SyntheticAlbumFixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.directory);
+        }
+    }
+
+    fn synthetic_audio_frames(path: &Path) -> Vec<u8> {
+        let bytes = fs::read(path).expect("read synthetic FLAC bytes");
+        assert_eq!(&bytes[..4], b"fLaC");
+        let mut offset = 4;
+        loop {
+            let header = bytes[offset];
+            let is_last = header & 0x80 != 0;
+            let length = ((bytes[offset + 1] as usize) << 16)
+                | ((bytes[offset + 2] as usize) << 8)
+                | bytes[offset + 3] as usize;
+            offset += 4 + length;
+            if is_last {
+                break;
+            }
+        }
+        bytes[offset..].to_vec()
+    }
+
+    fn run_synthetic_album_update<F>(
+        fixture: &SyntheticAlbumFixture,
+        request: &UpdateAlbumTagsRequest,
+        hook: &mut F,
+    ) -> Result<AlbumTagUpdateResult, String>
+    where
+        F: FnMut(AlbumBatchStage) -> Result<(), String>,
+    {
+        update_album_tags_batch_with_hook(
+            request,
+            &fixture.library,
+            &fixture.writes,
+            None,
+            hook,
+            &mut |_, _, _, _| {},
+        )
+    }
+
+    #[test]
+    fn synthetic_album_batch_reports_mixed_values_and_excludes_non_flac() {
+        let fixture = SyntheticAlbumFixture::new();
+        let library = fixture.library.lock().expect("lock synthetic library");
+        let tracks = cached_album_tracks(&library, &fixture.album_id).expect("resolve album");
+        drop(library);
+        let values = tracks
+            .iter()
+            .filter(|track| tag_editing_safely_validated_for_path(Path::new(&track.file_path)))
+            .map(|track| {
+                track_tag_values_from_file(
+                    &read_tagged_file(Path::new(&track.file_path)).expect("read synthetic tags"),
+                )
+            })
+            .collect::<Vec<_>>();
+        let shared = shared_album_tag_values(&values);
+
+        assert!(!shared.album.mixed);
+        assert_eq!(shared.album.value.as_deref(), Some("Mixed Source Album"));
+        assert!(shared.artist.mixed);
+        assert!(shared.genre.mixed);
+        assert!(shared.year.mixed);
+        assert!(!tag_editing_safely_validated_for_path(
+            &fixture.excluded_path
+        ));
+    }
+
+    #[test]
+    fn synthetic_album_batch_preserves_audio_unrelated_tags_identity_and_history() {
+        let fixture = SyntheticAlbumFixture::new();
+        let original_frames = fixture
+            .flac_paths
+            .iter()
+            .map(|path| synthetic_audio_frames(path))
+            .collect::<Vec<_>>();
+        let original_unrelated = unrelated_metadata(&fixture.flac_paths[0]);
+        let original_excluded =
+            fs::read(&fixture.excluded_path).expect("read excluded fixture baseline");
+        let (first_id, playlist_id) = {
+            let mut library = fixture.library.lock().expect("lock synthetic library");
+            let tracks = cached_album_tracks(&library, &fixture.album_id).expect("resolve album");
+            let first_id = tracks[0].id.clone();
+            assert!(library.toggle_favorite(&first_id).expect("favorite track"));
+            library
+                .record_play(&first_id, "synthetic-album-play-1")
+                .expect("record first play");
+            library
+                .record_play(&first_id, "synthetic-album-play-2")
+                .expect("record second play");
+            let playlist = library
+                .create_playlist("Synthetic Album Preservation")
+                .expect("create preservation playlist");
+            library
+                .add_track_to_playlist(&playlist.id, &first_id)
+                .expect("add preservation playlist track");
+            (first_id, playlist.id)
+        };
+
+        let result = run_synthetic_album_update(&fixture, &fixture.request(), &mut |_| Ok(()))
+            .expect("run synthetic album update");
+        assert_eq!(result.outcome, "success");
+        assert_eq!(result.updated_tracks.len(), 2);
+        assert!(result
+            .track_results
+            .iter()
+            .all(|result| result.status == "updated"));
+
+        for (index, path) in fixture.flac_paths.iter().enumerate() {
+            let values = values_for(path);
+            assert_eq!(values.title, Some(format!("Synthetic Track {}", index + 1)));
+            assert_eq!(values.artist, Some(format!("Artist {}", index + 1)));
+            assert_eq!(values.album.as_deref(), Some("Retagged Album"));
+            assert_eq!(values.album_artist.as_deref(), Some("Retagged Ensemble"));
+            assert_eq!(values.genre.as_deref(), Some("Post-Rock; Test"));
+            assert_eq!(values.year, Some(2030));
+            assert_eq!(values.track_number, Some((index + 1) as u32));
+            assert_eq!(values.disc_number, Some(1));
+            assert_eq!(synthetic_audio_frames(path), original_frames[index]);
+        }
+        assert_eq!(
+            unrelated_metadata(&fixture.flac_paths[0]),
+            original_unrelated
+        );
+        assert_eq!(
+            fs::read(&fixture.excluded_path).expect("read excluded fixture"),
+            original_excluded
+        );
+
+        let library = fixture
+            .library
+            .lock()
+            .expect("lock updated synthetic library");
+        let cache = library.load_cache().expect("load updated synthetic cache");
+        assert_eq!(cache.tracks.len(), 3);
+        let preserved = cache
+            .tracks
+            .iter()
+            .find(|track| track.id == first_id)
+            .expect("preserved track identity");
+        assert!(preserved.is_favorite);
+        assert_eq!(preserved.play_count, 2);
+        let detailed_play_events: i64 = library
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM track_play_events WHERE track_id = ?1",
+                [&first_id],
+                |row| row.get(0),
+            )
+            .expect("count preserved detailed play events");
+        assert_eq!(detailed_play_events, 2);
+        assert_eq!(
+            library
+                .playlist_by_id(&playlist_id)
+                .expect("preserved playlist")
+                .track_ids,
+            vec![first_id]
+        );
+        let moved_album_id = album_key_for_track(
+            result
+                .updated_tracks
+                .first()
+                .expect("updated album has a representative track"),
+        );
+        let moved_tracks = cached_album_tracks(&library, &moved_album_id)
+            .expect("edited FLACs moved to their new album group");
+        assert_eq!(moved_tracks.len(), 2);
+        assert!(moved_tracks.iter().all(|track| track.extension == "flac"));
+        let old_group = cached_album_tracks(&library, &fixture.album_id)
+            .expect("excluded format stays in its original album group");
+        assert_eq!(old_group.len(), 1);
+        assert_eq!(
+            old_group[0].file_path,
+            fixture.excluded_path.to_string_lossy().into_owned()
+        );
+        assert!(fixture.sidecars().is_empty());
+    }
+
+    #[test]
+    fn synthetic_album_batch_explicit_clear_only_removes_selected_field() {
+        let fixture = SyntheticAlbumFixture::new();
+        let mut request = fixture.request();
+        request.album = TagFieldUpdate::Unchanged;
+        request.album_artist = TagFieldUpdate::Unchanged;
+        request.genre = TagFieldUpdate::Clear;
+        request.year = TagFieldUpdate::Unchanged;
+
+        let result = run_synthetic_album_update(&fixture, &request, &mut |_| Ok(()))
+            .expect("clear shared genre");
+        assert_eq!(result.outcome, "success");
+        for (index, path) in fixture.flac_paths.iter().enumerate() {
+            let values = values_for(path);
+            assert_eq!(values.genre, None);
+            assert_eq!(values.album.as_deref(), Some("Mixed Source Album"));
+            assert_eq!(values.artist, Some(format!("Artist {}", index + 1)));
+            assert_eq!(values.track_number, Some((index + 1) as u32));
+        }
+    }
+
+    #[test]
+    fn synthetic_album_batch_rejects_an_unchanged_request_without_writing() {
+        let fixture = SyntheticAlbumFixture::new();
+        let originals = fixture
+            .flac_paths
+            .iter()
+            .map(|path| fs::read(path).expect("read unchanged-request baseline"))
+            .collect::<Vec<_>>();
+        let request = UpdateAlbumTagsRequest {
+            album_id: fixture.album_id.clone(),
+            album: TagFieldUpdate::Unchanged,
+            album_artist: TagFieldUpdate::Unchanged,
+            artist: TagFieldUpdate::Unchanged,
+            genre: TagFieldUpdate::Unchanged,
+            year: TagFieldUpdate::Unchanged,
+        };
+
+        let error = run_synthetic_album_update(&fixture, &request, &mut |_| Ok(()))
+            .expect_err("unchanged request must not enter the write path");
+        assert!(error.contains("Choose at least one"));
+        for (path, original) in fixture.flac_paths.iter().zip(originals) {
+            assert_eq!(fs::read(path).expect("read unchanged fixture"), original);
+        }
+        assert!(fixture.sidecars().is_empty());
+    }
+
+    #[test]
+    fn synthetic_album_batch_preflights_every_target_before_writing() {
+        let fixture = SyntheticAlbumFixture::new();
+        let originals = fixture
+            .flac_paths
+            .iter()
+            .map(|path| fs::read(path).expect("read preflight baseline"))
+            .collect::<Vec<_>>();
+        let mut permissions = fs::metadata(&fixture.flac_paths[1])
+            .expect("read fixture permissions")
+            .permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&fixture.flac_paths[1], permissions)
+            .expect("make second fixture read-only");
+
+        let error = run_synthetic_album_update(&fixture, &fixture.request(), &mut |_| Ok(()))
+            .expect_err("read-only target must fail the whole preflight");
+        assert!(error.contains("read-only"));
+        for (path, original) in fixture.flac_paths.iter().zip(originals) {
+            assert_eq!(fs::read(path).expect("read unchanged fixture"), original);
+        }
+        assert!(fixture.sidecars().is_empty());
+
+        let mut permissions = fs::metadata(&fixture.flac_paths[1])
+            .expect("read read-only fixture permissions")
+            .permissions();
+        permissions.set_readonly(false);
+        fs::set_permissions(&fixture.flac_paths[1], permissions)
+            .expect("restore fixture permissions");
+    }
+
+    #[test]
+    fn synthetic_album_batch_rechecks_external_changes_before_each_replacement() {
+        let fixture = SyntheticAlbumFixture::new();
+        let first_original = fs::read(&fixture.flac_paths[0]).expect("read first baseline");
+        let mut second_external = fs::read(&fixture.flac_paths[1]).expect("read second baseline");
+        second_external.push(0);
+        let second_path = fixture.flac_paths[1].clone();
+        let external_bytes = second_external.clone();
+        let mut hook = move |stage| {
+            if stage == AlbumBatchStage::BeforeReplace(1) {
+                fs::write(&second_path, &external_bytes)
+                    .map_err(|error| format!("could not simulate external edit: {error}"))?;
+            }
+            Ok(())
+        };
+
+        let result = run_synthetic_album_update(&fixture, &fixture.request(), &mut hook)
+            .expect("external-change failure returns structured result");
+        assert_eq!(result.outcome, "rolled_back");
+        assert_eq!(
+            fs::read(&fixture.flac_paths[0]).expect("read restored first fixture"),
+            first_original
+        );
+        assert_eq!(
+            fs::read(&fixture.flac_paths[1]).expect("read externally changed fixture"),
+            second_external
+        );
+        let library = fixture.library.lock().expect("lock unchanged library");
+        assert!(cached_album_tracks(&library, &fixture.album_id).is_ok());
+        assert!(fixture.sidecars().is_empty());
+    }
+
+    #[test]
+    fn synthetic_album_batch_controlled_failure_rolls_back_every_written_file() {
+        let fixture = SyntheticAlbumFixture::new();
+        let originals = fixture
+            .flac_paths
+            .iter()
+            .map(|path| fs::read(path).expect("read rollback baseline"))
+            .collect::<Vec<_>>();
+        let mut hook = |stage| {
+            if stage == AlbumBatchStage::AfterReplace(1) {
+                Err("simulated second-file verification failure".to_owned())
+            } else {
+                Ok(())
+            }
+        };
+
+        let result = run_synthetic_album_update(&fixture, &fixture.request(), &mut hook)
+            .expect("controlled failure returns structured result");
+        assert_eq!(result.outcome, "rolled_back");
+        assert!(result.updated_tracks.is_empty());
+        assert!(result
+            .track_results
+            .iter()
+            .filter(|result| result.track_id.ends_with(".flac"))
+            .all(|result| result.status == "rolled_back"));
+        for (path, original) in fixture.flac_paths.iter().zip(originals) {
+            assert_eq!(fs::read(path).expect("read rolled-back fixture"), original);
+        }
+        let library = fixture.library.lock().expect("lock rolled-back library");
+        assert!(cached_album_tracks(&library, &fixture.album_id).is_ok());
+        assert!(fixture.sidecars().is_empty());
+    }
+
+    #[test]
+    fn synthetic_album_batch_reports_and_retains_backup_when_rollback_fails() {
+        let fixture = SyntheticAlbumFixture::new();
+        let originals = fixture
+            .flac_paths
+            .iter()
+            .map(|path| fs::read(path).expect("read recovery baseline"))
+            .collect::<Vec<_>>();
+        let mut hook = |stage| match stage {
+            AlbumBatchStage::AfterReplace(1) => {
+                Err("simulated second-file verification failure".to_owned())
+            }
+            AlbumBatchStage::BeforeRollback(1) => {
+                Err("simulated automatic rollback failure".to_owned())
+            }
+            _ => Ok(()),
+        };
+
+        let result = run_synthetic_album_update(&fixture, &fixture.request(), &mut hook)
+            .expect("rollback failure returns a structured recovery result");
+        assert_eq!(result.outcome, "recovery_required");
+        let recovery = result
+            .track_results
+            .iter()
+            .find(|result| result.status == "recovery_required")
+            .expect("failed rollback is identified precisely");
+        let backup_path = PathBuf::from(
+            recovery
+                .backup_path
+                .as_deref()
+                .expect("retained original backup path is reported"),
+        );
+        let recovery_path = PathBuf::from(
+            recovery
+                .recovery_path
+                .as_deref()
+                .expect("edited recovery-copy path is reported"),
+        );
+        assert!(backup_path.is_file());
+        assert!(recovery_path.is_file());
+        assert_eq!(
+            fs::read(&backup_path).expect("read retained original backup"),
+            originals[1]
+        );
+        assert_ne!(
+            fs::read(&recovery_path).expect("read retained edited recovery copy"),
+            originals[1]
+        );
+        assert_eq!(
+            fs::read(&fixture.flac_paths[0]).expect("read automatically restored first track"),
+            originals[0]
+        );
+
+        fs::remove_file(&recovery_path).expect("remove disposable edited recovery file");
+        fs::rename(&backup_path, &fixture.flac_paths[1])
+            .expect("recover original from retained backup");
+        assert_eq!(
+            fs::read(&fixture.flac_paths[1]).expect("read manually recovered fixture"),
+            originals[1]
+        );
+        assert!(fixture.sidecars().is_empty());
+    }
 }
 
 #[cfg(test)]
@@ -9220,7 +10840,9 @@ pub fn run() {
             import_dvd_title,
             scan_library,
             get_track_tag_editor_data,
+            get_album_tag_editor_data,
             update_track_tags,
+            update_album_tags,
             toggle_track_favorite,
             record_track_play,
             set_album_genres,

@@ -54,6 +54,70 @@ export type UpdateTrackTagsRequest = TrackTagValues & {
   trackId: string;
 };
 
+export type TagFieldUpdate<T> =
+  | { mode: "unchanged" }
+  | { mode: "set"; value: T }
+  | { mode: "clear" };
+
+export type SharedTagValue<T> = {
+  mixed: boolean;
+  value: T | null;
+};
+
+export type AlbumTagEditorTrack = {
+  track: Track;
+  editable: boolean;
+  exclusionReason: string | null;
+};
+
+export type AlbumTagEditorData = {
+  albumId: string;
+  tracks: AlbumTagEditorTrack[];
+  editableTrackCount: number;
+  excludedTrackCount: number;
+  sharedValues: {
+    album: SharedTagValue<string>;
+    albumArtist: SharedTagValue<string>;
+    artist: SharedTagValue<string>;
+    genre: SharedTagValue<string>;
+    year: SharedTagValue<number>;
+  };
+  genreOverrideActive: boolean;
+  preflightErrors: string[];
+};
+
+export type UpdateAlbumTagsRequest = {
+  albumId: string;
+  album: TagFieldUpdate<string>;
+  albumArtist: TagFieldUpdate<string>;
+  artist: TagFieldUpdate<string>;
+  genre: TagFieldUpdate<string>;
+  year: TagFieldUpdate<number>;
+};
+
+export type AlbumTagUpdateProgress = {
+  phase: "preflight" | "writing" | "complete" | "failed";
+  completed: number;
+  total: number;
+  fileName: string | null;
+};
+
+export type AlbumTagTrackResult = {
+  trackId: string;
+  fileName: string;
+  status: "updated" | "rolled_back" | "recovery_required" | "failed" | "not_attempted";
+  message: string;
+  backupPath: string | null;
+  recoveryPath: string | null;
+};
+
+export type AlbumTagUpdateResult = {
+  outcome: "success" | "rolled_back" | "recovery_required";
+  summary: string;
+  updatedTracks: Track[];
+  trackResults: AlbumTagTrackResult[];
+};
+
 export type Album = {
   id: string;
   title: string;

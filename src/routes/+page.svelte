@@ -13,6 +13,7 @@
     detectAudioCd,
     detectDvd,
     getLibraryCache,
+    getAlbumTagEditorData,
     getPlatformCapabilities,
     getTrackTagEditorData,
     getVideoLibrary,
@@ -37,6 +38,7 @@
     setTrackLyricsOffset,
     toggleTrackFavorite,
     updateTrackTags,
+    updateAlbumTags,
     updateVideoInfo,
     updateVideoProgress,
   } from "$lib/api/library";
@@ -89,6 +91,9 @@
   import { ENABLE_EXPERIMENTAL_VIDEOS } from "$lib/featureFlags";
   import type {
     Album,
+    AlbumTagEditorData,
+    AlbumTagUpdateProgress,
+    AlbumTagUpdateResult,
     Artist,
     CdCoverLookupResult,
     CdDetectResult,
@@ -114,6 +119,7 @@
     TrackTagValues,
     TrackLyrics,
     UpdateTrackTagsRequest,
+    UpdateAlbumTagsRequest,
     VideoEntry,
     VideoCodecInfo,
     VideoInfoUpdate,
@@ -269,6 +275,26 @@
     trackNumber: string;
     discNumber: string;
   };
+  type AlbumTagFieldMode = "unchanged" | "set" | "clear";
+  type AlbumTagFieldDraft = {
+    mode: AlbumTagFieldMode;
+    value: string;
+  };
+  type AlbumTagEditorDraft = {
+    album: AlbumTagFieldDraft;
+    albumArtist: AlbumTagFieldDraft;
+    artist: AlbumTagFieldDraft;
+    genre: AlbumTagFieldDraft;
+    year: AlbumTagFieldDraft;
+  };
+  type AlbumTagEditorStage = "edit" | "confirm" | "result";
+  type AlbumTagMoveNotice = {
+    editedAlbumId: string;
+    editedTrackCount: number;
+    excludedTrackCount: number;
+    originalAlbumId: string;
+    originalAlbumTitle: string;
+  };
 
   const mixFormatOptions = ["All", "FLAC", "MP3", "OGG", "OPUS", "WAV", "M4A"];
   const AUTO_LYRICS_COOLDOWN_MS = 7 * 24 * 60 * 60 * 1000;
@@ -278,6 +304,21 @@
   const ARTIST_PLAY_COUNTS_SETTING_KEY = "cassette:show-artist-play-counts";
   const GENRE_PLAY_COUNTS_SETTING_KEY = "cassette:show-genre-play-counts";
   const ALBUM_TRACK_PLAY_COUNTS_SETTING_KEY = "cassette:show-album-track-play-counts";
+  const ALBUM_TAG_FIELDS: Array<{ key: keyof AlbumTagEditorDraft; label: string; help?: string; inputMode?: "numeric" }> = [
+    { key: "album", label: "Album title" },
+    {
+      key: "albumArtist",
+      label: "Album artist",
+      help: "Use one shared album artist to group compilation or multi-artist albums. Individual track artists remain separate unless changed below.",
+    },
+    {
+      key: "artist",
+      label: "Artist",
+      help: "Each track can keep its own artist. Setting this field replaces Artist on every editable FLAC; leave it unchanged to preserve multiple performers.",
+    },
+    { key: "genre", label: "Genre" },
+    { key: "year", label: "Year", inputMode: "numeric" },
+  ];
   const STATS_PREVIEW_LIMITS: Record<StatsSectionId, number> = {
     tracks: 10,
     artists: 8,
@@ -561,10 +602,21 @@
   let tagEditorPendingTrack = $state<Track | null>(null);
   let tagEditorError = $state<string | null>(null);
   let tagEditorMessage = $state<string | null>(null);
+  let albumTagEditorData = $state<AlbumTagEditorData | null>(null);
+  let albumTagEditorDraft = $state<AlbumTagEditorDraft>(emptyAlbumTagEditorDraft());
+  let albumTagEditorStage = $state<AlbumTagEditorStage>("edit");
+  let albumTagEditorError = $state<string | null>(null);
+  let albumTagUpdateResult = $state<AlbumTagUpdateResult | null>(null);
+  let albumTagUpdateProgress = $state<AlbumTagUpdateProgress | null>(null);
+  let albumTagMoveNotice = $state<AlbumTagMoveNotice | null>(null);
+  let isAlbumTagEditorOpen = $state(false);
+  let isLoadingAlbumTagEditor = $state(false);
+  let isSavingAlbumTagEditor = $state(false);
   let shortcutModalElement: HTMLElement | undefined = $state();
   let deletePlaylistModalElement: HTMLElement | undefined = $state();
   let tagEditorModalElement: HTMLElement | undefined = $state();
   let tagEditorDiscardModalElement: HTMLElement | undefined = $state();
+  let albumTagEditorModalElement: HTMLElement | undefined = $state();
   let lyricsPanelElement: HTMLElement | undefined = $state();
   let displayAlbums = $derived(!hasLoadedCache ? mockAlbums : buildAlbums(tracks));
   let displayArtists = $derived(!hasLoadedCache ? mockArtists : buildArtists(tracks));
@@ -787,6 +839,16 @@
     });
   });
 
+  $effect(() => {
+    if (!isAlbumTagEditorOpen) {
+      return;
+    }
+
+    window.requestAnimationFrame(() => {
+      albumTagEditorModalElement?.focus();
+    });
+  });
+
   function isThemeId(value: string | null): value is ThemeId {
     return SELECTABLE_THEME_IDS.some((themeId) => themeId === value);
   }
@@ -908,6 +970,11 @@
       listen<DvdImportEvent>("dvd-import-progress", (event) => handleDvdImportEvent(event.payload, "Importing...")),
       listen<DvdImportEvent>("dvd-import-finished", (event) => handleDvdImportEvent(event.payload, "Import complete")),
       listen<DvdImportEvent>("dvd-import-error", (event) => handleDvdImportEvent(event.payload, "Error")),
+      listen<AlbumTagUpdateProgress>("album-tag-update-progress", (event) => {
+        if (isSavingAlbumTagEditor) {
+          albumTagUpdateProgress = event.payload;
+        }
+      }),
     ];
 
     const statusIntervalId = window.setInterval(async () => {
@@ -960,6 +1027,16 @@
       : null;
 
     function handleKeydown(event: KeyboardEvent) {
+      if (isAlbumTagEditorOpen) {
+        if (event.key === "Escape" && !isSavingAlbumTagEditor) {
+          event.preventDefault();
+          event.stopPropagation();
+          closeAlbumTagEditor();
+        }
+
+        return;
+      }
+
       if (tagEditorTrack) {
         if (event.key === "Escape") {
           event.preventDefault();
@@ -3343,6 +3420,300 @@
 
   function tagEditorCoverSource(track: Track | null) {
     return track?.coverArtPath ? localImageSource(track.coverArtPath) : null;
+  }
+
+  function emptyAlbumTagFieldDraft(): AlbumTagFieldDraft {
+    return { mode: "unchanged", value: "" };
+  }
+
+  function emptyAlbumTagEditorDraft(): AlbumTagEditorDraft {
+    return {
+      album: emptyAlbumTagFieldDraft(),
+      albumArtist: emptyAlbumTagFieldDraft(),
+      artist: emptyAlbumTagFieldDraft(),
+      genre: emptyAlbumTagFieldDraft(),
+      year: emptyAlbumTagFieldDraft(),
+    };
+  }
+
+  function albumTagSharedValue(key: keyof AlbumTagEditorDraft) {
+    const shared = albumTagEditorData?.sharedValues[key];
+
+    if (!shared || shared.mixed) {
+      return "";
+    }
+
+    return shared.value?.toString() ?? "";
+  }
+
+  function albumTagSharedLabel(key: keyof AlbumTagEditorDraft) {
+    const shared = albumTagEditorData?.sharedValues[key];
+
+    if (!shared) {
+      return "Unavailable";
+    }
+    if (shared.mixed) {
+      return "Mixed";
+    }
+
+    return shared.value?.toString() || "Blank";
+  }
+
+  async function openAlbumTagEditor() {
+    const album = selectedAlbum;
+    if (!album || isAlbumTagEditorOpen) {
+      return;
+    }
+
+    isAlbumTagEditorOpen = true;
+    isLoadingAlbumTagEditor = true;
+    albumTagEditorData = null;
+    albumTagEditorDraft = emptyAlbumTagEditorDraft();
+    albumTagEditorStage = "edit";
+    albumTagEditorError = null;
+    albumTagUpdateResult = null;
+    albumTagUpdateProgress = null;
+
+    try {
+      albumTagEditorData = await getAlbumTagEditorData(album.id);
+    } catch (error) {
+      albumTagEditorError = error instanceof Error ? error.message : String(error);
+    } finally {
+      isLoadingAlbumTagEditor = false;
+    }
+  }
+
+  function closeAlbumTagEditor() {
+    if (isSavingAlbumTagEditor) {
+      return;
+    }
+
+    isAlbumTagEditorOpen = false;
+    isLoadingAlbumTagEditor = false;
+    albumTagEditorData = null;
+    albumTagEditorDraft = emptyAlbumTagEditorDraft();
+    albumTagEditorStage = "edit";
+    albumTagEditorError = null;
+    albumTagUpdateResult = null;
+    albumTagUpdateProgress = null;
+  }
+
+  function setAlbumTagFieldMode(key: keyof AlbumTagEditorDraft, mode: AlbumTagFieldMode) {
+    const current = albumTagEditorDraft[key];
+    albumTagEditorDraft = {
+      ...albumTagEditorDraft,
+      [key]: {
+        mode,
+        value: mode === "set" && current.mode === "unchanged"
+          ? albumTagSharedValue(key)
+          : current.value,
+      },
+    };
+    albumTagEditorError = null;
+  }
+
+  function setAlbumTagFieldValue(key: keyof AlbumTagEditorDraft, value: string) {
+    albumTagEditorDraft = {
+      ...albumTagEditorDraft,
+      [key]: { mode: "set", value },
+    };
+    albumTagEditorError = null;
+  }
+
+  function albumTagEditorHasChanges() {
+    return (Object.values(albumTagEditorDraft) as AlbumTagFieldDraft[])
+      .some((field) => field.mode !== "unchanged");
+  }
+
+  function albumTagGroupingMayChange() {
+    const albumArtist = albumTagEditorData?.sharedValues.albumArtist;
+    const albumUsesTrackArtist = Boolean(albumArtist && !albumArtist.mixed && albumArtist.value === null);
+
+    return albumTagEditorDraft.album.mode !== "unchanged"
+      || albumTagEditorDraft.albumArtist.mode !== "unchanged"
+      || (albumUsesTrackArtist && albumTagEditorDraft.artist.mode !== "unchanged");
+  }
+
+  function albumTagEditorValidationError() {
+    if (!albumTagEditorHasChanges()) {
+      return "Choose at least one album field to change.";
+    }
+
+    for (const [key, field] of Object.entries(albumTagEditorDraft) as Array<[keyof AlbumTagEditorDraft, AlbumTagFieldDraft]>) {
+      if (field.mode === "set" && !field.value.trim()) {
+        return `${albumTagFieldName(key)} cannot be blank when set. Choose Clear to remove it.`;
+      }
+    }
+
+    const year = albumTagEditorDraft.year;
+    if (year.mode === "set") {
+      const parsed = Number.parseInt(year.value.trim(), 10);
+      if (!/^\d+$/.test(year.value.trim()) || !Number.isSafeInteger(parsed) || parsed < 1 || parsed > 65535) {
+        return "Year must be an integer from 1 through 65535.";
+      }
+    }
+
+    if ((albumTagEditorData?.preflightErrors.length ?? 0) > 0) {
+      return "Resolve the listed FLAC preflight problems before saving.";
+    }
+    if (!albumTagEditorData || albumTagEditorData.editableTrackCount === 0) {
+      return "This album has no editable FLAC tracks.";
+    }
+
+    return null;
+  }
+
+  function albumTagFieldName(key: keyof AlbumTagEditorDraft) {
+    return {
+      album: "Album title",
+      albumArtist: "Album artist",
+      artist: "Artist",
+      genre: "Genre",
+      year: "Year",
+    }[key];
+  }
+
+  function albumTagChangeSummary(key: keyof AlbumTagEditorDraft) {
+    const field = albumTagEditorDraft[key];
+    if (field.mode === "clear") {
+      return `${albumTagFieldName(key)}: clear`;
+    }
+    if (field.mode === "set") {
+      return `${albumTagFieldName(key)}: ${field.value.trim()}`;
+    }
+
+    return null;
+  }
+
+  function albumTagFieldRequest(key: keyof AlbumTagEditorDraft) {
+    const field = albumTagEditorDraft[key];
+    if (field.mode === "unchanged") {
+      return { mode: "unchanged" } as const;
+    }
+    if (field.mode === "clear") {
+      return { mode: "clear" } as const;
+    }
+    if (key === "year") {
+      return { mode: "set", value: Number.parseInt(field.value.trim(), 10) } as const;
+    }
+
+    return { mode: "set", value: field.value.trim() } as const;
+  }
+
+  function albumTagUpdateRequest(): UpdateAlbumTagsRequest | null {
+    if (!albumTagEditorData) {
+      return null;
+    }
+
+    return {
+      albumId: albumTagEditorData.albumId,
+      album: albumTagFieldRequest("album") as UpdateAlbumTagsRequest["album"],
+      albumArtist: albumTagFieldRequest("albumArtist") as UpdateAlbumTagsRequest["albumArtist"],
+      artist: albumTagFieldRequest("artist") as UpdateAlbumTagsRequest["artist"],
+      genre: albumTagFieldRequest("genre") as UpdateAlbumTagsRequest["genre"],
+      year: albumTagFieldRequest("year") as UpdateAlbumTagsRequest["year"],
+    };
+  }
+
+  function showAlbumTagConfirmation() {
+    const validationError = albumTagEditorValidationError();
+    if (validationError) {
+      albumTagEditorError = validationError;
+      return;
+    }
+
+    albumTagEditorError = null;
+    albumTagEditorStage = "confirm";
+  }
+
+  async function saveAlbumTags() {
+    if (isSavingAlbumTagEditor) {
+      return;
+    }
+    const request = albumTagUpdateRequest();
+    const validationError = albumTagEditorValidationError();
+    if (!request || validationError) {
+      albumTagEditorError = validationError ?? "Album tag changes are unavailable.";
+      albumTagEditorStage = "edit";
+      return;
+    }
+
+    isSavingAlbumTagEditor = true;
+    albumTagEditorError = null;
+    const originalAlbumId = request.albumId;
+    const originalAlbumTitle = selectedAlbum?.title ?? "the original album";
+    const excludedTrackCount = albumTagEditorData?.excludedTrackCount ?? 0;
+    albumTagUpdateProgress = {
+      phase: "preflight",
+      completed: 0,
+      total: albumTagEditorData?.editableTrackCount ?? 0,
+      fileName: null,
+    };
+
+    try {
+      const result = await updateAlbumTags(request);
+      albumTagUpdateResult = result;
+      if (result.outcome === "success") {
+        for (const track of result.updatedTracks) {
+          applyUpdatedTrack(track);
+        }
+        const nextAlbumId = result.updatedTracks[0] ? albumIdForTrack(result.updatedTracks[0]) : null;
+        if (nextAlbumId) {
+          selectedAlbumId = nextAlbumId;
+          albumTagMoveNotice = nextAlbumId !== originalAlbumId && excludedTrackCount > 0
+            ? {
+                editedAlbumId: nextAlbumId,
+                editedTrackCount: result.updatedTracks.length,
+                excludedTrackCount,
+                originalAlbumId,
+                originalAlbumTitle,
+              }
+            : null;
+        }
+      }
+      albumTagEditorStage = "result";
+    } catch (error) {
+      albumTagEditorError = error instanceof Error ? error.message : String(error);
+      albumTagEditorStage = "edit";
+    } finally {
+      isSavingAlbumTagEditor = false;
+    }
+  }
+
+  function albumTagProgressLabel() {
+    const progress = albumTagUpdateProgress;
+    if (!progress) {
+      return "Preparing album update...";
+    }
+    const phase = progress.phase === "preflight" ? "Checking" : "Writing";
+    const file = progress.fileName ? ` · ${progress.fileName}` : "";
+    return `${phase} ${progress.completed} of ${progress.total}${file}`;
+  }
+
+  function openAlbumMoreMenu(event: MouseEvent) {
+    event.preventDefault();
+    event.stopPropagation();
+    const button = event.currentTarget as HTMLElement;
+    const bounds = button.getBoundingClientRect();
+
+    openContextMenu(Math.max(8, bounds.right - 210), bounds.bottom + 6, [
+      {
+        label: "Edit album tags…",
+        disabled: selectedAlbumTracks.length === 0,
+        action: () => openAlbumTagEditor(),
+      },
+    ]);
+  }
+
+  function viewOriginalAlbumAfterTagEdit() {
+    const notice = albumTagMoveNotice;
+    if (!notice || !displayAlbums.some((album) => album.id === notice.originalAlbumId)) {
+      return;
+    }
+
+    selectedAlbumId = notice.originalAlbumId;
+    searchQuery = "";
+    mainElement?.scrollTo({ top: 0, behavior: "smooth" });
   }
 
   function releaseDetail(release: CdMetadataRelease) {
@@ -6908,6 +7279,14 @@
           <section class="detail-view" aria-labelledby="album-detail-title">
             <button class="back-button album-detail-back" type="button" onclick={handleAlbumDetailBack}>{albumBackLabel()}</button>
             <div class="album-detail-header" style={`--item-color: ${selectedAlbum.color}`}>
+              <button
+                class="album-detail-overflow"
+                type="button"
+                aria-label="More album actions"
+                aria-haspopup="menu"
+                title="More album actions"
+                onclick={openAlbumMoreMenu}
+              >⋮</button>
               {#if selectedAlbum.coverArtPath}
                 <img
                   class="album-detail-ambient"
@@ -6970,6 +7349,21 @@
                 </div>
               </div>
             </div>
+
+            {#if albumTagMoveNotice?.editedAlbumId === selectedAlbum.id}
+              <div class="album-tag-move-notice" role="status">
+                <div>
+                  <strong>{albumTagMoveNotice.excludedTrackCount} read-only {albumTagMoveNotice.excludedTrackCount === 1 ? "track was" : "tracks were"} not deleted</strong>
+                  <p>
+                    {albumTagMoveNotice.editedTrackCount} FLAC {albumTagMoveNotice.editedTrackCount === 1 ? "track moved" : "tracks moved"} to this album. The excluded {albumTagMoveNotice.excludedTrackCount === 1 ? "track remains" : "tracks remain"} under “{albumTagMoveNotice.originalAlbumTitle}”.
+                  </p>
+                </div>
+                <div class="album-tag-move-actions">
+                  <button type="button" onclick={viewOriginalAlbumAfterTagEdit}>View original album</button>
+                  <button type="button" aria-label="Dismiss album split notice" onclick={() => albumTagMoveNotice = null}>Dismiss</button>
+                </div>
+              </div>
+            {/if}
 
             {#if selectedAlbumTracks.length > 10}
               <div class="search-bar album-track-search">
@@ -9229,6 +9623,225 @@
       items={contextMenu.items}
       onClose={closeContextMenu}
     />
+  {/if}
+
+  {#if isAlbumTagEditorOpen}
+    <div class="tag-editor-backdrop" role="presentation" onclick={(event) => { if (event.target === event.currentTarget) closeAlbumTagEditor(); }}>
+      <div
+        bind:this={albumTagEditorModalElement}
+        class="tag-editor-modal album-tag-editor-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="album-tag-editor-title"
+        tabindex="-1"
+      >
+        <header class="tag-editor-header">
+          <div class="tag-editor-art" aria-hidden="true">
+            {#if selectedAlbum?.coverArtPath}
+              <img src={localImageSource(selectedAlbum.coverArtPath) ?? ""} alt="" onload={showLoadedImage} onerror={hideBrokenImage} />
+            {:else}
+              <span>{selectedAlbum ? albumInitials(selectedAlbum) : "A"}</span>
+            {/if}
+          </div>
+          <div class="tag-editor-heading">
+            <p class="eyebrow">FLAC Album Tags</p>
+            <h3 id="album-tag-editor-title">Edit album tags</h3>
+            <strong>{selectedAlbum?.title ?? "Selected album"}</strong>
+            <small>Only intentionally changed shared fields are written.</small>
+          </div>
+          <button type="button" aria-label="Close album tag editor" disabled={isSavingAlbumTagEditor} onclick={closeAlbumTagEditor}>Close</button>
+        </header>
+
+        {#if isLoadingAlbumTagEditor}
+          <div class="tag-editor-loading" role="status">Inspecting album tracks and tags...</div>
+        {:else if !albumTagEditorData}
+          <p class="form-message error" role="alert">{albumTagEditorError ?? "Album tag information is unavailable."}</p>
+          <div class="tag-editor-actions">
+            <button type="button" onclick={closeAlbumTagEditor}>Close</button>
+          </div>
+        {:else if albumTagEditorStage === "edit"}
+          <div class="album-tag-scope-summary">
+            <strong>{albumTagEditorData.editableTrackCount} editable FLAC {albumTagEditorData.editableTrackCount === 1 ? "track" : "tracks"}</strong>
+            <span>{albumTagEditorData.excludedTrackCount} read-only/excluded {albumTagEditorData.excludedTrackCount === 1 ? "track" : "tracks"}</span>
+          </div>
+
+          {#if albumTagEditorData.genreOverrideActive}
+            <div class="tag-editor-warning" role="status">
+              A Cassette album or artist genre override currently controls some displayed genres. File tags will still be written, but that separate override is preserved.
+            </div>
+          {/if}
+          {#if albumTagEditorData.preflightErrors.length > 0}
+            <div class="tag-editor-warning" role="alert">
+              <strong>FLAC preflight must pass before saving:</strong>
+              <ul>
+                {#each albumTagEditorData.preflightErrors as error}
+                  <li>{error}</li>
+                {/each}
+              </ul>
+            </div>
+          {/if}
+
+          <div class="album-tag-field-grid">
+            {#each ALBUM_TAG_FIELDS as field (field.key)}
+              <fieldset class:changed={albumTagEditorDraft[field.key].mode !== "unchanged"}>
+                <legend>{field.label}</legend>
+                <p>Current: <strong>{albumTagSharedLabel(field.key)}</strong></p>
+                {#if field.help}
+                  <p class="album-tag-field-help">{field.help}</p>
+                {/if}
+                <label>
+                  <span>Action</span>
+                  <select
+                    value={albumTagEditorDraft[field.key].mode}
+                    disabled={isSavingAlbumTagEditor}
+                    onchange={(event) => setAlbumTagFieldMode(field.key, selectValue(event) as AlbumTagFieldMode)}
+                  >
+                    <option value="unchanged">Leave unchanged</option>
+                    <option value="set">Set value</option>
+                    <option value="clear">Clear field</option>
+                  </select>
+                </label>
+                {#if albumTagEditorDraft[field.key].mode === "set"}
+                  <label>
+                    <span>New value</span>
+                    <input
+                      inputmode={field.inputMode}
+                      value={albumTagEditorDraft[field.key].value}
+                      disabled={isSavingAlbumTagEditor}
+                      aria-invalid={field.key === "year" && albumTagEditorValidationError()?.startsWith("Year") ? "true" : "false"}
+                      oninput={(event) => setAlbumTagFieldValue(field.key, inputValue(event))}
+                    />
+                  </label>
+                {:else if albumTagEditorDraft[field.key].mode === "clear"}
+                  <p class="album-tag-clear-note">This field will be removed from every editable FLAC track.</p>
+                {/if}
+              </fieldset>
+            {/each}
+          </div>
+
+          <section class="album-tag-track-scope" aria-labelledby="album-tag-track-scope-title">
+            <h4 id="album-tag-track-scope-title">Affected tracks</h4>
+            <div class="album-tag-track-list">
+              {#each albumTagEditorData.tracks as item (item.track.id)}
+                <div class:excluded={!item.editable}>
+                  <span>
+                    <strong>{item.track.title}</strong>
+                    <small>{item.track.fileName}</small>
+                  </span>
+                  <span class="album-tag-track-status">{item.editable ? "Editable FLAC" : item.exclusionReason}</span>
+                </div>
+              {/each}
+            </div>
+          </section>
+
+          {#if albumTagEditorError}
+            <p class="form-message error" role="alert">{albumTagEditorError}</p>
+          {/if}
+          <div class="tag-editor-actions">
+            <button type="button" onclick={closeAlbumTagEditor}>Cancel</button>
+            <button
+              class="primary"
+              type="button"
+              disabled={!albumTagEditorHasChanges() || albumTagEditorData.editableTrackCount === 0 || albumTagEditorData.preflightErrors.length > 0}
+              onclick={showAlbumTagConfirmation}
+            >
+              Review changes
+            </button>
+          </div>
+        {:else if albumTagEditorStage === "confirm"}
+          <div class="album-tag-confirmation">
+            <div class="tag-editor-warning" role="status">
+              Review the exact shared-field changes and FLAC subset. Individual titles, track/disc numbers, artwork, lyrics, audio, and unrelated metadata are not selected for change.
+            </div>
+            {#if albumTagEditorData.excludedTrackCount > 0 && albumTagGroupingMayChange()}
+              <div class="tag-editor-warning" role="alert">
+                <strong>This can split the album in Cassette.</strong>
+                The read-only tracks cannot receive these grouping changes. They will remain visible under the original album; they are not deleted or removed from the library.
+              </div>
+            {/if}
+            {#if albumTagEditorDraft.artist.mode !== "unchanged"}
+              <div class="tag-editor-warning" role="alert">
+                <strong>Artist applies to every editable FLAC.</strong>
+                Continue only if all of those tracks should use the same performer. Album artist is the shared grouping field for multi-artist albums.
+              </div>
+            {/if}
+            <section>
+              <h4>Changes</h4>
+              <ul>
+                {#each ALBUM_TAG_FIELDS as field (field.key)}
+                  {@const summary = albumTagChangeSummary(field.key)}
+                  {#if summary}<li>{summary}</li>{/if}
+                {/each}
+              </ul>
+            </section>
+            <section>
+              <h4>Will be updated ({albumTagEditorData.editableTrackCount})</h4>
+              <ul>
+                {#each albumTagEditorData.tracks.filter((item) => item.editable) as item (item.track.id)}
+                  <li>{item.track.title} <small>· {item.track.fileName}</small></li>
+                {/each}
+              </ul>
+            </section>
+            {#if albumTagEditorData.excludedTrackCount > 0}
+              <section>
+                <h4>Will remain read-only ({albumTagEditorData.excludedTrackCount})</h4>
+                <ul>
+                  {#each albumTagEditorData.tracks.filter((item) => !item.editable) as item (item.track.id)}
+                    <li>{item.track.title} <small>· {item.exclusionReason}</small></li>
+                  {/each}
+                </ul>
+              </section>
+            {/if}
+          </div>
+
+          {#if isSavingAlbumTagEditor}
+            <div class="album-tag-progress" role="status" aria-live="polite">
+              <strong>{albumTagProgressLabel()}</strong>
+              <progress max={Math.max(albumTagUpdateProgress?.total ?? 1, 1)} value={albumTagUpdateProgress?.completed ?? 0}></progress>
+            </div>
+          {/if}
+          {#if albumTagEditorError}
+            <p class="form-message error" role="alert">{albumTagEditorError}</p>
+          {/if}
+          <div class="tag-editor-actions">
+            <button type="button" disabled={isSavingAlbumTagEditor} onclick={() => { albumTagEditorStage = "edit"; albumTagEditorError = null; }}>Back</button>
+            <button type="button" disabled={isSavingAlbumTagEditor} onclick={closeAlbumTagEditor}>Cancel</button>
+            <button class="primary" type="button" disabled={isSavingAlbumTagEditor} onclick={() => void saveAlbumTags()}>
+              {isSavingAlbumTagEditor ? "Updating..." : `Update ${albumTagEditorData.editableTrackCount} FLAC ${albumTagEditorData.editableTrackCount === 1 ? "track" : "tracks"}`}
+            </button>
+          </div>
+        {:else if albumTagUpdateResult}
+          <div class:success={albumTagUpdateResult.outcome === "success"} class:error={albumTagUpdateResult.outcome !== "success"} class="album-tag-result" role="status">
+            <strong>{albumTagUpdateResult.outcome === "success" ? "Album tags updated" : "Album update did not complete"}</strong>
+            <p>{albumTagUpdateResult.summary}</p>
+          </div>
+          {#if albumTagMoveNotice}
+            {@const moveNotice = albumTagMoveNotice}
+            {#if moveNotice.editedAlbumId === selectedAlbum?.id}
+              <div class="tag-editor-warning" role="status">
+                The excluded read-only {moveNotice.excludedTrackCount === 1 ? "track remains" : "tracks remain"} under “{moveNotice.originalAlbumTitle}”. Nothing was deleted.
+              </div>
+            {/if}
+          {/if}
+          <div class="album-tag-result-list">
+            {#each albumTagUpdateResult.trackResults as result (result.trackId)}
+              <div>
+                <span><strong>{result.fileName}</strong><small>{result.status.replaceAll("_", " ")}</small></span>
+                <p>{result.message}</p>
+                {#if result.backupPath}<code>Backup: {result.backupPath}</code>{/if}
+                {#if result.recoveryPath}<code>Recovery copy: {result.recoveryPath}</code>{/if}
+              </div>
+            {/each}
+          </div>
+          <div class="tag-editor-actions">
+            {#if albumTagUpdateResult.outcome === "rolled_back"}
+              <button type="button" onclick={() => { albumTagEditorStage = "edit"; albumTagUpdateResult = null; }}>Review and retry</button>
+            {/if}
+            <button class="primary" type="button" onclick={closeAlbumTagEditor}>Close</button>
+          </div>
+        {/if}
+      </div>
+    </div>
   {/if}
 
   {#if tagEditorTrack}
@@ -11742,6 +12355,36 @@
     background: linear-gradient(0deg, rgba(6, 8, 11, 0.36), transparent);
   }
 
+  .album-detail-overflow {
+    position: absolute;
+    top: 14px;
+    right: 14px;
+    z-index: 2;
+    display: grid;
+    width: 40px;
+    height: 40px;
+    place-items: center;
+    border: 1px solid rgba(64, 77, 93, 0.78);
+    border-radius: 999px;
+    background: rgba(12, 15, 20, 0.66);
+    color: var(--text);
+    cursor: default;
+    font: inherit;
+    font-size: 1.55rem;
+    font-weight: 850;
+    line-height: 1;
+    padding: 0 0 8px;
+    backdrop-filter: blur(10px);
+  }
+
+  .album-detail-overflow:hover,
+  .album-detail-overflow:focus-visible {
+    border-color: var(--accent-strong);
+    background: rgba(27, 32, 39, 0.9);
+    color: var(--accent-text);
+    outline: none;
+  }
+
   .album-detail-ambient {
     position: absolute;
     inset: -24%;
@@ -11895,6 +12538,52 @@
     border-color: rgba(48, 56, 68, 0.72);
     background: rgba(21, 26, 33, 0.7);
     color: var(--text-dim);
+  }
+
+  .album-tag-move-notice {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    border: 1px solid color-mix(in srgb, var(--warning) 42%, var(--border));
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--warning) 9%, var(--panel));
+    color: var(--text);
+    padding: 13px 14px;
+  }
+
+  .album-tag-move-notice p {
+    margin: 4px 0 0;
+    color: var(--text-muted);
+    font-size: 0.86rem;
+    line-height: 1.45;
+  }
+
+  .album-tag-move-actions {
+    display: flex;
+    flex: 0 0 auto;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .album-tag-move-actions button {
+    min-height: 34px;
+    border: 1px solid var(--border-strong);
+    border-radius: 7px;
+    background: var(--bg-soft);
+    color: var(--text);
+    cursor: default;
+    font: inherit;
+    font-size: 0.8rem;
+    font-weight: 800;
+    padding: 0 11px;
+  }
+
+  .album-tag-move-actions button:hover,
+  .album-tag-move-actions button:focus-visible {
+    border-color: var(--accent-strong);
+    color: var(--accent-text);
+    outline: none;
   }
 
   .album-track-list {
@@ -14200,6 +14889,237 @@
     gap: 10px;
   }
 
+  .album-tag-editor-modal {
+    width: min(940px, 100%);
+  }
+
+  .album-tag-scope-summary {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px 16px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg-soft);
+    color: var(--text-muted);
+    padding: 12px;
+  }
+
+  .album-tag-scope-summary strong {
+    color: var(--text);
+  }
+
+  .tag-editor-warning ul,
+  .album-tag-confirmation ul {
+    margin: 8px 0 0;
+    padding-left: 20px;
+  }
+
+  .album-tag-field-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+  }
+
+  .album-tag-field-grid fieldset {
+    min-width: 0;
+    margin: 0;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--panel-soft);
+    padding: 12px;
+  }
+
+  .album-tag-field-grid fieldset.changed {
+    border-color: var(--accent-strong);
+    box-shadow: inset 3px 0 0 var(--accent);
+  }
+
+  .album-tag-field-grid legend {
+    color: var(--text);
+    font-size: 0.86rem;
+    font-weight: 900;
+    padding: 0 5px;
+  }
+
+  .album-tag-field-grid p {
+    margin: 0 0 10px;
+    color: var(--text-muted);
+    font-size: 0.82rem;
+  }
+
+  .album-tag-field-grid .album-tag-field-help {
+    min-height: 2.8em;
+    color: var(--text-soft);
+    font-size: 0.76rem;
+    line-height: 1.4;
+  }
+
+  .album-tag-field-grid label {
+    display: grid;
+    gap: 5px;
+    margin-top: 8px;
+  }
+
+  .album-tag-field-grid label span {
+    color: var(--text-soft);
+    font-size: 0.72rem;
+    font-weight: 850;
+    text-transform: uppercase;
+  }
+
+  .album-tag-field-grid select,
+  .album-tag-field-grid input {
+    width: 100%;
+    min-height: 38px;
+    border: 1px solid var(--border-strong);
+    border-radius: 8px;
+    background: var(--bg-soft);
+    color: var(--text);
+    font: inherit;
+    font-size: 0.88rem;
+    font-weight: 720;
+    padding: 0 10px;
+  }
+
+  .album-tag-field-grid select:focus,
+  .album-tag-field-grid input:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--focus-ring) 64%, transparent);
+    outline: none;
+  }
+
+  .album-tag-clear-note {
+    margin-top: 10px !important;
+    color: var(--warning) !important;
+    font-weight: 780;
+  }
+
+  .album-tag-track-scope,
+  .album-tag-confirmation section {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg-soft);
+    padding: 12px;
+  }
+
+  .album-tag-track-scope h4,
+  .album-tag-confirmation h4 {
+    margin: 0 0 10px;
+    color: var(--text);
+    font-size: 0.9rem;
+  }
+
+  .album-tag-track-list,
+  .album-tag-result-list {
+    display: grid;
+    gap: 7px;
+    max-height: 230px;
+    overflow: auto;
+  }
+
+  .album-tag-track-list > div,
+  .album-tag-result-list > div {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    background: var(--panel-soft);
+    padding: 9px 10px;
+  }
+
+  .album-tag-track-list > div.excluded {
+    opacity: 0.72;
+  }
+
+  .album-tag-track-list span,
+  .album-tag-track-list strong,
+  .album-tag-track-list small,
+  .album-tag-result-list span,
+  .album-tag-result-list small,
+  .album-tag-result-list code {
+    display: block;
+  }
+
+  .album-tag-track-list small,
+  .album-tag-result-list small,
+  .album-tag-result-list code {
+    margin-top: 2px;
+    overflow-wrap: anywhere;
+    color: var(--text-soft);
+    font-size: 0.76rem;
+  }
+
+  .album-tag-track-status {
+    max-width: 42%;
+    color: var(--text-muted);
+    font-size: 0.78rem;
+    font-weight: 760;
+    text-align: right;
+  }
+
+  .album-tag-confirmation {
+    display: grid;
+    gap: 10px;
+  }
+
+  .album-tag-confirmation li {
+    color: var(--text-muted);
+    font-size: 0.86rem;
+    line-height: 1.5;
+  }
+
+  .album-tag-confirmation li small {
+    color: var(--text-soft);
+  }
+
+  .album-tag-progress {
+    display: grid;
+    gap: 8px;
+    color: var(--text);
+    font-size: 0.86rem;
+  }
+
+  .album-tag-progress progress {
+    width: 100%;
+    accent-color: var(--accent);
+  }
+
+  .album-tag-result {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg-soft);
+    padding: 12px;
+  }
+
+  .album-tag-result.success {
+    border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
+  }
+
+  .album-tag-result.error {
+    border-color: color-mix(in srgb, var(--danger) 55%, var(--border));
+  }
+
+  .album-tag-result p,
+  .album-tag-result-list p {
+    margin: 5px 0 0;
+    color: var(--text-muted);
+    font-size: 0.84rem;
+    line-height: 1.45;
+  }
+
+  .album-tag-result-list > div {
+    display: grid;
+    grid-template-columns: minmax(150px, 0.7fr) minmax(0, 1.3fr);
+  }
+
+  .album-tag-result-list code {
+    grid-column: 1 / -1;
+  }
+
   .shortcuts-header,
   .confirmation-header {
     display: flex;
@@ -15112,6 +16032,11 @@
       align-items: start;
     }
 
+    .album-tag-move-notice {
+      align-items: stretch;
+      flex-direction: column;
+    }
+
     .album-detail-cover-shell {
       width: min(100%, 280px);
     }
@@ -15221,6 +16146,20 @@
 
     .tag-editor-form {
       grid-template-columns: 1fr;
+    }
+
+    .album-tag-field-grid,
+    .album-tag-result-list > div {
+      grid-template-columns: 1fr;
+    }
+
+    .album-tag-track-list > div {
+      display: grid;
+    }
+
+    .album-tag-track-status {
+      max-width: none;
+      text-align: left;
     }
   }
 
