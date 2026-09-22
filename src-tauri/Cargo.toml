@@ -45,6 +45,10 @@ base64 = "0.22.1"
 minisign-verify = "=0.2.5"
 zbus = "5.16.0"
 
+[dev-dependencies]
+# Synthetic FLAC fixtures are embedded for the cross-platform tag-safety tests.
+base64 = "0.22.1"
+
 [profile.release]
 # Keep debug builds untouched. Release artifacts retain application error messages,
 # while native symbols and machine-specific source paths are removed or remapped.

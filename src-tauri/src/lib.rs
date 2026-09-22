@@ -7575,7 +7575,14 @@ where
             cover_art_dir.clone(),
             item.track.cover_art_path.clone(),
         ) {
-            Ok(track) => updated_tracks.push(track),
+            Ok(mut track) => {
+                // `validated_cached_track_path` intentionally returns a canonical path for
+                // writes. On Windows that path can gain a `\\?\` prefix, but the cached path
+                // is the stable track identity used by favorites, playlists, and history.
+                track.id = item.track.id.clone();
+                track.file_path = item.track.file_path.clone();
+                updated_tracks.push(track);
+            }
             Err(error) => {
                 let result = album_tag_failure_result(
                     &prepared,
