@@ -3,12 +3,16 @@ use gstreamer as gst;
 #[cfg(target_os = "linux")]
 use libloading::Library;
 use lofty::config::{ParseOptions, WriteOptions};
-use lofty::file::{AudioFile, TaggedFileExt};
+use lofty::file::{AudioFile, FileType, TaggedFileExt};
 use lofty::flac::FlacFile;
-use lofty::ogg::VorbisComments;
+use lofty::id3::v2::{Id3v2Tag, Id3v2Version};
+use lofty::iff::wav::WavFile;
+use lofty::mp4::{Ilst, Mp4File};
+use lofty::mpeg::MpegFile;
+use lofty::ogg::{OpusFile, VorbisComments, VorbisFile};
 use lofty::picture::{MimeType, Picture, PictureType};
 use lofty::probe::Probe;
-use lofty::tag::{Accessor, ItemKey, Tag, TagType};
+use lofty::tag::{Accessor, ItemKey, MergeTag, SplitTag, Tag, TagExt, TagType};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;
@@ -16,8 +20,8 @@ use std::collections::{HashMap, HashSet};
 #[cfg(target_os = "linux")]
 use std::ffi::CStr;
 use std::fs;
-use std::hash::Hasher;
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::hash::{Hash, Hasher};
+use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
 #[cfg(target_os = "linux")]
 use std::os::raw::{c_char, c_int, c_uint, c_void};
 #[cfg(unix)]
@@ -42,8 +46,7 @@ const MAX_LYRICS_BYTES: u64 = 1024 * 1024;
 const GENRE_SCOPE_ALBUM: &str = "album";
 const GENRE_SCOPE_ARTIST: &str = "artist";
 const MUSICBRAINZ_USER_AGENT: &str = "Cassette/0.1.0-beta.3 (local music player; contact: none)";
-const UNVALIDATED_TAG_FORMAT_MESSAGE: &str =
-    "Tag editing for this format has not been safely validated yet.";
+const SUPPORTED_TAG_FORMATS_LABEL: &str = "FLAC, MP3, Ogg/Vorbis, Opus, WAV, and M4A/AAC";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -118,6 +121,7 @@ struct TrackTagValues {
 struct TrackTagEditorData {
     track: Track,
     file_values: TrackTagValues,
+    detected_format: String,
     genre_override_active: bool,
     tag_editing_supported: bool,
     unsupported_reason: Option<String>,
@@ -163,6 +167,7 @@ struct AlbumSharedTagValues {
 #[serde(rename_all = "camelCase")]
 struct AlbumTagEditorTrack {
     track: Track,
+    detected_format: Option<String>,
     editable: bool,
     exclusion_reason: Option<String>,
 }
@@ -1271,24 +1276,17 @@ fn get_track_tag_editor_data(
     let target_path = validated_cached_track_path(&track, &root_path)?;
     let tagged_file = read_tagged_file(&target_path)?;
     let file_values = track_tag_values_from_file(&tagged_file);
-    let safely_validated_format = tag_editing_safely_validated_for_path(&target_path);
-    let tag_editing_supported = safely_validated_format && tag_editing_supported(&tagged_file);
-    let unsupported_reason = if tag_editing_supported {
-        None
-    } else if !safely_validated_format {
-        Some(UNVALIDATED_TAG_FORMAT_MESSAGE.to_owned())
-    } else {
-        Some("Tag editing is not currently supported for this file format.".to_owned())
-    };
+    let assessment = tag_editing_assessment(&target_path, &tagged_file);
     let genre_override_active =
         genre_override_active_for_values(&file_values, &track, &genre_assignments);
 
     Ok(TrackTagEditorData {
         track,
         file_values,
+        detected_format: assessment.detected_format,
         genre_override_active,
-        tag_editing_supported,
-        unsupported_reason,
+        tag_editing_supported: assessment.plan.is_some(),
+        unsupported_reason: assessment.unsupported_reason,
     })
 }
 
@@ -1315,38 +1313,33 @@ fn get_album_tag_editor_data(
     let mut preflight_errors = Vec::new();
 
     for track in tracks {
-        if !tag_editing_safely_validated_for_path(Path::new(&track.file_path)) {
-            editor_tracks.push(AlbumTagEditorTrack {
-                track,
-                editable: false,
-                exclusion_reason: Some(
-                    "Only FLAC files are editable; this track remains read-only.".to_owned(),
-                ),
-            });
-            continue;
-        }
-
         let inspection = validated_cached_track_path(&track, &root_path).and_then(|path| {
             let tagged_file = read_tagged_file(&path)?;
-            if !tag_editing_supported(&tagged_file) {
-                return Err("This FLAC tag container is not writable.".to_owned());
-            }
-            Ok(track_tag_values_from_file(&tagged_file))
+            let assessment = tag_editing_assessment(&path, &tagged_file);
+            Ok((assessment, track_tag_values_from_file(&tagged_file)))
         });
 
         match inspection {
-            Ok(values) => {
+            Ok((assessment, values)) if assessment.plan.is_some() => {
                 editable_values.push(values);
                 editor_tracks.push(AlbumTagEditorTrack {
                     track,
+                    detected_format: Some(assessment.detected_format),
                     editable: true,
                     exclusion_reason: None,
                 });
             }
+            Ok((assessment, _)) => editor_tracks.push(AlbumTagEditorTrack {
+                track,
+                detected_format: Some(assessment.detected_format),
+                editable: false,
+                exclusion_reason: assessment.unsupported_reason,
+            }),
             Err(error) => {
                 preflight_errors.push(format!("{}: {error}", track.file_name));
                 editor_tracks.push(AlbumTagEditorTrack {
                     track,
+                    detected_format: None,
                     editable: false,
                     exclusion_reason: Some(error),
                 });
@@ -1357,7 +1350,9 @@ fn get_album_tag_editor_data(
     let editable_track_count = editor_tracks.iter().filter(|item| item.editable).count();
     let excluded_track_count = editor_tracks.len().saturating_sub(editable_track_count);
     if editable_track_count == 0 && preflight_errors.is_empty() {
-        preflight_errors.push("This album has no editable FLAC tracks.".to_owned());
+        preflight_errors.push(format!(
+            "This album has no safely editable tracks. Supported formats are {SUPPORTED_TAG_FORMATS_LABEL}."
+        ));
     }
 
     let genre_override_active = editor_tracks.iter().any(|item| {
@@ -1427,6 +1422,7 @@ fn update_album_tags(
 #[tauri::command]
 fn update_track_tags(
     request: UpdateTrackTagsRequest,
+    changed_fields: Vec<String>,
     app: AppHandle,
     library: State<'_, Mutex<LibraryDatabase>>,
     playback: State<'_, Mutex<PlaybackState>>,
@@ -1434,6 +1430,7 @@ fn update_track_tags(
     tag_writes: State<'_, Mutex<TagWriteState>>,
 ) -> Result<Track, String> {
     validate_update_track_tags_request(&request)?;
+    let mask = tag_field_mask_from_names(&changed_fields)?;
 
     let (cached_track, root_path) = {
         let library = library
@@ -1449,9 +1446,10 @@ fn update_track_tags(
         (track, PathBuf::from(root_path))
     };
     let target_path = validated_cached_track_path(&cached_track, &root_path)?;
+    validate_album_target_preflight(&cached_track, &target_path)?;
     let canonical_key = target_path.to_string_lossy().into_owned();
     let _write_guard = TagWriteGuard::new(&tag_writes, canonical_key)?;
-    update_track_tags_file(&target_path, &request)?;
+    update_track_tags_file_masked(&target_path, &request, mask)?;
 
     let scanned_at = unix_timestamp();
     let mut updated_track = rescan_single_track_after_tag_write(
@@ -6964,6 +6962,7 @@ struct TagFieldMask {
 }
 
 impl TagFieldMask {
+    #[cfg(test)]
     fn all() -> Self {
         Self {
             title: true,
@@ -6976,6 +6975,38 @@ impl TagFieldMask {
             disc_number: true,
         }
     }
+
+    fn any(self) -> bool {
+        self.title
+            || self.artist
+            || self.album
+            || self.album_artist
+            || self.genre
+            || self.year
+            || self.track_number
+            || self.disc_number
+    }
+}
+
+fn tag_field_mask_from_names(fields: &[String]) -> Result<TagFieldMask, String> {
+    let mut mask = TagFieldMask::default();
+    for field in fields {
+        match field.as_str() {
+            "title" => mask.title = true,
+            "artist" => mask.artist = true,
+            "album" => mask.album = true,
+            "albumArtist" => mask.album_artist = true,
+            "genre" => mask.genre = true,
+            "year" => mask.year = true,
+            "trackNumber" => mask.track_number = true,
+            "discNumber" => mask.disc_number = true,
+            _ => return Err(format!("Unknown tag field: {field}")),
+        }
+    }
+    if !mask.any() {
+        return Err("Choose at least one tag field to change.".to_owned());
+    }
+    Ok(mask)
 }
 
 fn album_tag_field_mask(request: &UpdateAlbumTagsRequest) -> TagFieldMask {
@@ -7019,6 +7050,259 @@ fn file_content_fingerprint(path: &Path) -> Result<FileContentFingerprint, Strin
     })
 }
 
+fn hash_file_region(
+    file: &mut fs::File,
+    start: u64,
+    length: u64,
+    hasher: &mut DefaultHasher,
+) -> Result<(), String> {
+    file.seek(SeekFrom::Start(start))
+        .map_err(|error| format!("Could not seek while verifying audio: {error}"))?;
+    let mut remaining = length;
+    let mut buffer = [0_u8; 64 * 1024];
+    while remaining > 0 {
+        let take = remaining.min(buffer.len() as u64) as usize;
+        file.read_exact(&mut buffer[..take])
+            .map_err(|error| format!("Could not read audio for verification: {error}"))?;
+        hasher.write(&buffer[..take]);
+        remaining -= take as u64;
+    }
+    Ok(())
+}
+
+fn audio_payload_fingerprint(path: &Path) -> Result<FileContentFingerprint, String> {
+    let file_type = read_tagged_file(path)?.file_type();
+    let mut file = fs::File::open(path)
+        .map_err(|error| format!("Could not inspect audio payload: {error}"))?;
+    let length = file
+        .metadata()
+        .map_err(|error| format!("Could not inspect audio size: {error}"))?
+        .len();
+    let mut hasher = DefaultHasher::new();
+    let mut audio_size = 0_u64;
+
+    match file_type {
+        FileType::Flac => {
+            let mut signature = [0_u8; 4];
+            file.read_exact(&mut signature)
+                .map_err(|error| format!("Could not read FLAC signature: {error}"))?;
+            if &signature != b"fLaC" {
+                return Err("Invalid FLAC signature during audio verification.".to_owned());
+            }
+            let mut offset = 4_u64;
+            loop {
+                let mut header = [0_u8; 4];
+                file.read_exact(&mut header)
+                    .map_err(|error| format!("Could not read FLAC metadata: {error}"))?;
+                let block_type = header[0] & 0x7f;
+                let block_size = u32::from_be_bytes([0, header[1], header[2], header[3]]) as u64;
+                let block_start = offset
+                    .checked_add(4)
+                    .ok_or_else(|| "FLAC metadata offset overflowed.".to_owned())?;
+                offset = block_start
+                    .checked_add(block_size)
+                    .ok_or_else(|| "FLAC metadata offset overflowed.".to_owned())?;
+                if offset > length {
+                    return Err("FLAC metadata exceeds the file size.".to_owned());
+                }
+                if block_type != 1 && block_type != 4 {
+                    hasher.write_u8(block_type);
+                    hasher.write_u64(block_size);
+                    hash_file_region(&mut file, block_start, block_size, &mut hasher)?;
+                }
+                if header[0] & 0x80 != 0 {
+                    break;
+                }
+                file.seek(SeekFrom::Start(offset))
+                    .map_err(|error| format!("Could not skip FLAC metadata: {error}"))?;
+            }
+            audio_size = length - offset;
+            hash_file_region(&mut file, offset, audio_size, &mut hasher)?;
+        }
+        FileType::Mpeg => {
+            let mut offset = 0_u64;
+            if length >= 10 {
+                let mut header = [0_u8; 10];
+                file.read_exact(&mut header)
+                    .map_err(|error| format!("Could not read MP3 header: {error}"))?;
+                if &header[..3] == b"ID3" {
+                    if header[6..10].iter().any(|byte| byte & 0x80 != 0) {
+                        return Err("Invalid MP3 ID3 size during audio verification.".to_owned());
+                    }
+                    let size = header[6..10]
+                        .iter()
+                        .fold(0_u64, |value, byte| (value << 7) | u64::from(*byte));
+                    offset = 10 + size + if header[5] & 0x10 != 0 { 10 } else { 0 };
+                }
+            }
+            if offset > length {
+                return Err("MP3 ID3 tag exceeds the file size.".to_owned());
+            }
+            audio_size = length - offset;
+            hash_file_region(&mut file, offset, audio_size, &mut hasher)?;
+        }
+        FileType::Wav => {
+            let mut header = [0_u8; 12];
+            file.read_exact(&mut header)
+                .map_err(|error| format!("Could not read WAV header: {error}"))?;
+            if &header[..4] != b"RIFF" || &header[8..12] != b"WAVE" {
+                return Err("Invalid RIFF/WAVE header during audio verification.".to_owned());
+            }
+            let mut offset = 12_u64;
+            while offset + 8 <= length {
+                file.seek(SeekFrom::Start(offset))
+                    .map_err(|error| format!("Could not seek to WAV chunk: {error}"))?;
+                let mut chunk = [0_u8; 8];
+                file.read_exact(&mut chunk)
+                    .map_err(|error| format!("Could not read WAV chunk: {error}"))?;
+                let size = u32::from_le_bytes(chunk[4..8].try_into().unwrap()) as u64;
+                let padded = size + (size & 1);
+                let next = offset
+                    .checked_add(8 + padded)
+                    .ok_or_else(|| "WAV chunk offset overflowed.".to_owned())?;
+                if next > length {
+                    return Err("WAV chunk exceeds the file size.".to_owned());
+                }
+                if &chunk[..4] != b"ID3 " && &chunk[..4] != b"id3 " {
+                    hasher.write(&chunk);
+                    hash_file_region(&mut file, offset + 8, padded, &mut hasher)?;
+                    audio_size += 8 + padded;
+                }
+                offset = next;
+            }
+            if offset != length {
+                return Err("Unparsed WAV trailer would make preservation uncertain.".to_owned());
+            }
+        }
+        FileType::Mp4 => {
+            let mut offset = 0_u64;
+            while offset + 8 <= length {
+                file.seek(SeekFrom::Start(offset))
+                    .map_err(|error| format!("Could not seek to MP4 box: {error}"))?;
+                let mut header = [0_u8; 8];
+                file.read_exact(&mut header)
+                    .map_err(|error| format!("Could not read MP4 box: {error}"))?;
+                let short_size = u32::from_be_bytes(header[..4].try_into().unwrap()) as u64;
+                let (box_size, header_size) = if short_size == 1 {
+                    let mut extended = [0_u8; 8];
+                    file.read_exact(&mut extended)
+                        .map_err(|error| format!("Could not read extended MP4 box: {error}"))?;
+                    (u64::from_be_bytes(extended), 16_u64)
+                } else if short_size == 0 {
+                    (length - offset, 8_u64)
+                } else {
+                    (short_size, 8_u64)
+                };
+                let next = offset
+                    .checked_add(box_size)
+                    .ok_or_else(|| "MP4 box offset overflowed.".to_owned())?;
+                if box_size < header_size || next > length {
+                    return Err("MP4 box exceeds the file size.".to_owned());
+                }
+                if &header[4..8] == b"mdat" {
+                    let payload_size = box_size - header_size;
+                    hasher.write_u64(payload_size);
+                    hash_file_region(&mut file, offset + header_size, payload_size, &mut hasher)?;
+                    audio_size += payload_size;
+                }
+                offset = next;
+            }
+            if offset != length || audio_size == 0 {
+                return Err("MP4 audio payload could not be verified.".to_owned());
+            }
+        }
+        FileType::Vorbis | FileType::Opus => {
+            let skipped_packets = if file_type == FileType::Opus { 2 } else { 3 };
+            let mut packet_index = 0_usize;
+            while file.stream_position().map_err(|error| error.to_string())? < length {
+                let mut header = [0_u8; 27];
+                file.read_exact(&mut header)
+                    .map_err(|error| format!("Could not read Ogg page: {error}"))?;
+                if &header[..4] != b"OggS" || header[4] != 0 {
+                    return Err("Invalid Ogg page during audio verification.".to_owned());
+                }
+                let mut segments = vec![0_u8; header[26] as usize];
+                file.read_exact(&mut segments)
+                    .map_err(|error| format!("Could not read Ogg segments: {error}"))?;
+                for segment_size in segments {
+                    let mut segment = vec![0_u8; segment_size as usize];
+                    file.read_exact(&mut segment)
+                        .map_err(|error| format!("Could not read Ogg packet: {error}"))?;
+                    if packet_index >= skipped_packets {
+                        hasher.write(&segment);
+                        audio_size += segment.len() as u64;
+                    }
+                    if segment_size < 255 {
+                        if packet_index >= skipped_packets {
+                            hasher.write_u8(0xff);
+                        }
+                        packet_index += 1;
+                    }
+                }
+            }
+            if packet_index <= skipped_packets {
+                return Err("Ogg audio packets could not be verified.".to_owned());
+            }
+        }
+        _ => return Err("This audio format has no verified payload preservation path.".to_owned()),
+    }
+
+    Ok(FileContentFingerprint {
+        size: audio_size,
+        hash: hasher.finish(),
+    })
+}
+
+fn unselected_tag_item(key: ItemKey, mask: TagFieldMask) -> bool {
+    !(mask.title && key == ItemKey::TrackTitle
+        || mask.artist && key == ItemKey::TrackArtist
+        || mask.album && key == ItemKey::AlbumTitle
+        || mask.album_artist && (key == ItemKey::AlbumArtist || key == ItemKey::AlbumArtists)
+        || mask.genre && key == ItemKey::Genre
+        || mask.year && (key == ItemKey::Year || key == ItemKey::RecordingDate)
+        || mask.track_number && key == ItemKey::TrackNumber
+        || mask.disc_number && key == ItemKey::DiscNumber)
+}
+
+fn unrelated_tag_snapshot(
+    path: &Path,
+    mask: TagFieldMask,
+) -> Result<(TagWritePlan, Vec<String>), String> {
+    let tagged_file = read_tagged_file(path)?;
+    let plan = tag_editing_assessment(path, &tagged_file)
+        .plan
+        .ok_or_else(|| "Tag container changed during verification.".to_owned())?;
+    let mut items = Vec::new();
+    for tag in tagged_file.tags() {
+        for item in tag.items() {
+            if unselected_tag_item(item.key(), mask) {
+                let mut hasher = DefaultHasher::new();
+                item.value().hash(&mut hasher);
+                items.push(format!(
+                    "{:?}:{:?}:{}",
+                    tag.tag_type(),
+                    item.key(),
+                    hasher.finish()
+                ));
+            }
+        }
+        for picture in tag.pictures() {
+            let mut hasher = DefaultHasher::new();
+            picture.data().hash(&mut hasher);
+            items.push(format!(
+                "{:?}:picture:{:?}:{:?}:{:?}:{}",
+                tag.tag_type(),
+                picture.pic_type(),
+                picture.mime_type(),
+                picture.description(),
+                hasher.finish(),
+            ));
+        }
+    }
+    items.sort();
+    Ok((plan, items))
+}
+
 fn validate_album_target_preflight(track: &Track, path: &Path) -> Result<(), String> {
     let metadata =
         fs::metadata(path).map_err(|error| format!("Could not read selected track: {error}"))?;
@@ -7057,9 +7341,14 @@ fn prepare_album_tag_edit(
 ) -> Result<PreparedAlbumTagEdit, String> {
     validate_album_target_preflight(&track, &path)?;
     let original_fingerprint = file_content_fingerprint(&path)?;
+    let original_audio = audio_payload_fingerprint(&path)?;
+    let original_unrelated = unrelated_tag_snapshot(&path, mask)?;
     let tagged_file = read_tagged_file(&path)?;
-    if !tag_editing_supported(&tagged_file) {
-        return Err("This FLAC tag container is not writable.".to_owned());
+    let assessment = tag_editing_assessment(&path, &tagged_file);
+    if assessment.plan.is_none() {
+        return Err(assessment
+            .unsupported_reason
+            .unwrap_or_else(|| "This tag container is not safely writable.".to_owned()));
     }
     let request =
         album_tag_request_for_track(&track.id, track_tag_values_from_file(&tagged_file), changes);
@@ -7082,6 +7371,18 @@ fn prepare_album_tag_edit(
             sync_file(&temp_path).map_err(|error| format!("Could not flush edited tags: {error}"))
         })
         .and_then(|()| verify_tag_values(&temp_path, &request, mask))
+        .and_then(|()| {
+            if audio_payload_fingerprint(&temp_path)? == original_audio
+                && unrelated_tag_snapshot(&temp_path, mask)? == original_unrelated
+            {
+                Ok(())
+            } else {
+                Err(format!(
+                    "{}: audio or unrelated metadata changed in the editing copy; the original was preserved.",
+                    track.file_name
+                ))
+            }
+        })
     {
         cleanup_file(&temp_path);
         return Err(error);
@@ -7503,12 +7804,20 @@ where
             .ok_or_else(|| "No active library folder is configured.".to_owned())?;
         (tracks, PathBuf::from(root_path))
     };
-    let editable_tracks = tracks
-        .into_iter()
-        .filter(|track| tag_editing_safely_validated_for_path(Path::new(&track.file_path)))
-        .collect::<Vec<_>>();
+    let mut editable_tracks = Vec::new();
+    for track in tracks {
+        let path = validated_cached_track_path(&track, &root_path)
+            .map_err(|error| format!("{}: {error}", track.file_name))?;
+        let tagged_file =
+            read_tagged_file(&path).map_err(|error| format!("{}: {error}", track.file_name))?;
+        if tag_editing_assessment(&path, &tagged_file).plan.is_some() {
+            editable_tracks.push(track);
+        }
+    }
     if editable_tracks.is_empty() {
-        return Err("This album has no editable FLAC tracks.".to_owned());
+        return Err(format!(
+            "This album has no safely editable tracks. Supported formats are {SUPPORTED_TAG_FORMATS_LABEL}."
+        ));
     }
 
     let total = editable_tracks.len();
@@ -7637,7 +7946,7 @@ where
     Ok(AlbumTagUpdateResult {
         outcome: "success".to_owned(),
         summary: format!(
-            "Updated and verified {total} FLAC track{}.",
+            "Updated and verified {total} track{}.",
             if total == 1 { "" } else { "s" }
         ),
         updated_tracks,
@@ -7738,20 +8047,217 @@ fn canonical_path_is_within_root(target: &Path, root: &Path) -> bool {
 
 fn read_tagged_file(path: &Path) -> Result<lofty::file::TaggedFile, String> {
     Probe::open(path)
+        .and_then(|probe| probe.guess_file_type().map_err(Into::into))
         .and_then(|probe| probe.read())
         .map_err(|error| format!("Could not read audio tags: {error}"))
 }
 
-fn tag_editing_supported(tagged_file: &lofty::file::TaggedFile) -> bool {
-    tagged_file
-        .tag_support(tagged_file.primary_tag_type())
-        .is_writable()
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TagWritePlan {
+    FlacVorbis,
+    MpegId3 {
+        use_id3v23: bool,
+    },
+    OggVorbis,
+    OpusVorbis,
+    WavId3 {
+        use_id3v23: bool,
+        uppercase_chunk: bool,
+    },
+    Mp4Ilst,
 }
 
-fn tag_editing_safely_validated_for_path(path: &Path) -> bool {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("flac"))
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TagEditingAssessment {
+    detected_format: String,
+    plan: Option<TagWritePlan>,
+    unsupported_reason: Option<String>,
+}
+
+fn detected_tag_format_label(file_type: FileType) -> &'static str {
+    match file_type {
+        FileType::Flac => "FLAC",
+        FileType::Mpeg => "MP3",
+        FileType::Vorbis => "Ogg/Vorbis",
+        FileType::Opus => "Opus",
+        FileType::Wav => "WAV",
+        FileType::Mp4 => "M4A/AAC",
+        FileType::Aac => "raw AAC/ADTS",
+        _ => "unsupported audio container",
+    }
+}
+
+fn id3_write_plan(
+    version: Id3v2Version,
+    wav: bool,
+    uppercase_chunk: bool,
+) -> Result<TagWritePlan, String> {
+    if version == Id3v2Version::V2 {
+        return Err(
+            "ID3v2.2 is kept read-only because writing it would convert the existing tag version."
+                .to_owned(),
+        );
+    }
+
+    let use_id3v23 = version == Id3v2Version::V3;
+    Ok(if wav {
+        TagWritePlan::WavId3 {
+            use_id3v23,
+            uppercase_chunk,
+        }
+    } else {
+        TagWritePlan::MpegId3 { use_id3v23 }
+    })
+}
+
+fn wav_id3_chunk_is_uppercase(path: &Path) -> Result<bool, String> {
+    let mut file =
+        fs::File::open(path).map_err(|error| format!("Could not inspect WAV chunks: {error}"))?;
+    let length = file
+        .metadata()
+        .map_err(|error| format!("Could not inspect WAV size: {error}"))?
+        .len();
+    let mut header = [0_u8; 12];
+    file.read_exact(&mut header)
+        .map_err(|error| format!("Could not read WAV header: {error}"))?;
+    if &header[..4] != b"RIFF" || &header[8..12] != b"WAVE" {
+        return Err("The file is not a valid RIFF/WAVE container.".to_owned());
+    }
+
+    let mut offset = 12_u64;
+    while offset.checked_add(8).is_some_and(|end| end <= length) {
+        file.seek(SeekFrom::Start(offset))
+            .map_err(|error| format!("Could not seek to WAV chunk: {error}"))?;
+        let mut chunk = [0_u8; 8];
+        file.read_exact(&mut chunk)
+            .map_err(|error| format!("Could not read WAV chunk: {error}"))?;
+        let id = &chunk[..4];
+        let size = u32::from_le_bytes(chunk[4..8].try_into().unwrap()) as u64;
+        if id == b"ID3 " {
+            return Ok(true);
+        }
+        if id == b"id3 " {
+            return Ok(false);
+        }
+        let padded = size + (size & 1);
+        offset = offset
+            .checked_add(8)
+            .and_then(|value| value.checked_add(padded))
+            .ok_or_else(|| {
+                "WAV chunk sizes overflowed while inspecting the tag container.".to_owned()
+            })?;
+        if offset > length {
+            return Err("WAV chunk exceeds the file size.".to_owned());
+        }
+    }
+
+    if offset != length {
+        return Err("Unparsed WAV trailer would make tag editing unsafe.".to_owned());
+    }
+    Ok(true)
+}
+
+fn tag_editing_assessment(
+    path: &Path,
+    tagged_file: &lofty::file::TaggedFile,
+) -> TagEditingAssessment {
+    let file_type = tagged_file.file_type();
+    let detected_format = detected_tag_format_label(file_type).to_owned();
+    let assessment = match file_type {
+        FileType::Flac => Some(Ok(TagWritePlan::FlacVorbis)),
+        FileType::Vorbis => Some(Ok(TagWritePlan::OggVorbis)),
+        FileType::Opus => Some(Ok(TagWritePlan::OpusVorbis)),
+        FileType::Mp4 => Some(Ok(TagWritePlan::Mp4Ilst)),
+        FileType::Mpeg => {
+            if tagged_file.contains_tag_type(TagType::Id3v2) {
+                let result = fs::File::open(path)
+                    .map_err(|error| format!("Could not inspect MP3 tags: {error}"))
+                    .and_then(|mut file| {
+                        MpegFile::read_from(&mut file, ParseOptions::new())
+                            .map_err(|error| format!("Could not inspect MP3 tags: {error}"))
+                    })
+                    .and_then(|file| {
+                        file.id3v2()
+                            .ok_or_else(|| "Could not locate the existing MP3 ID3v2 tag.".to_owned())
+                            .and_then(|tag| id3_write_plan(tag.original_version(), false, true))
+                    });
+                Some(result)
+            } else if tagged_file.contains_tag() {
+                Some(Err(
+                    "This MP3 has only ID3v1/APEv2 metadata. It remains read-only so Cassette does not add or convert a different tag format."
+                        .to_owned(),
+                ))
+            } else {
+                Some(Ok(TagWritePlan::MpegId3 { use_id3v23: false }))
+            }
+        }
+        FileType::Wav => {
+            if tagged_file.contains_tag_type(TagType::Id3v2) {
+                let result = fs::File::open(path)
+                    .map_err(|error| format!("Could not inspect WAV tags: {error}"))
+                    .and_then(|mut file| {
+                        WavFile::read_from(&mut file, ParseOptions::new())
+                            .map_err(|error| format!("Could not inspect WAV tags: {error}"))
+                    })
+                    .and_then(|file| {
+                        let version = file
+                            .id3v2()
+                            .ok_or_else(|| "Could not locate the existing WAV ID3v2 tag.".to_owned())?
+                            .original_version();
+                        let uppercase = wav_id3_chunk_is_uppercase(path)?;
+                        id3_write_plan(version, true, uppercase)
+                    });
+                Some(result)
+            } else if tagged_file.contains_tag_type(TagType::RiffInfo) {
+                Some(Err(
+                    "This WAV uses RIFF INFO metadata without ID3v2. It remains read-only because the shared editor fields cannot be represented without adding a different tag format."
+                        .to_owned(),
+                ))
+            } else {
+                Some(Ok(TagWritePlan::WavId3 {
+                    use_id3v23: false,
+                    uppercase_chunk: true,
+                }))
+            }
+        }
+        FileType::Aac => Some(Err(
+            "Raw AAC/ADTS is not one of Cassette's six library formats; M4A/AAC editing applies to AAC audio in an M4A container."
+                .to_owned(),
+        )),
+        _ => None,
+    };
+
+    match assessment {
+        Some(Ok(plan)) => match fs::metadata(path) {
+            Ok(metadata) if metadata.permissions().readonly() => TagEditingAssessment {
+                detected_format,
+                plan: None,
+                unsupported_reason: Some("This audio file is read-only.".to_owned()),
+            },
+            Ok(_) => TagEditingAssessment {
+                detected_format,
+                plan: Some(plan),
+                unsupported_reason: None,
+            },
+            Err(error) => TagEditingAssessment {
+                detected_format,
+                plan: None,
+                unsupported_reason: Some(format!("Could not inspect file permissions: {error}")),
+            },
+        },
+        Some(Err(reason)) => TagEditingAssessment {
+            detected_format,
+            plan: None,
+            unsupported_reason: Some(reason),
+        },
+        None => TagEditingAssessment {
+            detected_format,
+            plan: None,
+            unsupported_reason: Some(format!(
+                "Tag editing is available only for {SUPPORTED_TAG_FORMATS_LABEL}."
+            )),
+        },
+    }
 }
 
 fn track_tag_values_from_file(tagged_file: &lofty::file::TaggedFile) -> TrackTagValues {
@@ -7831,14 +8337,29 @@ fn genre_override_active_for_values(
             .contains_key(&artist_key_for_track(&raw_track))
 }
 
+#[cfg(test)]
 fn update_track_tags_file(path: &Path, request: &UpdateTrackTagsRequest) -> Result<(), String> {
-    validate_update_track_tags_request(request)?;
+    update_track_tags_file_masked(path, request, TagFieldMask::all())
+}
 
-    if !tag_editing_safely_validated_for_path(path) {
-        return Err(UNVALIDATED_TAG_FORMAT_MESSAGE.to_owned());
+fn update_track_tags_file_masked(
+    path: &Path,
+    request: &UpdateTrackTagsRequest,
+    mask: TagFieldMask,
+) -> Result<(), String> {
+    validate_update_track_tags_request(request)?;
+    if !mask.any() {
+        return Err("Choose at least one tag field to change.".to_owned());
+    }
+    let tagged_file = read_tagged_file(path)?;
+    let assessment = tag_editing_assessment(path, &tagged_file);
+    if assessment.plan.is_none() {
+        return Err(assessment
+            .unsupported_reason
+            .unwrap_or_else(|| "This tag container is not safely writable.".to_owned()));
     }
 
-    safe_update_track_tags_with_hook(path, request, &mut |_| Ok(()))
+    safe_update_track_tags_masked_with_hook(path, request, mask, &mut |_| Ok(()))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -7850,6 +8371,7 @@ enum TagWriteStage {
     BeforeBackupRestore,
 }
 
+#[cfg(test)]
 fn safe_update_track_tags_with_hook<F>(
     path: &Path,
     request: &UpdateTrackTagsRequest,
@@ -7872,6 +8394,9 @@ where
 {
     let original_metadata =
         fs::metadata(path).map_err(|error| format!("Could not read selected track: {error}"))?;
+    let original_fingerprint = file_content_fingerprint(path)?;
+    let original_audio = audio_payload_fingerprint(path)?;
+    let original_unrelated = unrelated_tag_snapshot(path, mask)?;
 
     if original_metadata.permissions().readonly() {
         return Err("Selected track is read-only.".to_owned());
@@ -7905,11 +8430,39 @@ where
         return Err(error);
     }
 
+    let preservation_result = audio_payload_fingerprint(&temp_path)
+        .and_then(|audio| {
+            if audio == original_audio {
+                Ok(())
+            } else {
+                Err("Audio payload changed during tag writing; the original file was preserved.".to_owned())
+            }
+        })
+        .and_then(|()| {
+            if unrelated_tag_snapshot(&temp_path, mask)? == original_unrelated {
+                Ok(())
+            } else {
+                Err("Unselected metadata changed during tag writing; the original file was preserved.".to_owned())
+            }
+        });
+    if let Err(error) = preservation_result {
+        cleanup_file(&temp_path);
+        return Err(error);
+    }
+
     if let Err(error) = hook(TagWriteStage::AfterTemporaryVerification) {
         cleanup_file(&temp_path);
         return Err(format!(
             "Safe replacement stopped after temporary verification: {error}"
         ));
+    }
+
+    if file_content_fingerprint(path)? != original_fingerprint {
+        cleanup_file(&temp_path);
+        return Err(
+            "Selected track changed outside Cassette while the edit was being prepared; no Cassette changes were installed."
+                .to_owned(),
+        );
     }
 
     replace_original_with_verified_temp(path, &temp_path, &backup_path, request, mask, hook)
@@ -7920,11 +8473,177 @@ fn write_tags_to_temp_file(
     request: &UpdateTrackTagsRequest,
     mask: TagFieldMask,
 ) -> Result<(), String> {
-    if !tag_editing_safely_validated_for_path(path) {
-        return Err(UNVALIDATED_TAG_FORMAT_MESSAGE.to_owned());
-    }
+    let tagged_file = read_tagged_file(path)?;
+    let assessment = tag_editing_assessment(path, &tagged_file);
+    let plan = assessment.plan.ok_or_else(|| {
+        assessment
+            .unsupported_reason
+            .unwrap_or_else(|| "This tag container is not safely writable.".to_owned())
+    })?;
 
-    write_tags_to_flac(path, request, mask)
+    match plan {
+        TagWritePlan::FlacVorbis => write_tags_to_flac(path, request, mask),
+        TagWritePlan::MpegId3 { use_id3v23 } => write_tags_to_mpeg(path, request, mask, use_id3v23),
+        TagWritePlan::OggVorbis => write_tags_to_ogg_vorbis(path, request, mask),
+        TagWritePlan::OpusVorbis => write_tags_to_ogg_opus(path, request, mask),
+        TagWritePlan::WavId3 {
+            use_id3v23,
+            uppercase_chunk,
+        } => write_tags_to_wav(path, request, mask, use_id3v23, uppercase_chunk),
+        TagWritePlan::Mp4Ilst => write_tags_to_mp4(path, request, mask),
+    }
+}
+
+fn id3_write_options(use_id3v23: bool) -> WriteOptions {
+    WriteOptions::default()
+        .use_id3v23(use_id3v23)
+        .lossy_text_encoding(false)
+}
+
+fn apply_generic_tag_update_request(
+    tag: &mut Tag,
+    request: &UpdateTrackTagsRequest,
+    mask: TagFieldMask,
+) {
+    if mask.title {
+        set_or_remove_generic_text(tag, ItemKey::TrackTitle, request.title.as_deref());
+    }
+    if mask.artist {
+        set_or_remove_generic_text(tag, ItemKey::TrackArtist, request.artist.as_deref());
+    }
+    if mask.album {
+        set_or_remove_generic_text(tag, ItemKey::AlbumTitle, request.album.as_deref());
+    }
+    if mask.album_artist {
+        set_or_remove_generic_text(tag, ItemKey::AlbumArtist, request.album_artist.as_deref());
+        tag.remove_key(ItemKey::AlbumArtists);
+    }
+    if mask.genre {
+        set_or_remove_generic_text(tag, ItemKey::Genre, request.genre.as_deref());
+    }
+    if mask.year {
+        if let Some(year) = request.year {
+            let mut timestamp = tag.date().unwrap_or_default();
+            timestamp.year = year;
+            tag.set_date(timestamp);
+        } else {
+            tag.remove_date();
+        }
+    }
+    if mask.track_number {
+        if let Some(track_number) = request.track_number {
+            tag.set_track(track_number);
+        } else {
+            tag.remove_track();
+        }
+    }
+    if mask.disc_number {
+        if let Some(disc_number) = request.disc_number {
+            tag.set_disk(disc_number);
+        } else {
+            tag.remove_disk();
+        }
+    }
+}
+
+fn set_or_remove_generic_text(tag: &mut Tag, key: ItemKey, value: Option<&str>) {
+    if let Some(value) = normalized_request_text(value) {
+        tag.insert_text(key, value);
+    } else {
+        tag.remove_key(key);
+    }
+}
+
+fn write_tags_to_mpeg(
+    path: &Path,
+    request: &UpdateTrackTagsRequest,
+    mask: TagFieldMask,
+    use_id3v23: bool,
+) -> Result<(), String> {
+    let mut input = fs::File::open(path)
+        .map_err(|error| format!("Could not open MP3 for tag editing: {error}"))?;
+    let mut file = MpegFile::read_from(&mut input, ParseOptions::new())
+        .map_err(|error| format!("Could not read MP3 tags: {error}"))?;
+    drop(input);
+    let id3 = file.id3v2_mut().map(std::mem::take).unwrap_or_default();
+    let (remainder, mut tag) = id3.split_tag();
+    apply_generic_tag_update_request(&mut tag, request, mask);
+    let id3: Id3v2Tag = remainder.merge_tag(tag);
+    id3.save_to_path(path, id3_write_options(use_id3v23))
+        .map_err(|error| format!("Could not write MP3 ID3v2 tags: {error}"))
+}
+
+fn write_tags_to_ogg_vorbis(
+    path: &Path,
+    request: &UpdateTrackTagsRequest,
+    mask: TagFieldMask,
+) -> Result<(), String> {
+    let mut input = fs::File::open(path)
+        .map_err(|error| format!("Could not open Ogg/Vorbis for tag editing: {error}"))?;
+    let mut file = VorbisFile::read_from(&mut input, ParseOptions::new())
+        .map_err(|error| format!("Could not read Ogg/Vorbis tags: {error}"))?;
+    drop(input);
+    let tag = file.vorbis_comments_mut();
+    apply_vorbis_tag_update_request(tag, request, mask);
+    tag.save_to_path(path, WriteOptions::default())
+        .map_err(|error| format!("Could not write Ogg/Vorbis tags: {error}"))
+}
+
+fn write_tags_to_ogg_opus(
+    path: &Path,
+    request: &UpdateTrackTagsRequest,
+    mask: TagFieldMask,
+) -> Result<(), String> {
+    let mut input = fs::File::open(path)
+        .map_err(|error| format!("Could not open Opus for tag editing: {error}"))?;
+    let mut file = OpusFile::read_from(&mut input, ParseOptions::new())
+        .map_err(|error| format!("Could not read Opus tags: {error}"))?;
+    drop(input);
+    let tag = file.vorbis_comments_mut();
+    apply_vorbis_tag_update_request(tag, request, mask);
+    tag.save_to_path(path, WriteOptions::default())
+        .map_err(|error| format!("Could not write Opus tags: {error}"))
+}
+
+fn write_tags_to_wav(
+    path: &Path,
+    request: &UpdateTrackTagsRequest,
+    mask: TagFieldMask,
+    use_id3v23: bool,
+    uppercase_chunk: bool,
+) -> Result<(), String> {
+    let mut input = fs::File::open(path)
+        .map_err(|error| format!("Could not open WAV for tag editing: {error}"))?;
+    let mut file = WavFile::read_from(&mut input, ParseOptions::new())
+        .map_err(|error| format!("Could not read WAV tags: {error}"))?;
+    drop(input);
+    let id3 = file.id3v2_mut().map(std::mem::take).unwrap_or_default();
+    let (remainder, mut tag) = id3.split_tag();
+    apply_generic_tag_update_request(&mut tag, request, mask);
+    let id3: Id3v2Tag = remainder.merge_tag(tag);
+    id3.save_to_path(
+        path,
+        id3_write_options(use_id3v23).uppercase_id3v2_chunk(uppercase_chunk),
+    )
+    .map_err(|error| format!("Could not write WAV ID3v2 tags: {error}"))
+}
+
+fn write_tags_to_mp4(
+    path: &Path,
+    request: &UpdateTrackTagsRequest,
+    mask: TagFieldMask,
+) -> Result<(), String> {
+    let mut input = fs::File::open(path)
+        .map_err(|error| format!("Could not open M4A for tag editing: {error}"))?;
+    let mut file = Mp4File::read_from(&mut input, ParseOptions::new())
+        .map_err(|error| format!("Could not read M4A tags: {error}"))?;
+    drop(input);
+    let ilst = file.ilst_mut().map(std::mem::take).unwrap_or_default();
+    let (remainder, mut tag) = ilst.split_tag();
+    apply_generic_tag_update_request(&mut tag, request, mask);
+    let ilst: Ilst = remainder.merge_tag(tag);
+    ilst.save_to_path(path, WriteOptions::default())
+        .map_err(|error| format!("Could not write M4A tags: {error}"))
 }
 
 fn write_tags_to_flac(
@@ -8991,7 +9710,7 @@ fn system_time_to_unix(time: SystemTime) -> Option<i64> {
 }
 
 fn read_track_metadata(path: &Path) -> TrackMetadata {
-    let tagged_file = match Probe::open(path).and_then(|probe| probe.read()) {
+    let tagged_file = match read_tagged_file(path) {
         Ok(tagged_file) => tagged_file,
         Err(_) => return TrackMetadata::default(),
     };
@@ -9436,12 +10155,22 @@ mod play_history_tests {
 #[cfg(test)]
 mod tag_editor_tests {
     use super::*;
+    use lofty::id3::v2::{BinaryFrame, Frame, FrameId};
+    use lofty::mp4::{Atom, AtomData, AtomIdent};
     use lofty::ogg::OggPictureStorage;
     use lofty::picture::PictureInformation;
+    use std::borrow::Cow;
     use std::sync::{mpsc, Arc};
     use std::thread;
 
     const REAL_FLAC_ENV: &str = "CASSETTE_TAG_TEST_FLAC";
+    const TEST_PNG: &[u8] = &[
+        0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, b'I', b'H', b'D',
+        b'R', 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f,
+        0x15, 0xc4, 0x89, 0x00, 0x00, 0x00, 0x0d, b'I', b'D', b'A', b'T', 0x08, 0xd7, 0x63, 0xf8,
+        0xcf, 0xc0, 0xf0, 0x1f, 0x00, 0x05, 0x00, 0x01, 0xff, 0x89, 0x99, 0x3d, 0x1d, 0x00, 0x00,
+        0x00, 0x00, b'I', b'E', b'N', b'D', 0xae, 0x42, 0x60, 0x82,
+    ];
 
     struct TestAudioFile {
         directory: PathBuf,
@@ -9622,14 +10351,6 @@ mod tag_editor_tests {
     }
 
     fn add_preservation_metadata(path: &Path) {
-        const TEST_PNG: &[u8] = &[
-            0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, b'I', b'H',
-            b'D', b'R', 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
-            0x00, 0x1f, 0x15, 0xc4, 0x89, 0x00, 0x00, 0x00, 0x0d, b'I', b'D', b'A', b'T', 0x08,
-            0xd7, 0x63, 0xf8, 0xcf, 0xc0, 0xf0, 0x1f, 0x00, 0x05, 0x00, 0x01, 0xff, 0x89, 0x99,
-            0x3d, 0x1d, 0x00, 0x00, 0x00, 0x00, b'I', b'E', b'N', b'D', 0xae, 0x42, 0x60, 0x82,
-        ];
-
         let mut input = fs::File::open(path).expect("read FLAC to add preservation tags");
         let mut flac = FlacFile::read_from(&mut input, ParseOptions::new())
             .expect("read format-specific FLAC metadata");
@@ -9704,14 +10425,7 @@ mod tag_editor_tests {
     }
 
     #[test]
-    fn only_flac_is_enabled_and_other_formats_are_rejected_before_writing() {
-        assert!(tag_editing_safely_validated_for_path(Path::new(
-            "track.flac"
-        )));
-        assert!(tag_editing_safely_validated_for_path(Path::new(
-            "track.FLAC"
-        )));
-
+    fn invalid_audio_is_rejected_without_writing_regardless_of_extension() {
         let directory = std::env::temp_dir().join(format!(
             "Cassette Tag Format Gate Test-{}-{}",
             std::process::id(),
@@ -9730,15 +10444,11 @@ mod tag_editor_tests {
             disc_number: None,
         };
 
-        for extension in ["mp3", "ogg", "opus", "wav", "m4a"] {
+        for extension in ["flac", "mp3", "ogg", "opus", "wav", "m4a"] {
             let path = directory.join(format!("track.{extension}"));
             let original = format!("not parsed or modified: {extension}").into_bytes();
             fs::write(&path, &original).expect("create format-gate sentinel file");
-            assert!(!tag_editing_safely_validated_for_path(&path));
-            assert_eq!(
-                update_track_tags_file(&path, &request).expect_err("format must be rejected"),
-                UNVALIDATED_TAG_FORMAT_MESSAGE,
-            );
+            assert!(update_track_tags_file(&path, &request).is_err());
             assert_eq!(fs::read(&path).expect("read rejected sentinel"), original);
         }
 
@@ -10110,7 +10820,7 @@ mod tag_editor_tests {
 
     #[test]
     #[ignore = "requires CASSETTE_TAG_TEST_FLAC pointing to a disposable real FLAC copy"]
-    fn unvalidated_formats_are_rejected_without_modification() {
+    fn actual_flac_content_is_used_when_extension_is_misleading() {
         let test_file = TestAudioFile::new("unsupported");
         let mut request = request_for(&test_file.path);
         request.title = Some("must not be written".to_owned());
@@ -10122,12 +10832,10 @@ mod tag_editor_tests {
             fs::copy(&test_file.path, &unsupported_path)
                 .expect("create unvalidated disposable copy");
             let original = fs::read(&unsupported_path).expect("read unvalidated baseline");
-            let error = update_track_tags_file(&unsupported_path, &request)
-                .expect_err("unvalidated format must fail");
-
-            assert_eq!(error, UNVALIDATED_TAG_FORMAT_MESSAGE);
-            assert_eq!(
-                fs::read(&unsupported_path).expect("read rejected file"),
+            update_track_tags_file(&unsupported_path, &request)
+                .expect("actual FLAC content remains writable");
+            assert_ne!(
+                fs::read(&unsupported_path).expect("read updated file"),
                 original
             );
         }
@@ -10207,6 +10915,734 @@ mod tag_editor_tests {
 
     const SYNTHETIC_FLAC_BASE64: &str = "ZkxhQwAAACICQAJAAACTAACTAfQA8AAAAZCbGfA0kXS+fHG2JaA4ABUGhAAALg0AAABMYXZmNjIuMTIuMTAyAQAAABUAAABlbmNvZGVyPUxhdmY2Mi4xMi4xMDL/+HQIAAGPJEIAAAVr5rw0wAQAEMDh7cLIGEyZSywkJIZO9MkkkhQupZhhMmbeSYEkOaRJSSEhJQmJZzDCYS3TkhJIZ/oUJIQwmUs5kJCSeR0mQwOHtwsgYTJlLLCQkhk70ySSSFC6lmGEyZt5JgSQ5pElJISElCYlnMMJhLdOSEkhn+hQkhDCZSzmQkJJ5HSAo/4=";
 
+    fn synthetic_format_bytes(extension: &str) -> Vec<u8> {
+        use base64::Engine;
+        let encoded = match extension {
+            "flac" => SYNTHETIC_FLAC_BASE64,
+            "mp3" => include_str!("../test-fixtures/tag-edit-tone.mp3.base64"),
+            "ogg" => include_str!("../test-fixtures/tag-edit-tone.ogg.base64"),
+            "opus" => include_str!("../test-fixtures/tag-edit-tone.opus.base64"),
+            "m4a" => include_str!("../test-fixtures/tag-edit-tone.m4a.base64"),
+            _ => panic!("unknown embedded audio format"),
+        };
+        base64::engine::general_purpose::STANDARD
+            .decode(encoded.trim())
+            .expect("decode embedded synthetic audio")
+    }
+
+    fn synthetic_pcm_wav() -> Vec<u8> {
+        let pcm = vec![0_u8; 1600];
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + pcm.len() as u32).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16_u32.to_le_bytes());
+        wav.extend_from_slice(&1_u16.to_le_bytes());
+        wav.extend_from_slice(&1_u16.to_le_bytes());
+        wav.extend_from_slice(&8000_u32.to_le_bytes());
+        wav.extend_from_slice(&16000_u32.to_le_bytes());
+        wav.extend_from_slice(&2_u16.to_le_bytes());
+        wav.extend_from_slice(&16_u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&(pcm.len() as u32).to_le_bytes());
+        wav.extend_from_slice(&pcm);
+        wav
+    }
+
+    #[test]
+    fn synthetic_six_format_tag_writes_round_trip_unicode_and_clear() {
+        let directory = std::env::temp_dir().join(format!(
+            "Cassette Six Format Tag Test-{}-{}",
+            std::process::id(),
+            unique_timestamp_nanos(),
+        ));
+        fs::create_dir(&directory).expect("create synthetic test directory");
+        for extension in ["flac", "mp3", "ogg", "opus", "wav", "m4a"] {
+            let path = directory.join(format!("track.{extension}"));
+            let bytes = if extension == "wav" {
+                synthetic_pcm_wav()
+            } else {
+                synthetic_format_bytes(extension)
+            };
+            fs::write(&path, bytes).expect("write synthetic audio");
+            let actual_type = read_tagged_file(&path).expect("read fixture").file_type();
+            assert_eq!(
+                detected_tag_format_label(actual_type)
+                    .to_lowercase()
+                    .contains(extension),
+                true,
+                "{extension}"
+            );
+            let request = UpdateTrackTagsRequest {
+                track_id: path.to_string_lossy().into_owned(),
+                title: Some("Café — 東京".to_owned()),
+                artist: Some("Artist Original".to_owned()),
+                album: Some("Synthetic Album".to_owned()),
+                album_artist: Some("Ensemble".to_owned()),
+                genre: Some("Ambient".to_owned()),
+                year: Some(2026),
+                track_number: Some(2),
+                disc_number: Some(1),
+            };
+            update_track_tags_file(&path, &request)
+                .unwrap_or_else(|error| panic!("{extension}: {error}"));
+            let seeded =
+                track_tag_values_from_file(&read_tagged_file(&path).expect("read Unicode tags"));
+            assert_eq!(seeded.title.as_deref(), Some("Café — 東京"), "{extension}");
+
+            let mut preservation_tag = read_tagged_file(&path)
+                .expect("read synthetic tags")
+                .primary_tag()
+                .cloned()
+                .expect("primary tag after seeding");
+            preservation_tag.insert_text(ItemKey::Composer, "Preserved composer".to_owned());
+            preservation_tag.insert_text(ItemKey::Lyrics, "Do not remove lyrics".to_owned());
+            preservation_tag.insert_text(ItemKey::ReplayGainTrackGain, "-6.0 dB".to_owned());
+            preservation_tag.set_track_total(12);
+            preservation_tag.set_disk_total(2);
+            preservation_tag.push_picture(
+                Picture::unchecked(TEST_PNG.to_vec())
+                    .pic_type(PictureType::CoverFront)
+                    .mime_type(MimeType::Png)
+                    .build(),
+            );
+            preservation_tag
+                .save_to_path(&path, WriteOptions::default())
+                .unwrap_or_else(|error| panic!("{extension} preservation seed: {error}"));
+            if extension == "ogg" || extension == "opus" {
+                let mut input = fs::File::open(&path).expect("open Ogg custom tag fixture");
+                let comments = if extension == "ogg" {
+                    VorbisFile::read_from(&mut input, ParseOptions::new())
+                        .expect("read Vorbis fixture")
+                        .vorbis_comments()
+                        .clone()
+                } else {
+                    OpusFile::read_from(&mut input, ParseOptions::new())
+                        .expect("read Opus fixture")
+                        .vorbis_comments()
+                        .clone()
+                };
+                let mut comments = comments;
+                comments.insert(
+                    "CASSETTE_CUSTOM".to_owned(),
+                    "preserve this value".to_owned(),
+                );
+                comments
+                    .save_to_path(&path, WriteOptions::default())
+                    .expect("seed Ogg custom metadata");
+            }
+
+            let preservation_mask = TagFieldMask {
+                title: true,
+                genre: true,
+                ..TagFieldMask::default()
+            };
+            let audio_before = audio_payload_fingerprint(&path).expect("hash original audio");
+            let unrelated_before = unrelated_tag_snapshot(&path, preservation_mask)
+                .expect("snapshot original unrelated tags");
+            let mut changed = request.clone();
+            changed.title = Some("Changed title".to_owned());
+            changed.genre = None;
+            update_track_tags_file_masked(&path, &changed, preservation_mask)
+                .unwrap_or_else(|error| panic!("{extension} masked write: {error}"));
+            assert_eq!(
+                audio_payload_fingerprint(&path).expect("hash edited audio"),
+                audio_before
+            );
+            assert_eq!(
+                unrelated_tag_snapshot(&path, preservation_mask).expect("read unrelated tags"),
+                unrelated_before,
+                "{extension}",
+            );
+            let values =
+                track_tag_values_from_file(&read_tagged_file(&path).expect("read edited tags"));
+            assert_eq!(
+                values.title.as_deref(),
+                Some("Changed title"),
+                "{extension}"
+            );
+            assert_eq!(
+                values.artist.as_deref(),
+                Some("Artist Original"),
+                "{extension}"
+            );
+            assert_eq!(
+                values.album.as_deref(),
+                Some("Synthetic Album"),
+                "{extension}"
+            );
+            assert_eq!(values.genre, None, "{extension}");
+            assert_eq!(values.track_number, Some(2), "{extension}");
+            if extension == "ogg" || extension == "opus" {
+                let mut input = fs::File::open(&path).expect("reopen Ogg custom fixture");
+                let custom = if extension == "ogg" {
+                    VorbisFile::read_from(&mut input, ParseOptions::new())
+                        .expect("read edited Vorbis")
+                        .vorbis_comments()
+                        .get("CASSETTE_CUSTOM")
+                        .map(str::to_owned)
+                } else {
+                    OpusFile::read_from(&mut input, ParseOptions::new())
+                        .expect("read edited Opus")
+                        .vorbis_comments()
+                        .get("CASSETTE_CUSTOM")
+                        .map(str::to_owned)
+                };
+                assert_eq!(custom.as_deref(), Some("preserve this value"));
+            }
+        }
+        fs::remove_dir_all(directory).expect("remove synthetic test directory");
+    }
+
+    #[test]
+    fn editor_uses_container_content_when_extension_is_misleading() {
+        let directory = std::env::temp_dir().join(format!(
+            "Cassette Actual Container Test-{}-{}",
+            std::process::id(),
+            unique_timestamp_nanos(),
+        ));
+        fs::create_dir(&directory).expect("create content test directory");
+        let path = directory.join("synthetic.mp3");
+        fs::write(&path, synthetic_format_bytes("flac")).expect("write FLAC under MP3 extension");
+        let tagged_file = read_tagged_file(&path).expect("inspect actual container");
+        assert_eq!(tagged_file.file_type(), FileType::Flac);
+        assert_eq!(
+            tag_editing_assessment(&path, &tagged_file).plan,
+            Some(TagWritePlan::FlacVorbis)
+        );
+        fs::remove_dir_all(directory).expect("remove content test directory");
+    }
+
+    #[test]
+    fn id3_v23_and_wav_chunk_case_survive_edits() {
+        let directory = std::env::temp_dir().join(format!(
+            "Cassette ID3 Layout Test-{}-{}",
+            std::process::id(),
+            unique_timestamp_nanos(),
+        ));
+        fs::create_dir(&directory).expect("create ID3 test directory");
+        for extension in ["mp3", "wav"] {
+            let path = directory.join(format!("track.{extension}"));
+            fs::write(
+                &path,
+                if extension == "wav" {
+                    synthetic_pcm_wav()
+                } else {
+                    synthetic_format_bytes("mp3")
+                },
+            )
+            .expect("write ID3 test audio");
+            let request = UpdateTrackTagsRequest {
+                track_id: path.to_string_lossy().into_owned(),
+                title: Some("Original".to_owned()),
+                artist: Some("Artist".to_owned()),
+                album: None,
+                album_artist: None,
+                genre: None,
+                year: None,
+                track_number: None,
+                disc_number: None,
+            };
+            update_track_tags_file(&path, &request).expect("seed ID3 tag");
+            let mut id3 = if extension == "mp3" {
+                let mut input = fs::File::open(&path).expect("open MP3");
+                MpegFile::read_from(&mut input, ParseOptions::new())
+                    .expect("read MP3")
+                    .id3v2()
+                    .cloned()
+                    .expect("MP3 ID3 tag")
+            } else {
+                let mut input = fs::File::open(&path).expect("open WAV");
+                WavFile::read_from(&mut input, ParseOptions::new())
+                    .expect("read WAV")
+                    .id3v2()
+                    .cloned()
+                    .expect("WAV ID3 tag")
+            };
+            let custom_frame_id = FrameId::Valid(Cow::Borrowed("XZZZ"));
+            id3.insert(Frame::Binary(BinaryFrame::new(
+                custom_frame_id.clone(),
+                vec![0, 1, 2, 255, 42],
+            )));
+            id3.save_to_path(&path, id3_write_options(true).uppercase_id3v2_chunk(false))
+                .expect("write version 2.3 tag");
+            let baseline_audio = audio_payload_fingerprint(&path).expect("baseline audio");
+            let plan =
+                tag_editing_assessment(&path, &read_tagged_file(&path).expect("read layout"))
+                    .plan
+                    .expect("editable ID3 layout");
+            if extension == "mp3" {
+                assert_eq!(plan, TagWritePlan::MpegId3 { use_id3v23: true });
+            } else {
+                assert_eq!(
+                    plan,
+                    TagWritePlan::WavId3 {
+                        use_id3v23: true,
+                        uppercase_chunk: false
+                    }
+                );
+            }
+            let mut updated = request.clone();
+            updated.title = Some("Changed".to_owned());
+            update_track_tags_file_masked(
+                &path,
+                &updated,
+                TagFieldMask {
+                    title: true,
+                    ..TagFieldMask::default()
+                },
+            )
+            .expect("edit version 2.3 tag");
+            assert_eq!(
+                tag_editing_assessment(
+                    &path,
+                    &read_tagged_file(&path).expect("read edited layout")
+                )
+                .plan,
+                Some(plan)
+            );
+            assert_eq!(
+                audio_payload_fingerprint(&path).expect("updated audio"),
+                baseline_audio
+            );
+            let reopened_id3 = if extension == "mp3" {
+                MpegFile::read_from(
+                    &mut fs::File::open(&path).expect("reopen MP3"),
+                    ParseOptions::new(),
+                )
+                .expect("read edited MP3")
+                .id3v2()
+                .cloned()
+                .expect("edited MP3 ID3")
+            } else {
+                WavFile::read_from(
+                    &mut fs::File::open(&path).expect("reopen WAV"),
+                    ParseOptions::new(),
+                )
+                .expect("read edited WAV")
+                .id3v2()
+                .cloned()
+                .expect("edited WAV ID3")
+            };
+            assert_eq!(
+                reopened_id3.get(&custom_frame_id),
+                id3.get(&custom_frame_id)
+            );
+        }
+        fs::remove_dir_all(directory).expect("remove ID3 test directory");
+    }
+
+    #[test]
+    fn wav_unrelated_riff_chunk_is_preserved() {
+        let directory = std::env::temp_dir().join(format!(
+            "Cassette WAV Chunk Test-{}-{}",
+            std::process::id(),
+            unique_timestamp_nanos(),
+        ));
+        fs::create_dir(&directory).expect("create WAV chunk directory");
+        let path = directory.join("with-custom-chunk.wav");
+        let mut bytes = synthetic_pcm_wav();
+        bytes.extend_from_slice(b"JUNK");
+        bytes.extend_from_slice(&4_u32.to_le_bytes());
+        bytes.extend_from_slice(b"keep");
+        let riff_size = (bytes.len() - 8) as u32;
+        bytes[4..8].copy_from_slice(&riff_size.to_le_bytes());
+        fs::write(&path, &bytes).expect("write custom WAV chunk");
+        let original_audio = audio_payload_fingerprint(&path).expect("hash WAV chunks");
+        let request = UpdateTrackTagsRequest {
+            track_id: path.to_string_lossy().into_owned(),
+            title: Some("Edited WAV".to_owned()),
+            artist: None,
+            album: None,
+            album_artist: None,
+            genre: None,
+            year: None,
+            track_number: None,
+            disc_number: None,
+        };
+        update_track_tags_file_masked(
+            &path,
+            &request,
+            TagFieldMask {
+                title: true,
+                ..TagFieldMask::default()
+            },
+        )
+        .expect("edit WAV with custom chunk");
+        assert_eq!(
+            audio_payload_fingerprint(&path).expect("hash preserved chunks"),
+            original_audio
+        );
+        assert!(fs::read(&path)
+            .expect("read WAV bytes")
+            .windows(12)
+            .any(|chunk| chunk == b"JUNK\x04\0\0\0keep"));
+        fs::remove_dir_all(directory).expect("remove WAV chunk directory");
+    }
+
+    #[test]
+    fn m4a_freeform_atom_survives_shared_field_edit() {
+        let directory = std::env::temp_dir().join(format!(
+            "Cassette M4A Custom Atom Test-{}-{}",
+            std::process::id(),
+            unique_timestamp_nanos(),
+        ));
+        fs::create_dir(&directory).expect("create M4A atom directory");
+        let path = directory.join("custom.m4a");
+        fs::write(&path, synthetic_format_bytes("m4a")).expect("write synthetic M4A");
+        let mut file = Mp4File::read_from(
+            &mut fs::File::open(&path).expect("open M4A"),
+            ParseOptions::new(),
+        )
+        .expect("read M4A");
+        let atom_id = AtomIdent::Freeform {
+            mean: Cow::Borrowed("com.cassette.synthetic"),
+            name: Cow::Borrowed("KEEP_THIS"),
+        };
+        let ilst = file.ilst_mut().expect("existing M4A item list");
+        ilst.insert(Atom::new(
+            atom_id.clone(),
+            AtomData::UTF8("opaque custom value".to_owned()),
+        ));
+        ilst.save_to_path(&path, WriteOptions::default())
+            .expect("seed freeform atom");
+        let original_audio = audio_payload_fingerprint(&path).expect("hash original M4A audio");
+        let request = UpdateTrackTagsRequest {
+            track_id: path.to_string_lossy().into_owned(),
+            title: Some("Edited M4A".to_owned()),
+            artist: None,
+            album: None,
+            album_artist: None,
+            genre: None,
+            year: None,
+            track_number: None,
+            disc_number: None,
+        };
+        update_track_tags_file_masked(
+            &path,
+            &request,
+            TagFieldMask {
+                title: true,
+                ..TagFieldMask::default()
+            },
+        )
+        .expect("edit M4A title");
+        let edited = Mp4File::read_from(
+            &mut fs::File::open(&path).expect("reopen M4A"),
+            ParseOptions::new(),
+        )
+        .expect("read edited M4A");
+        assert_eq!(
+            edited.ilst().expect("edited item list").get(&atom_id),
+            file.ilst().expect("seeded item list").get(&atom_id)
+        );
+        assert_eq!(
+            audio_payload_fingerprint(&path).expect("hash edited M4A audio"),
+            original_audio
+        );
+        fs::remove_dir_all(directory).expect("remove M4A atom directory");
+    }
+
+    #[test]
+    fn mp3_with_only_id3v1_remains_read_only() {
+        let directory = std::env::temp_dir().join(format!(
+            "Cassette Legacy MP3 Test-{}-{}",
+            std::process::id(),
+            unique_timestamp_nanos(),
+        ));
+        fs::create_dir(&directory).expect("create legacy MP3 directory");
+        let path = directory.join("legacy.mp3");
+        let source = synthetic_format_bytes("mp3");
+        assert_eq!(&source[..3], b"ID3");
+        let tag_size = source[6..10]
+            .iter()
+            .fold(0_usize, |size, byte| (size << 7) | (*byte as usize));
+        let mut bytes = source[10 + tag_size..].to_vec();
+        let mut id3v1 = [0_u8; 128];
+        id3v1[..3].copy_from_slice(b"TAG");
+        id3v1[3..9].copy_from_slice(b"Legacy");
+        bytes.extend_from_slice(&id3v1);
+        fs::write(&path, &bytes).expect("write ID3v1-only MP3");
+        let assessment = tag_editing_assessment(
+            &path,
+            &read_tagged_file(&path).expect("read ID3v1-only file"),
+        );
+        assert!(assessment.plan.is_none());
+        assert!(assessment
+            .unsupported_reason
+            .unwrap()
+            .contains("ID3v1/APEv2"));
+        assert_eq!(fs::read(&path).expect("read original MP3"), bytes);
+        fs::remove_dir_all(directory).expect("remove legacy MP3 directory");
+    }
+
+    #[test]
+    fn external_change_during_individual_edit_is_not_overwritten() {
+        let directory = std::env::temp_dir().join(format!(
+            "Cassette External Tag Change Test-{}-{}",
+            std::process::id(),
+            unique_timestamp_nanos(),
+        ));
+        fs::create_dir(&directory).expect("create external change directory");
+        let path = directory.join("track.mp3");
+        fs::write(&path, synthetic_format_bytes("mp3")).expect("write synthetic MP3");
+        let request = UpdateTrackTagsRequest {
+            track_id: path.to_string_lossy().into_owned(),
+            title: Some("Cassette edit".to_owned()),
+            artist: None,
+            album: None,
+            album_artist: None,
+            genre: None,
+            year: None,
+            track_number: None,
+            disc_number: None,
+        };
+        let mut externally_changed = Vec::new();
+        let error = safe_update_track_tags_masked_with_hook(
+            &path,
+            &request,
+            TagFieldMask {
+                title: true,
+                ..TagFieldMask::default()
+            },
+            &mut |stage| {
+                if stage == TagWriteStage::AfterTemporaryVerification {
+                    let mut bytes = fs::read(&path).expect("read file before external change");
+                    bytes.extend_from_slice(b"external change");
+                    fs::write(&path, &bytes).expect("simulate external modification");
+                    externally_changed = bytes;
+                }
+                Ok(())
+            },
+        )
+        .expect_err("external change must prevent replacement");
+        assert!(error.contains("changed outside Cassette"));
+        assert_eq!(
+            fs::read(&path).expect("read externally changed file"),
+            externally_changed
+        );
+        assert!(fs::read_dir(&directory)
+            .expect("list test directory")
+            .filter_map(Result::ok)
+            .all(|entry| !entry.file_name().to_string_lossy().contains(".cassette-")));
+        fs::remove_dir_all(directory).expect("remove external change directory");
+    }
+
+    struct SyntheticSixFormatAlbumFixture {
+        directory: PathBuf,
+        paths: Vec<PathBuf>,
+        library: Mutex<LibraryDatabase>,
+        writes: Mutex<TagWriteState>,
+        album_id: String,
+    }
+
+    impl SyntheticSixFormatAlbumFixture {
+        fn new() -> Self {
+            let directory = std::env::temp_dir().join(format!(
+                "Cassette Mixed Format Album Test-{}-{}",
+                std::process::id(),
+                unique_timestamp_nanos(),
+            ));
+            fs::create_dir(&directory).expect("create mixed album directory");
+            let mut paths = Vec::new();
+            for (index, extension) in ["flac", "mp3", "ogg", "opus", "wav", "m4a"]
+                .into_iter()
+                .enumerate()
+            {
+                let path = directory.join(format!("track-{:02}.{extension}", index + 1));
+                let bytes = if extension == "wav" {
+                    synthetic_pcm_wav()
+                } else {
+                    synthetic_format_bytes(extension)
+                };
+                fs::write(&path, bytes).expect("write mixed album track");
+                update_track_tags_file(
+                    &path,
+                    &UpdateTrackTagsRequest {
+                        track_id: path.to_string_lossy().into_owned(),
+                        title: Some(format!("Format Track {}", index + 1)),
+                        artist: Some(format!("Artist {}", index + 1)),
+                        album: Some("Six Format Album".to_owned()),
+                        album_artist: Some("Six Format Ensemble".to_owned()),
+                        genre: Some("Original Genre".to_owned()),
+                        year: Some(2026),
+                        track_number: Some((index + 1) as u32),
+                        disc_number: Some(1),
+                    },
+                )
+                .unwrap_or_else(|error| panic!("seed {extension}: {error}"));
+                paths.push(path);
+            }
+            let mut library = LibraryDatabase::open(directory.join("library.sqlite3"))
+                .expect("open mixed album database");
+            let scanned_at = unix_timestamp();
+            let mut tracks = scan_audio_directory_root(&directory, scanned_at, None)
+                .expect("scan mixed album library");
+            assert_eq!(tracks.len(), 6);
+            library
+                .replace_library(&directory, &mut tracks, scanned_at)
+                .expect("cache mixed album");
+            let album_id = album_key_for_track(&tracks[0]);
+            assert!(tracks
+                .iter()
+                .all(|track| album_key_for_track(track) == album_id));
+            Self {
+                directory,
+                paths,
+                library: Mutex::new(library),
+                writes: Mutex::new(TagWriteState::default()),
+                album_id,
+            }
+        }
+
+        fn request(&self) -> UpdateAlbumTagsRequest {
+            UpdateAlbumTagsRequest {
+                album_id: self.album_id.clone(),
+                album: TagFieldUpdate::Set("Edited Mixed Album".to_owned()),
+                album_artist: TagFieldUpdate::Unchanged,
+                artist: TagFieldUpdate::Unchanged,
+                genre: TagFieldUpdate::Clear,
+                year: TagFieldUpdate::Unchanged,
+            }
+        }
+
+        fn run<F>(&self, hook: &mut F) -> Result<AlbumTagUpdateResult, String>
+        where
+            F: FnMut(AlbumBatchStage) -> Result<(), String>,
+        {
+            update_album_tags_batch_with_hook(
+                &self.request(),
+                &self.library,
+                &self.writes,
+                None,
+                hook,
+                &mut |_, _, _, _| {},
+            )
+        }
+    }
+
+    impl Drop for SyntheticSixFormatAlbumFixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.directory);
+        }
+    }
+
+    #[test]
+    fn mixed_six_format_album_updates_preserve_per_track_artists_and_history() {
+        let fixture = SyntheticSixFormatAlbumFixture::new();
+        let before_audio = fixture
+            .paths
+            .iter()
+            .map(|path| audio_payload_fingerprint(path).expect("hash original audio"))
+            .collect::<Vec<_>>();
+        let first_track_id = {
+            let mut library = fixture.library.lock().expect("lock mixed album library");
+            let tracks = cached_album_tracks(&library, &fixture.album_id).expect("album tracks");
+            let first_track_id = tracks[0].id.clone();
+            assert!(library
+                .toggle_favorite(&first_track_id)
+                .expect("favorite track"));
+            library
+                .record_play(&first_track_id, "mixed-format-play-1")
+                .expect("record play");
+            let playlist = library
+                .create_playlist("Mixed Format Playlist")
+                .expect("create playlist");
+            library
+                .add_track_to_playlist(&playlist.id, &first_track_id)
+                .expect("add playlist track");
+            first_track_id
+        };
+        let result = fixture
+            .run(&mut |_| Ok(()))
+            .expect("update mixed format album");
+        assert_eq!(result.outcome, "success");
+        assert_eq!(result.updated_tracks.len(), 6);
+        for (index, path) in fixture.paths.iter().enumerate() {
+            let values =
+                track_tag_values_from_file(&read_tagged_file(path).expect("read updated file"));
+            assert_eq!(values.album.as_deref(), Some("Edited Mixed Album"));
+            assert_eq!(values.genre, None);
+            assert_eq!(
+                values.artist.as_deref(),
+                Some(format!("Artist {}", index + 1).as_str())
+            );
+            assert_eq!(
+                audio_payload_fingerprint(path).expect("hash updated audio"),
+                before_audio[index]
+            );
+        }
+        let library = fixture.library.lock().expect("reopen mixed album library");
+        let track = library
+            .track_by_id(&first_track_id)
+            .expect("look up track")
+            .expect("track still exists");
+        assert!(track.is_favorite);
+        assert_eq!(track.play_count, 1);
+        assert_eq!(
+            library
+                .playlist_track_ids(&library.playlists().expect("playlists")[0].id)
+                .expect("playlist tracks")
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn mixed_six_format_album_failure_restores_all_original_files() {
+        let fixture = SyntheticSixFormatAlbumFixture::new();
+        let originals = fixture
+            .paths
+            .iter()
+            .map(|path| fs::read(path).expect("original bytes"))
+            .collect::<Vec<_>>();
+        let result = fixture
+            .run(&mut |stage| {
+                if stage == AlbumBatchStage::AfterReplace(1) {
+                    Err("injected mixed format failure".to_owned())
+                } else {
+                    Ok(())
+                }
+            })
+            .expect("structured batch failure");
+        assert_eq!(result.outcome, "rolled_back");
+        for (path, original) in fixture.paths.iter().zip(originals) {
+            assert_eq!(fs::read(path).expect("restored file"), original);
+        }
+    }
+
+    #[test]
+    fn mixed_album_excludes_read_only_track_and_updates_the_rest() {
+        let fixture = SyntheticSixFormatAlbumFixture::new();
+        let excluded = &fixture.paths[2];
+        let original = fs::read(excluded).expect("read excluded track");
+        let mut permissions = fs::metadata(excluded)
+            .expect("excluded file metadata")
+            .permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(excluded, permissions).expect("make test file read-only");
+        let assessment = tag_editing_assessment(
+            excluded,
+            &read_tagged_file(excluded).expect("read excluded tags"),
+        );
+        assert!(assessment.plan.is_none());
+        assert!(assessment.unsupported_reason.unwrap().contains("read-only"));
+        let result = fixture
+            .run(&mut |_| Ok(()))
+            .expect("update editable subset");
+        assert_eq!(result.outcome, "success");
+        assert_eq!(result.updated_tracks.len(), 5);
+        assert_eq!(
+            fs::read(excluded).expect("read unchanged excluded track"),
+            original
+        );
+        let mut permissions = fs::metadata(excluded)
+            .expect("restore file metadata")
+            .permissions();
+        permissions.set_readonly(false);
+        fs::set_permissions(excluded, permissions).expect("restore test file permissions");
+    }
+
     struct SyntheticAlbumFixture {
         directory: PathBuf,
         library: Mutex<LibraryDatabase>,
@@ -10251,7 +11687,7 @@ mod tag_editor_tests {
             add_preservation_metadata(&flac_paths[0]);
 
             let excluded_path = directory.join("read-only-format.wav");
-            fs::write(&excluded_path, &bytes).expect("write synthetic excluded-format fixture");
+            fs::write(&excluded_path, synthetic_pcm_wav()).expect("write synthetic WAV fixture");
             let excluded_request = UpdateTrackTagsRequest {
                 track_id: excluded_path.to_string_lossy().into_owned(),
                 title: Some("Excluded Track".to_owned()),
@@ -10263,8 +11699,11 @@ mod tag_editor_tests {
                 track_number: Some(3),
                 disc_number: Some(1),
             };
-            write_tags_to_flac(&excluded_path, &excluded_request, TagFieldMask::all())
-                .expect("seed excluded-format tags without using the production gate");
+            let mut riff_tag = Tag::new(TagType::RiffInfo);
+            apply_generic_tag_update_request(&mut riff_tag, &excluded_request, TagFieldMask::all());
+            riff_tag
+                .save_to_path(&excluded_path, WriteOptions::default())
+                .expect("seed RIFF INFO-only WAV fixture");
 
             let database_path = directory.join("library.sqlite3");
             let mut library = LibraryDatabase::open(database_path).expect("open synthetic library");
@@ -10376,7 +11815,12 @@ mod tag_editor_tests {
         drop(library);
         let values = tracks
             .iter()
-            .filter(|track| tag_editing_safely_validated_for_path(Path::new(&track.file_path)))
+            .filter(|track| {
+                let path = Path::new(&track.file_path);
+                tag_editing_assessment(path, &read_tagged_file(path).expect("read tagged fixture"))
+                    .plan
+                    .is_some()
+            })
             .map(|track| {
                 track_tag_values_from_file(
                     &read_tagged_file(Path::new(&track.file_path)).expect("read synthetic tags"),
@@ -10390,9 +11834,12 @@ mod tag_editor_tests {
         assert!(shared.artist.mixed);
         assert!(shared.genre.mixed);
         assert!(shared.year.mixed);
-        assert!(!tag_editing_safely_validated_for_path(
-            &fixture.excluded_path
-        ));
+        assert!(tag_editing_assessment(
+            &fixture.excluded_path,
+            &read_tagged_file(&fixture.excluded_path).expect("read excluded WAV"),
+        )
+        .plan
+        .is_none());
     }
 
     #[test]
