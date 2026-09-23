@@ -19,6 +19,7 @@ import type {
   Playlist,
   Track,
   TrackTagEditorData,
+  TrackTagValues,
   TrackLyrics,
   UpdateTrackTagsRequest,
   UpdateAlbumTagsRequest,
@@ -163,8 +164,8 @@ export async function getAlbumTagEditorData(albumId: string): Promise<AlbumTagEd
   return invoke<AlbumTagEditorData>("get_album_tag_editor_data", { albumId });
 }
 
-export async function updateTrackTags(request: UpdateTrackTagsRequest): Promise<Track> {
-  return invoke<Track>("update_track_tags", { request });
+export async function updateTrackTags(request: UpdateTrackTagsRequest, changedFields: Array<keyof TrackTagValues>): Promise<Track> {
+  return invoke<Track>("update_track_tags", { request, changedFields });
 }
 
 export async function updateAlbumTags(request: UpdateAlbumTagsRequest): Promise<AlbumTagUpdateResult> {

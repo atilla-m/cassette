@@ -45,6 +45,7 @@ export type TrackTagValues = {
 export type TrackTagEditorData = {
   track: Track;
   fileValues: TrackTagValues;
+  detectedFormat: string;
   genreOverrideActive: boolean;
   tagEditingSupported: boolean;
   unsupportedReason: string | null;
@@ -66,6 +67,7 @@ export type SharedTagValue<T> = {
 
 export type AlbumTagEditorTrack = {
   track: Track;
+  detectedFormat: string | null;
   editable: boolean;
   exclusionReason: string | null;
 };

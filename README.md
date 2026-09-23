@@ -94,9 +94,11 @@ Windows is not included in the Linux-first `0.1.0-beta.3` release. The following
 
 See [docs/GSTREAMER-WINDOWS.md](docs/GSTREAMER-WINDOWS.md) for the build and runtime strategy.
 
-## FLAC tag editor
+## Tag editors in the development branch
 
-FLAC remains the only writable tag format in Cassette. Editing tags modifies metadata inside the actual audio file. Keep backups and test important workflows on disposable copies first. MP3, OGG, Opus, WAV, and M4A tags remain read-only because they have not received equivalent real-file rollback testing.
+The individual-song and album editors can write FLAC, MP3, Ogg/Vorbis, Opus, WAV, and M4A files containing AAC audio. The album editor lists every affected file and any file it must exclude; leaving a shared field unchanged retains each song's own value. Editing writes metadata into the audio file, so keep independent backups of important music. The published beta.3 package still has FLAC-only editing until a later release includes this work.
+
+Cassette preserves MP3 and WAV ID3v2.3 or ID3v2.4 layouts. Existing ID3v2.2 tags, MP3 files tagged only with ID3v1/APEv2, and WAV files tagged only with RIFF INFO are read-only because writing the shared editor fields would require a tag-format conversion. Raw AAC/ADTS is outside the six library formats; M4A/AAC means AAC in an MP4 container. The editor verifies the unchanged audio payload and unrelated metadata before replacing the original file. If verification fails, the original remains in place.
 
 ## Development and validation
 

@@ -314,7 +314,7 @@
     {
       key: "artist",
       label: "Artist",
-      help: "Each track can keep its own artist. Setting this field replaces Artist on every editable FLAC; leave it unchanged to preserve multiple performers.",
+      help: "Each track can keep its own artist. Setting this field replaces Artist on every editable track; leave it unchanged to preserve multiple performers.",
     },
     { key: "genre", label: "Genre" },
     { key: "year", label: "Year", inputMode: "numeric" },
@@ -3388,7 +3388,8 @@
     let shouldCloseAfterSave = false;
 
     try {
-      const updatedTrack = await updateTrackTags(tagUpdateRequestFromDraft(tagEditorTrack.id));
+      const changedFields = (Object.keys(tagEditorDraft) as Array<keyof TagEditorDraft>).filter(tagEditorFieldChanged);
+      const updatedTrack = await updateTrackTags(tagUpdateRequestFromDraft(tagEditorTrack.id), changedFields);
       applyUpdatedTrack(updatedTrack);
       tagEditorOriginal = savedSnapshot;
       tagEditorMessage = "Tags updated successfully.";
@@ -3554,10 +3555,10 @@
     }
 
     if ((albumTagEditorData?.preflightErrors.length ?? 0) > 0) {
-      return "Resolve the listed FLAC preflight problems before saving.";
+      return "Resolve the listed tag preflight problems before saving.";
     }
     if (!albumTagEditorData || albumTagEditorData.editableTrackCount === 0) {
-      return "This album has no editable FLAC tracks.";
+      return "This album has no safely editable tracks.";
     }
 
     return null;
@@ -7355,7 +7356,7 @@
                 <div>
                   <strong>{albumTagMoveNotice.excludedTrackCount} read-only {albumTagMoveNotice.excludedTrackCount === 1 ? "track was" : "tracks were"} not deleted</strong>
                   <p>
-                    {albumTagMoveNotice.editedTrackCount} FLAC {albumTagMoveNotice.editedTrackCount === 1 ? "track moved" : "tracks moved"} to this album. The excluded {albumTagMoveNotice.excludedTrackCount === 1 ? "track remains" : "tracks remain"} under “{albumTagMoveNotice.originalAlbumTitle}”.
+                    {albumTagMoveNotice.editedTrackCount} {albumTagMoveNotice.editedTrackCount === 1 ? "edited track moved" : "edited tracks moved"} to this album. The excluded {albumTagMoveNotice.excludedTrackCount === 1 ? "track remains" : "tracks remain"} under “{albumTagMoveNotice.originalAlbumTitle}”.
                   </p>
                 </div>
                 <div class="album-tag-move-actions">
@@ -9644,7 +9645,7 @@
             {/if}
           </div>
           <div class="tag-editor-heading">
-            <p class="eyebrow">FLAC Album Tags</p>
+            <p class="eyebrow">Album Tags</p>
             <h3 id="album-tag-editor-title">Edit album tags</h3>
             <strong>{selectedAlbum?.title ?? "Selected album"}</strong>
             <small>Only intentionally changed shared fields are written.</small>
@@ -9661,7 +9662,7 @@
           </div>
         {:else if albumTagEditorStage === "edit"}
           <div class="album-tag-scope-summary">
-            <strong>{albumTagEditorData.editableTrackCount} editable FLAC {albumTagEditorData.editableTrackCount === 1 ? "track" : "tracks"}</strong>
+            <strong>{albumTagEditorData.editableTrackCount} editable {albumTagEditorData.editableTrackCount === 1 ? "track" : "tracks"}</strong>
             <span>{albumTagEditorData.excludedTrackCount} read-only/excluded {albumTagEditorData.excludedTrackCount === 1 ? "track" : "tracks"}</span>
           </div>
 
@@ -9672,7 +9673,7 @@
           {/if}
           {#if albumTagEditorData.preflightErrors.length > 0}
             <div class="tag-editor-warning" role="alert">
-              <strong>FLAC preflight must pass before saving:</strong>
+              <strong>Tag preflight must pass before saving:</strong>
               <ul>
                 {#each albumTagEditorData.preflightErrors as error}
                   <li>{error}</li>
@@ -9713,7 +9714,7 @@
                     />
                   </label>
                 {:else if albumTagEditorDraft[field.key].mode === "clear"}
-                  <p class="album-tag-clear-note">This field will be removed from every editable FLAC track.</p>
+                  <p class="album-tag-clear-note">This field will be removed from every editable track.</p>
                 {/if}
               </fieldset>
             {/each}
@@ -9728,7 +9729,7 @@
                     <strong>{item.track.title}</strong>
                     <small>{item.track.fileName}</small>
                   </span>
-                  <span class="album-tag-track-status">{item.editable ? "Editable FLAC" : item.exclusionReason}</span>
+                  <span class="album-tag-track-status">{item.editable ? `Editable ${item.detectedFormat}` : `${item.detectedFormat ?? "Unknown format"}: ${item.exclusionReason}`}</span>
                 </div>
               {/each}
             </div>
@@ -9751,7 +9752,7 @@
         {:else if albumTagEditorStage === "confirm"}
           <div class="album-tag-confirmation">
             <div class="tag-editor-warning" role="status">
-              Review the exact shared-field changes and FLAC subset. Individual titles, track/disc numbers, artwork, lyrics, audio, and unrelated metadata are not selected for change.
+              Review the exact shared-field changes and editable tracks. Individual titles, track/disc numbers, artwork, lyrics, audio, and unrelated metadata are not selected for change.
             </div>
             {#if albumTagEditorData.excludedTrackCount > 0 && albumTagGroupingMayChange()}
               <div class="tag-editor-warning" role="alert">
@@ -9761,7 +9762,7 @@
             {/if}
             {#if albumTagEditorDraft.artist.mode !== "unchanged"}
               <div class="tag-editor-warning" role="alert">
-                <strong>Artist applies to every editable FLAC.</strong>
+                <strong>Artist applies to every editable track.</strong>
                 Continue only if all of those tracks should use the same performer. Album artist is the shared grouping field for multi-artist albums.
               </div>
             {/if}
@@ -9807,7 +9808,7 @@
             <button type="button" disabled={isSavingAlbumTagEditor} onclick={() => { albumTagEditorStage = "edit"; albumTagEditorError = null; }}>Back</button>
             <button type="button" disabled={isSavingAlbumTagEditor} onclick={closeAlbumTagEditor}>Cancel</button>
             <button class="primary" type="button" disabled={isSavingAlbumTagEditor} onclick={() => void saveAlbumTags()}>
-              {isSavingAlbumTagEditor ? "Updating..." : `Update ${albumTagEditorData.editableTrackCount} FLAC ${albumTagEditorData.editableTrackCount === 1 ? "track" : "tracks"}`}
+              {isSavingAlbumTagEditor ? "Updating..." : `Update ${albumTagEditorData.editableTrackCount} ${albumTagEditorData.editableTrackCount === 1 ? "track" : "tracks"}`}
             </button>
           </div>
         {:else if albumTagUpdateResult}
@@ -9866,7 +9867,7 @@
             <p class="eyebrow">Audio Tags</p>
             <h3 id="tag-editor-title">Edit Tags</h3>
             <strong>{tagEditorTrack.title}</strong>
-            <small>{tagEditorTrack.fileName} · {tagEditorTrack.extension.toUpperCase()}</small>
+            <small>{tagEditorTrack.fileName} · {tagEditorData?.detectedFormat ?? tagEditorTrack.extension.toUpperCase()}</small>
           </div>
           <button type="button" aria-label="Close tag editor" disabled={isSavingTagEditor} onclick={() => requestCloseTagEditor()}>Close</button>
         </header>
