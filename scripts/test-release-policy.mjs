@@ -11,6 +11,12 @@ const pkg = JSON.parse(read("package.json"));
 const config = JSON.parse(read("src-tauri/tauri.conf.json"));
 const overlay = JSON.parse(read("src-tauri/tauri.updater.conf.json"));
 const expectedVersion = "0.1.0-beta.3";
+const assertCargoLockVersion = (path, packageName) => {
+  const contents = read(path);
+  const pattern = new RegExp(`name = "${packageName}"\\r?\\nversion = "${expectedVersion.replaceAll(".", "\\.")}"`);
+  assert.match(contents, pattern);
+  assert.match(contents.replace(/\r?\n/g, "\r\n"), pattern);
+};
 
 test("active release version sources remain synchronized", () => {
   const packageLock = JSON.parse(read("package-lock.json"));
@@ -19,9 +25,9 @@ test("active release version sources remain synchronized", () => {
   assert.equal(packageLock.packages[""].version, expectedVersion);
   assert.equal(config.version, expectedVersion);
   assert.match(read("src-tauri/Cargo.toml"), new RegExp(`^version = "${expectedVersion.replaceAll(".", "\\.")}"$`, "m"));
-  assert.match(read("src-tauri/Cargo.lock"), new RegExp(`name = "cassette"\\nversion = "${expectedVersion.replaceAll(".", "\\.")}"`));
+  assertCargoLockVersion("src-tauri/Cargo.lock", "cassette");
   assert.match(read("scripts/update-verifier/Cargo.toml"), new RegExp(`^version = "${expectedVersion.replaceAll(".", "\\.")}"$`, "m"));
-  assert.match(read("scripts/update-verifier/Cargo.lock"), new RegExp(`name = "cassette-update-verifier"\\nversion = "${expectedVersion.replaceAll(".", "\\.")}"`));
+  assertCargoLockVersion("scripts/update-verifier/Cargo.lock", "cassette-update-verifier");
 
   for (const path of [
     "scripts/build-release.mjs",
