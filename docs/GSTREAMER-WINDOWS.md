@@ -36,7 +36,7 @@ Cassette uses `playbin` for audio and GStreamer's discovery/typefinding support 
 
 A successful Rust compile proves that headers/import libraries were found; it does not prove that these plugins load or that real files play. The release checklist therefore requires representative real-file tests on clean Windows 10 and Windows 11 virtual machines.
 
-Experimental video/DVD functionality is disabled and unsupported in Cassette `0.1.0-beta.2` on every platform. Existing backend code may remain, but the beta does not expose its UI and does not require or advertise `mpv`, `ffmpeg`, `ffprobe`, or `lsdvd` as beta runtime dependencies.
+Experimental video/DVD functionality is disabled and unsupported in Cassette `0.1.0-beta.3` on every platform. Existing backend code may remain, but the beta does not expose its UI and does not require or advertise `mpv`, `ffmpeg`, `ffprobe`, or `lsdvd` as beta runtime dependencies.
 
 ## Future self-contained distribution requirements
 

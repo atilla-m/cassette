@@ -75,7 +75,7 @@ export function generateUpdateFeed(environment = process.env) {
 
   const version = environment.RELEASE_VERSION.trim();
   const tag = environment.RELEASE_TAG.trim();
-  if (tag !== `v${version}` || version !== "0.1.0-beta.2") {
+  if (tag !== `v${version}` || version !== "0.1.0-beta.3") {
     throw new Error(`Release tag/version mismatch: ${tag} / ${version}`);
   }
 

@@ -10,6 +10,31 @@ const read = (path) => readFileSync(new URL(`../${path}`, import.meta.url), "utf
 const pkg = JSON.parse(read("package.json"));
 const config = JSON.parse(read("src-tauri/tauri.conf.json"));
 const overlay = JSON.parse(read("src-tauri/tauri.updater.conf.json"));
+const expectedVersion = "0.1.0-beta.3";
+
+test("active release version sources remain synchronized", () => {
+  const packageLock = JSON.parse(read("package-lock.json"));
+  assert.equal(pkg.version, expectedVersion);
+  assert.equal(packageLock.version, expectedVersion);
+  assert.equal(packageLock.packages[""].version, expectedVersion);
+  assert.equal(config.version, expectedVersion);
+  assert.match(read("src-tauri/Cargo.toml"), new RegExp(`^version = "${expectedVersion.replaceAll(".", "\\.")}"$`, "m"));
+  assert.match(read("src-tauri/Cargo.lock"), new RegExp(`name = "cassette"\\nversion = "${expectedVersion.replaceAll(".", "\\.")}"`));
+  assert.match(read("scripts/update-verifier/Cargo.toml"), new RegExp(`^version = "${expectedVersion.replaceAll(".", "\\.")}"$`, "m"));
+  assert.match(read("scripts/update-verifier/Cargo.lock"), new RegExp(`name = "cassette-update-verifier"\\nversion = "${expectedVersion.replaceAll(".", "\\.")}"`));
+
+  for (const path of [
+    "scripts/build-release.mjs",
+    "scripts/generate-update-feed.mjs",
+    "scripts/audit-release-artifacts.py",
+    "scripts/test-signature-safety.py",
+    ".github/workflows/ci.yml",
+    ".github/workflows/release.yml",
+    ".github/workflows/publish-update-feed.yml",
+  ]) {
+    assert.ok(read(path).includes(expectedVersion), `${path} must select ${expectedVersion}`);
+  }
+});
 
 test("AppImage filesystem exclusion is limited to the host Wayland client", () => {
   const patterns = read("src-tauri/.appimageignore")
@@ -146,14 +171,15 @@ function assertReleaseWorkflowPolicy(ci, release, feed, generator) {
   assert.match(signedLinuxJob, /GSTREAMER_PLUGINS_DIR: \$\{\{ runner\.temp \}\}\/cassette-gstreamer-plugins/);
   assert.match(signedLinuxJob, /test ! -e "\$plugins_target\/libgstneonhttpsrc\.so"/);
   assert.match(signedLinuxJob, /test "\$\(git rev-parse HEAD\)" = "\$GITHUB_SHA"/);
-  assert.match(release, /- "v0\.1\.0-beta\.2"/);
+  assert.match(release, /- "v0\.1\.0-beta\.3"/);
   assert.match(release, /test "\$GITHUB_REF_NAME" = "v\$project_version"/);
   assert.ok(!release.includes("v0.1.0-beta.1"));
+  assert.ok(!release.includes("v0.1.0-beta.2"));
   for (const path of [
-    "release-assets/linux/deb/Cassette_0.1.0-beta.2_amd64.deb",
-    "release-assets/linux/rpm/Cassette-0.1.0-beta.2-1.x86_64.rpm",
-    "release-assets/linux/appimage/Cassette_0.1.0-beta.2_amd64.AppImage",
-    "release-assets/linux/appimage/Cassette_0.1.0-beta.2_amd64.AppImage.sig",
+    "release-assets/linux/deb/Cassette_0.1.0-beta.3_amd64.deb",
+    "release-assets/linux/rpm/Cassette-0.1.0-beta.3-1.x86_64.rpm",
+    "release-assets/linux/appimage/Cassette_0.1.0-beta.3_amd64.AppImage",
+    "release-assets/linux/appimage/Cassette_0.1.0-beta.3_amd64.AppImage.sig",
   ]) {
     assert.match(release, new RegExp(path.replaceAll(".", "\\.")));
   }
@@ -169,17 +195,18 @@ function assertReleaseWorkflowPolicy(ci, release, feed, generator) {
   assert.ok(!release.includes("release:windows"));
   assert.match(feed, /types: \[published\]/);
   assert.match(feed, /github.event.release.prerelease == true/);
-  assert.match(feed, /github\.event\.release\.tag_name == 'v0\.1\.0-beta\.2'/);
+  assert.match(feed, /github\.event\.release\.tag_name == 'v0\.1\.0-beta\.3'/);
   assert.ok(!feed.includes("v0.1.0-beta.1"));
-  assert.match(feed, /Cassette_0\.1\.0-beta\.2_amd64\.AppImage\.sig/);
+  assert.ok(!feed.includes("v0.1.0-beta.2"));
+  assert.match(feed, /Cassette_0\.1\.0-beta\.3_amd64\.AppImage\.sig/);
   assert.match(feed, /APPIMAGE_FILE:/);
-  assert.match(generator, /version !== "0\.1\.0-beta\.2"/);
+  assert.match(generator, /version !== "0\.1\.0-beta\.3"/);
   assert.match(generator, /verifyUpdate\(snapshot.image, snapshot.signature/);
   assert.match(generator, /readFileSync\(snapshot.signature/);
   assert.ok(!feed.includes("contents: write"));
 }
 
-test("feed generation rejects beta.1 and mismatched beta.2 tags before reading assets", () => {
+test("feed generation rejects prior releases and mismatched beta.3 tags before reading assets", () => {
   const base = {
     RELEASE_PUBLISHED_AT: "2026-09-15T00:00:00Z",
     RELEASE_NOTES_FILE: "unused-notes",
@@ -192,7 +219,11 @@ test("feed generation rejects beta.1 and mismatched beta.2 tags before reading a
     /Release tag\/version mismatch/,
   );
   assert.throws(
-    () => generateUpdateFeed({ ...base, RELEASE_VERSION: "0.1.0-beta.2", RELEASE_TAG: "v0.1.0-beta.1" }),
+    () => generateUpdateFeed({ ...base, RELEASE_VERSION: "0.1.0-beta.2", RELEASE_TAG: "v0.1.0-beta.2" }),
+    /Release tag\/version mismatch/,
+  );
+  assert.throws(
+    () => generateUpdateFeed({ ...base, RELEASE_VERSION: "0.1.0-beta.3", RELEASE_TAG: "v0.1.0-beta.2" }),
     /Release tag\/version mismatch/,
   );
 });
@@ -237,11 +268,11 @@ for (const [name, ending] of [["LF", "\n"], ["CRLF", "\r\n"]]) {
 
 test("feed snapshot cannot publish a signature changed after verification", () => {
   const directory = mkdtempSync(join(tmpdir(), "cassette-feed-snapshot-test-"));
-  const image = join(directory, "Cassette_0.1.0-beta.2_amd64.AppImage");
+  const image = join(directory, "Cassette_0.1.0-beta.3_amd64.AppImage");
   const signature = `${image}.sig`;
   writeFileSync(image, "original AppImage bytes");
   writeFileSync(signature, "signature bytes accepted by the verifier");
-  const snapshot = snapshotUpdatePair(image, signature, "0.1.0-beta.2");
+  const snapshot = snapshotUpdatePair(image, signature, "0.1.0-beta.3");
   try {
     const cryptographicallyVerifiedBytes = readFileSync(snapshot.signature, "utf8");
     writeFileSync(signature, "signature bytes swapped after verification");

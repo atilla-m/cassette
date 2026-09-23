@@ -27,7 +27,7 @@ from pathlib import Path
 from update_signature import validate_signature
 
 
-EXPECTED_VERSION = "0.1.0-beta.2"
+EXPECTED_VERSION = "0.1.0-beta.3"
 EXPECTED_LICENSE = "GPL-3.0-or-later"
 NATIVE_TAURI_DEV_URL_EXCEPTIONS = {
     b"http://localhost:1420",

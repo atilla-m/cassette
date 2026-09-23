@@ -2,21 +2,27 @@
 
 Cassette is a private, local-first desktop music library and player. It scans folders you choose, keeps its library cache locally, and provides albums, artists, genres, songs, playlists, queue management, lyrics, statistics, themes, and safe FLAC metadata editing.
 
-## v0.1.0-beta.2 status
+## Beta status
 
-Cassette `0.1.0-beta.2` is planned as a Linux-first beta for x86_64. Windows build infrastructure remains in CI, but Windows installer qualification and release are deferred to a later beta. No release has been published yet, so there are no download links in this document.
+Cassette `0.1.0-beta.3` is the unreleased next Linux x86_64 candidate. The current public release remains [`v0.1.0-beta.2`](https://github.com/atilla-m/cassette/releases/tag/v0.1.0-beta.2); keep using its downloads until beta.3 has completed signed-candidate qualification and is intentionally published. Windows build infrastructure remains in CI, but Windows installer qualification and distribution are deferred to a later beta.
 
-This beta includes the current Cassette interface. Cassette Teal is the default user-selectable theme, alongside Glacier and Obsidian. The hidden Rose Noir and Royal Gold implementations remain in the source for possible later reactivation. Playback, scanning, the queue, shuffle and repeat, playlists, favorites, lyrics, FLAC tag editing, CD ripping, and MPRIS retain their current behavior. Optional track-change banners use standard transient Linux notifications and replace the prior Cassette playback banner instead of accumulating in notification history.
+Choose the beta.2 file matching the installation method:
+
+- `Cassette_0.1.0-beta.2_amd64.AppImage` is the portable, signed AppImage and the recommended download.
+- `Cassette_0.1.0-beta.2_amd64.deb` is for the tested Ubuntu 24.04 package path.
+- `Cassette-0.1.0-beta.2-1.x86_64.rpm` is for the tested Fedora 44 package path.
+
+Beta.3 adds per-user AppImage application-menu integration; transient/replaced playback notifications and streamlined theme choices; detailed timestamped play history; instrumental-break cues and stable lyric seeking; expanded play counts, sorting, and full Stats lists; and guarded album-wide FLAC tag editing. Date-filtered Stats screens are not included. Cassette Teal remains the default user-selectable theme, alongside Glacier and Obsidian. The hidden Rose Noir and Royal Gold implementations remain in the source for possible later reactivation.
 
 Modern UI work is reserved for a future release. This beta does not include a Modern/Legacy interface switch or promise the rejected Modern design. Experimental video and DVD functionality is disabled and unsupported in this beta; hidden backend code and tools such as `lsdvd`, `ffmpeg`, `ffprobe`, and `mpv` are not part of the beta runtime contract.
 
-The beta.2 release formats are DEB, RPM, and AppImage for Linux. AppImage is the recommended download and is being prepared for signed, user-approved automatic updates. DEB and RPM stay under the system package manager: Cassette may notify those users about a newer version and open its GitHub release page, but it will not invoke `sudo`, `apt`, `dpkg`, `dnf`, or `rpm`, and it will not convert an installation to AppImage. Windows NSIS work remains available in CI but is not a beta.2 release asset. MSI is deferred because WiX/MSI cannot represent the authoritative `0.1.0-beta.2` prerelease identifier without changing the project version.
+The Linux beta formats are DEB, RPM, and AppImage. AppImage updates are signed and require explicit user confirmation. DEB and RPM stay under the system package manager: Cassette may notify those users about a newer version and open its GitHub release page, but it will not invoke `sudo`, `apt`, `dpkg`, `dnf`, or `rpm`, and it will not convert an installation to AppImage. Download a newer DEB or RPM from Releases and install it with APT or DNF; no automatic package repository is configured. Windows NSIS work remains available in CI but is not a beta.3 release asset. MSI is deferred because WiX/MSI cannot represent the authoritative `0.1.0-beta.3` prerelease identifier without changing the project version.
 
 The beta uses the stock Tauri desktop icons as an accepted known limitation. DEB and RPM packages are not repository-signed, and planned Windows installers remain unsigned; package managers, desktop security tools, or Windows SmartScreen may warn about an unrecognized publisher. Tauri updater signatures are a separate mandatory verification layer for AppImage updates.
 
 ## Linux x86_64
 
-The AppImage is the recommended download. It can run without replacing a system package. The production updater public key and endpoint are configured, but automatic updating must not be advertised as operational until the beta.2 signed older-to-newer update test passes. Updates are never forced, and development builds do not contact the update feed.
+The AppImage is the recommended download. It can run without replacing a system package. The production updater public key and beta endpoint remain configured; updates are never forced, and development builds do not contact the update feed. The public feed continues to serve beta.2 until beta.3 is separately published.
 
 A clean Ubuntu 24.04 installation required the FUSE 2 compatibility library before the AppImage could mount and run:
 
@@ -26,7 +32,7 @@ sudo apt install libfuse2t64
 
 This prerequisite applies to the AppImage. It records the tested Ubuntu 24.04 setup and does not imply the same package name or requirement on other distributions.
 
-Automatic checks are limited to one attempt per 24 hours across restarts, including network failures; manual checks remain available. AppImage installation requires native runtime verification and explicit confirmation. Downloads cannot be cancelled after confirmation in beta.2. `npm run release:linux` and ordinary CI build DEB/RPM only; `npm run release:linux:signed` is the sole supported distributable AppImage build and requires the production configuration and credentials. See [the update handoff](docs/UPDATES.md) for signature verification, publication, and key rotation.
+Automatic checks are limited to one attempt per 24 hours across restarts, including network failures; manual checks remain available. AppImage installation requires native runtime verification and explicit confirmation. Downloads cannot be cancelled after confirmation in the current beta. `npm run release:linux` and ordinary CI build DEB/RPM only; `npm run release:linux:signed` is the sole supported distributable AppImage build and requires the production configuration and credentials. See [the update handoff](docs/UPDATES.md) for signature verification, publication, and key rotation.
 
 Install a downloaded RPM on Fedora:
 
@@ -77,20 +83,20 @@ Cassette uses the MSVC build of GStreamer. The planned beta installers are not s
 2. Install the complete runtime, keeping its directory structure intact.
 3. Ensure the runtime's `bin` directory is visible in `PATH` before launching Cassette. With the release-build layout this is `C:\gstreamer\1.0\msvc_x86_64\bin`; use the actual directory if you installed it elsewhere.
 
-Windows is not included in the Linux-first `0.1.0-beta.2` release. The following limitations remain relevant to its later qualification:
+Windows is not included in the Linux-first `0.1.0-beta.3` candidate. The following limitations remain relevant to its later qualification:
 
 - Linux desktop notifications, MPRIS, and CD detection/ripping are unavailable.
 - Experimental video/DVD functionality is disabled and unsupported.
 - Missing or undiscoverable GStreamer runtime files can prevent the dynamically linked application from starting.
 - The planned NSIS installer is unsigned and has not passed clean Windows 10/11 testing.
-- MSI is excluded from this beta because its version rules cannot represent `0.1.0-beta.2` faithfully.
+- MSI is excluded from this beta because its version rules cannot represent `0.1.0-beta.3` faithfully.
 - Tauri's WebView2 download bootstrapper may require network access if WebView2 is missing.
 
 See [docs/GSTREAMER-WINDOWS.md](docs/GSTREAMER-WINDOWS.md) for the build and runtime strategy.
 
 ## FLAC tag editor
 
-FLAC is the only writable tag format in Cassette `0.1.0-beta.2`. Editing tags modifies metadata inside the actual audio file. Keep backups and test important workflows on disposable copies first. MP3, OGG, Opus, WAV, and M4A tags remain read-only because they have not received equivalent real-file rollback testing.
+FLAC remains the only writable tag format in Cassette. Editing tags modifies metadata inside the actual audio file. Keep backups and test important workflows on disposable copies first. MP3, OGG, Opus, WAV, and M4A tags remain read-only because they have not received equivalent real-file rollback testing.
 
 ## Development and validation
 

@@ -444,7 +444,7 @@ dependencies = [
 
 [[package]]
 name = "cassette"
-version = "0.1.0-beta.2"
+version = "0.1.0-beta.3"
 dependencies = [
  "base64 0.22.1",
  "gstreamer",

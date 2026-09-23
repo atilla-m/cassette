@@ -9,7 +9,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  RELEASE_VERSION: 0.1.0-beta.2
+  RELEASE_VERSION: 0.1.0-beta.3
 
 jobs:
   linux:
@@ -89,17 +89,17 @@ jobs:
             --license LICENSE \
             --frontend build \
             --artifact src-tauri/target/release/cassette \
-            --artifact src-tauri/target/release/bundle/deb/Cassette_0.1.0-beta.2_amd64.deb \
-            --artifact src-tauri/target/release/bundle/rpm/Cassette-0.1.0-beta.2-1.x86_64.rpm
+            --artifact src-tauri/target/release/bundle/deb/Cassette_0.1.0-beta.3_amd64.deb \
+            --artifact src-tauri/target/release/bundle/rpm/Cassette-0.1.0-beta.3-1.x86_64.rpm
 
       - name: Upload exact Linux CI artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: cassette-0.1.0-beta.2-linux-package-validation
+          name: cassette-0.1.0-beta.3-linux-package-validation
           if-no-files-found: error
           path: |
-            src-tauri/target/release/bundle/deb/Cassette_0.1.0-beta.2_amd64.deb
-            src-tauri/target/release/bundle/rpm/Cassette-0.1.0-beta.2-1.x86_64.rpm
+            src-tauri/target/release/bundle/deb/Cassette_0.1.0-beta.3_amd64.deb
+            src-tauri/target/release/bundle/rpm/Cassette-0.1.0-beta.3-1.x86_64.rpm
 
   windows:
     name: Windows x86_64 (Windows Server 2022)
@@ -179,12 +179,12 @@ jobs:
             --license LICENSE `
             --frontend build `
             --artifact src-tauri/target/x86_64-pc-windows-msvc/release/cassette.exe `
-            --artifact src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/Cassette_0.1.0-beta.2_x64-setup.exe
+            --artifact src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/Cassette_0.1.0-beta.3_x64-setup.exe
 
       - name: Upload exact Windows CI artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: cassette-0.1.0-beta.2-windows-x86_64
+          name: cassette-0.1.0-beta.3-windows-x86_64
           if-no-files-found: error
           path: |
-            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/Cassette_0.1.0-beta.2_x64-setup.exe
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/Cassette_0.1.0-beta.3_x64-setup.exe

@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from update_signature import validate_signature
 
-VERSION = "0.1.0-beta.2"
+VERSION = "0.1.0-beta.3"
 NAME = f"Cassette_{VERSION}_amd64.AppImage"
 
 
