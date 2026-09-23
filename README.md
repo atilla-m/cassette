@@ -1,16 +1,16 @@
 # Cassette
 
-Cassette is a private, local-first desktop music library and player. It scans folders you choose, keeps its library cache locally, and provides albums, artists, genres, songs, playlists, queue management, lyrics, statistics, themes, and safe FLAC metadata editing.
+Cassette is a private, local-first desktop music library and player for Linux. It scans folders you choose, keeps its library and listening history locally, and provides albums, artists, genres, songs, playlists, queue management, synced lyrics, statistics, themes, and guarded FLAC metadata editing.
 
 ## Beta status
 
-Cassette `0.1.0-beta.3` is the unreleased next Linux x86_64 candidate. The current public release remains [`v0.1.0-beta.2`](https://github.com/atilla-m/cassette/releases/tag/v0.1.0-beta.2); keep using its downloads until beta.3 has completed signed-candidate qualification and is intentionally published. Windows build infrastructure remains in CI, but Windows installer qualification and distribution are deferred to a later beta.
+Cassette [`0.1.0-beta.3`](https://github.com/atilla-m/cassette/releases/tag/v0.1.0-beta.3) is the current public Linux x86_64 prerelease. It has been tested on Ubuntu 24.04 and Fedora 44. Windows build infrastructure remains in CI, but Windows installer qualification and distribution are deferred to a later beta.
 
-Choose the beta.2 file matching the installation method:
+Choose the beta.3 file matching the installation method:
 
-- `Cassette_0.1.0-beta.2_amd64.AppImage` is the portable, signed AppImage and the recommended download.
-- `Cassette_0.1.0-beta.2_amd64.deb` is for the tested Ubuntu 24.04 package path.
-- `Cassette-0.1.0-beta.2-1.x86_64.rpm` is for the tested Fedora 44 package path.
+- `Cassette_0.1.0-beta.3_amd64.AppImage` is the portable, signed AppImage and the recommended download.
+- `Cassette_0.1.0-beta.3_amd64.deb` is for the tested Ubuntu 24.04 package path.
+- `Cassette-0.1.0-beta.3-1.x86_64.rpm` is for the tested Fedora 44 package path.
 
 Beta.3 adds per-user AppImage application-menu integration; transient/replaced playback notifications and streamlined theme choices; detailed timestamped play history; instrumental-break cues and stable lyric seeking; expanded play counts, sorting, and full Stats lists; and guarded album-wide FLAC tag editing. Date-filtered Stats screens are not included. Cassette Teal remains the default user-selectable theme, alongside Glacier and Obsidian. The hidden Rose Noir and Royal Gold implementations remain in the source for possible later reactivation.
 
@@ -22,7 +22,7 @@ The beta uses the stock Tauri desktop icons as an accepted known limitation. DEB
 
 ## Linux x86_64
 
-The AppImage is the recommended download. It can run without replacing a system package. The production updater public key and beta endpoint remain configured; updates are never forced, and development builds do not contact the update feed. The public feed continues to serve beta.2 until beta.3 is separately published.
+The AppImage is the recommended download. It can run without replacing a system package. The production updater public key and beta endpoint remain configured; updates are never forced, and development builds do not contact the update feed. The public feed currently serves beta.3.
 
 A clean Ubuntu 24.04 installation required the FUSE 2 compatibility library before the AppImage could mount and run:
 
@@ -83,7 +83,7 @@ Cassette uses the MSVC build of GStreamer. The planned beta installers are not s
 2. Install the complete runtime, keeping its directory structure intact.
 3. Ensure the runtime's `bin` directory is visible in `PATH` before launching Cassette. With the release-build layout this is `C:\gstreamer\1.0\msvc_x86_64\bin`; use the actual directory if you installed it elsewhere.
 
-Windows is not included in the Linux-first `0.1.0-beta.3` candidate. The following limitations remain relevant to its later qualification:
+Windows is not included in the Linux-first `0.1.0-beta.3` release. The following limitations remain relevant to its later qualification:
 
 - Linux desktop notifications, MPRIS, and CD detection/ripping are unavailable.
 - Experimental video/DVD functionality is disabled and unsupported.
