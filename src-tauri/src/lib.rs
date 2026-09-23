@@ -10966,11 +10966,10 @@ mod tag_editor_tests {
             };
             fs::write(&path, bytes).expect("write synthetic audio");
             let actual_type = read_tagged_file(&path).expect("read fixture").file_type();
-            assert_eq!(
+            assert!(
                 detected_tag_format_label(actual_type)
                     .to_lowercase()
                     .contains(extension),
-                true,
                 "{extension}"
             );
             let request = UpdateTrackTagsRequest {
@@ -11616,9 +11615,10 @@ mod tag_editor_tests {
         let fixture = SyntheticSixFormatAlbumFixture::new();
         let excluded = &fixture.paths[2];
         let original = fs::read(excluded).expect("read excluded track");
-        let mut permissions = fs::metadata(excluded)
+        let original_permissions = fs::metadata(excluded)
             .expect("excluded file metadata")
             .permissions();
+        let mut permissions = original_permissions.clone();
         permissions.set_readonly(true);
         fs::set_permissions(excluded, permissions).expect("make test file read-only");
         let assessment = tag_editing_assessment(
@@ -11636,11 +11636,7 @@ mod tag_editor_tests {
             fs::read(excluded).expect("read unchanged excluded track"),
             original
         );
-        let mut permissions = fs::metadata(excluded)
-            .expect("restore file metadata")
-            .permissions();
-        permissions.set_readonly(false);
-        fs::set_permissions(excluded, permissions).expect("restore test file permissions");
+        fs::set_permissions(excluded, original_permissions).expect("restore test file permissions");
     }
 
     struct SyntheticAlbumFixture {
@@ -11808,7 +11804,7 @@ mod tag_editor_tests {
     }
 
     #[test]
-    fn synthetic_album_batch_reports_mixed_values_and_excludes_non_flac() {
+    fn synthetic_album_batch_reports_mixed_values_and_excludes_riff_info_only_wav() {
         let fixture = SyntheticAlbumFixture::new();
         let library = fixture.library.lock().expect("lock synthetic library");
         let tracks = cached_album_tracks(&library, &fixture.album_id).expect("resolve album");
@@ -12002,32 +11998,24 @@ mod tag_editor_tests {
     #[test]
     fn synthetic_album_batch_preflights_every_target_before_writing() {
         let fixture = SyntheticAlbumFixture::new();
-        let originals = fixture
-            .flac_paths
-            .iter()
-            .map(|path| fs::read(path).expect("read preflight baseline"))
-            .collect::<Vec<_>>();
-        let mut permissions = fs::metadata(&fixture.flac_paths[1])
-            .expect("read fixture permissions")
-            .permissions();
-        permissions.set_readonly(true);
-        fs::set_permissions(&fixture.flac_paths[1], permissions)
-            .expect("make second fixture read-only");
+        let first_original = fs::read(&fixture.flac_paths[0]).expect("read first baseline");
+        let mut second_external = fs::read(&fixture.flac_paths[1]).expect("read second baseline");
+        second_external.push(0);
+        fs::write(&fixture.flac_paths[1], &second_external)
+            .expect("simulate external edit before preflight");
 
         let error = run_synthetic_album_update(&fixture, &fixture.request(), &mut |_| Ok(()))
-            .expect_err("read-only target must fail the whole preflight");
-        assert!(error.contains("read-only"));
-        for (path, original) in fixture.flac_paths.iter().zip(originals) {
-            assert_eq!(fs::read(path).expect("read unchanged fixture"), original);
-        }
+            .expect_err("externally changed target must fail the whole preflight");
+        assert!(error.contains("changed outside Cassette"));
+        assert_eq!(
+            fs::read(&fixture.flac_paths[0]).expect("read first track"),
+            first_original
+        );
+        assert_eq!(
+            fs::read(&fixture.flac_paths[1]).expect("read external track"),
+            second_external
+        );
         assert!(fixture.sidecars().is_empty());
-
-        let mut permissions = fs::metadata(&fixture.flac_paths[1])
-            .expect("read read-only fixture permissions")
-            .permissions();
-        permissions.set_readonly(false);
-        fs::set_permissions(&fixture.flac_paths[1], permissions)
-            .expect("restore fixture permissions");
     }
 
     #[test]
