@@ -258,26 +258,36 @@ jobs:
             gh api --paginate --slurp "repos/${GH_REPO}/releases?per_page=100"
           }
 
+          test "$(gh api "repos/${GH_REPO}/git/ref/tags/${tag}" --jq '.ref')" = "refs/tags/${tag}"
+          test "$(gh api "repos/${GH_REPO}/commits/${tag}" --jq '.sha')" = "$GITHUB_SHA"
+
           release_pages="$(list_releases)"
           release_count="$(jq --arg tag "$tag" '[.[][] | select(.tag_name == $tag)] | length' <<<"$release_pages")"
           if test "$release_count" -eq 0; then
-            gh release create "$tag" \
-              --draft \
-              --prerelease \
-              --verify-tag \
-              --title "Cassette ${tag#v}" \
-              --notes "Draft Linux prerelease. Complete docs/RELEASING.md before publishing."
-          elif test "$release_count" -ne 1; then
+            created_release="$(gh api -X POST "repos/${GH_REPO}/releases" \
+              -f tag_name="$tag" \
+              -f target_commitish="$GITHUB_SHA" \
+              -f name="Cassette ${tag#v}" \
+              -f body="Draft Linux prerelease. Complete docs/RELEASING.md before publishing." \
+              -F draft=true \
+              -F prerelease=true)"
+            release_id="$(jq -r '.id' <<<"$created_release")"
+          elif test "$release_count" -eq 1; then
+            release_id="$(jq -r --arg tag "$tag" '[.[][] | select(.tag_name == $tag)][0].id' <<<"$release_pages")"
+          else
             echo "Expected zero or one release for ${tag}, found ${release_count}." >&2
             exit 1
           fi
 
+          [[ "$release_id" =~ ^[1-9][0-9]*$ ]]
           release_pages="$(list_releases)"
           release_count="$(jq --arg tag "$tag" '[.[][] | select(.tag_name == $tag)] | length' <<<"$release_pages")"
-          test "$release_count" -eq 1
-          release_id="$(jq -r --arg tag "$tag" '[.[][] | select(.tag_name == $tag)][0].id' <<<"$release_pages")"
-          [[ "$release_id" =~ ^[1-9][0-9]*$ ]]
+          test "$release_count" -le 1
+          if test "$release_count" -eq 1; then
+            test "$(jq -r --arg tag "$tag" '[.[][] | select(.tag_name == $tag)][0].id' <<<"$release_pages")" = "$release_id"
+          fi
           release_json="$(gh api "repos/${GH_REPO}/releases/${release_id}")"
+          test "$(jq -r '.id' <<<"$release_json")" = "$release_id"
           test "$(jq -r '.tag_name' <<<"$release_json")" = "$tag"
           test "$(jq -r '.draft' <<<"$release_json")" = "true"
           test "$(jq -r '.prerelease' <<<"$release_json")" = "true"
@@ -289,15 +299,19 @@ jobs:
               *) echo "Refusing to reuse draft with unexpected asset: $asset" >&2; exit 1 ;;
             esac
           done < <(jq -r '.assets[].name' <<<"$release_json")
+          if test "$(jq -r '.assets | length' <<<"$release_json")" -ne 0; then
+            echo "Refusing to upload: draft ${tag} already has assets; existing assets will not be overwritten." >&2
+            exit 1
+          fi
 
           gh release upload "$tag" \
             release-assets/linux/deb/Cassette_0.1.0-beta.3_amd64.deb \
             release-assets/linux/rpm/Cassette-0.1.0-beta.3-1.x86_64.rpm \
             release-assets/linux/appimage/Cassette_0.1.0-beta.3_amd64.AppImage \
-            release-assets/linux/appimage/Cassette_0.1.0-beta.3_amd64.AppImage.sig \
-            --clobber
+            release-assets/linux/appimage/Cassette_0.1.0-beta.3_amd64.AppImage.sig
 
           release_json="$(gh api "repos/${GH_REPO}/releases/${release_id}")"
+          test "$(jq -r '.id' <<<"$release_json")" = "$release_id"
           test "$(jq -r '.tag_name' <<<"$release_json")" = "$tag"
           test "$(jq -r '.draft' <<<"$release_json")" = "true"
           test "$(jq -r '.prerelease' <<<"$release_json")" = "true"

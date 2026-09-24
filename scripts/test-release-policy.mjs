@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -192,9 +193,15 @@ function assertReleaseWorkflowPolicy(ci, release, feed, generator) {
   assert.match(release, /npm run release:linux:signed/);
   assert.match(release, /node scripts\/verify-update.mjs/);
   assert.match(release, /needs: \[preflight, build-linux\]/);
-  assert.match(release, /--draft/);
+  assert.match(release, /-F draft=true/);
+  assert.match(release, /-F prerelease=true/);
   assert.match(release, /gh api --paginate --slurp "repos\/\$\{GH_REPO\}\/releases\?per_page=100"/);
   assert.match(release, /test "\$release_count" -eq 1/);
+  assert.match(release, /test "\$release_count" -le 1/);
+  assert.match(release, /release_id="\$\(jq -r '\.id' <<<"\$created_release"\)"/);
+  assert.match(release, /git\/ref\/tags\/\$\{tag\}/);
+  assert.match(release, /commits\/\$\{tag\}/);
+  assert.doesNotMatch(release, /--clobber/);
   assert.match(release, /gh api "repos\/\$\{GH_REPO\}\/releases\/\$\{release_id\}"/);
   assert.match(release, /test "\$\(jq -r '\.published_at == null'/);
   assert.ok(!release.includes("releases/tags/${tag}"));
@@ -269,6 +276,135 @@ for (const [name, ending] of [["LF", "\n"], ["CRLF", "\r\n"]]) {
         && error.expected instanceof RegExp
         && error.expected.source.includes("--paginate"),
     );
+  });
+}
+
+function draftReleaseScript(release) {
+  const lines = release.split(/\r?\n/);
+  const step = lines.findIndex((line) => line.trim() === "- name: Create draft prerelease and upload exact Linux assets");
+  assert.notEqual(step, -1);
+  const run = lines.findIndex((line, index) => index > step && line.trim() === "run: |");
+  assert.notEqual(run, -1);
+  const nextStep = lines.findIndex((line, index) => index > run && line.startsWith("      - name:"));
+  return lines.slice(run + 1, nextStep === -1 ? undefined : nextStep)
+    .map((line) => line.replace(/^ {10}/, ""))
+    .join("\n");
+}
+
+const mockGh = String.raw`
+gh() {
+  printf '%s\n' "$*" >> "$MOCK_LOG"
+  case "$1 $2" in
+    "api --paginate")
+      if [[ "$MOCK_SCENARIO" == duplicate || ( "$MOCK_SCENARIO" == late_duplicate && -f "$MOCK_CREATED" ) ]]; then
+        printf '[[{"id":123,"tag_name":"v0.1.0-beta.3"},{"id":124,"tag_name":"v0.1.0-beta.3"}]]\n'
+      elif [[ "$MOCK_SCENARIO" == existing ]]; then
+        printf '[[{"id":123,"tag_name":"v0.1.0-beta.3"}]]\n'
+      else
+        # A newly created draft remains invisible to both list requests.
+        printf '[[]]\n'
+      fi
+      ;;
+    "api -X")
+      [[ "$3" == POST && "$4" == "repos/$GH_REPO/releases" ]]
+      [[ " $* " == *" -f tag_name=$GITHUB_REF_NAME "* && " $* " == *" -f target_commitish=$GITHUB_SHA "* ]]
+      [[ " $* " == *" -F draft=true "* && " $* " == *" -F prerelease=true "* ]]
+      : > "$MOCK_CREATED"
+      printf '{"id":123,"tag_name":"v0.1.0-beta.3"}\n'
+      ;;
+    "api repos/$GH_REPO/git/ref/tags/$GITHUB_REF_NAME")
+      printf 'refs/tags/v0.1.0-beta.3\n'
+      ;;
+    "api repos/$GH_REPO/commits/$GITHUB_REF_NAME")
+      if [[ "$MOCK_SCENARIO" == wrong_target ]]; then
+        printf '0000000000000000000000000000000000000000\n'
+      else
+        printf '%s\n' "$GITHUB_SHA"
+      fi
+      ;;
+    "api repos/$GH_REPO/releases/123")
+      if [[ "$MOCK_SCENARIO" == existing_asset ]]; then
+        assets='[{"name":"Cassette_0.1.0-beta.3_amd64.deb"}]'
+      elif [[ -f "$MOCK_UPLOADED" ]]; then
+        assets='[{"name":"Cassette_0.1.0-beta.3_amd64.deb"},{"name":"Cassette-0.1.0-beta.3-1.x86_64.rpm"},{"name":"Cassette_0.1.0-beta.3_amd64.AppImage"},{"name":"Cassette_0.1.0-beta.3_amd64.AppImage.sig"}]'
+      else
+        assets='[]'
+      fi
+      if [[ "$MOCK_SCENARIO" == not_draft ]]; then
+        draft=false
+      else
+        draft=true
+      fi
+      printf '{"id":123,"tag_name":"v0.1.0-beta.3","draft":%s,"prerelease":true,"published_at":null,"assets":%s}\n' "$draft" "$assets"
+      ;;
+    "release upload")
+      [[ " $* " != *" --clobber "* ]]
+      : > "$MOCK_UPLOADED"
+      ;;
+    *) printf 'Unexpected gh call: %s\n' "$*" >&2; return 1 ;;
+  esac
+}
+`;
+
+for (const [name, ending] of [["LF", "\n"], ["CRLF", "\r\n"]]) {
+  test(`draft creation uses returned ID even while ${name} release lists remain stale`, () => {
+    const directory = mkdtempSync(join(tmpdir(), "cassette-draft-race-test-"));
+    const log = join(directory, "gh-calls");
+    const created = join(directory, "created");
+    const uploaded = join(directory, "uploaded");
+    writeFileSync(log, "");
+    const script = draftReleaseScript(read(".github/workflows/release.yml").replace(/\r?\n/g, ending));
+    const environment = {
+      ...process.env,
+      GH_REPO: "atilla-m/cassette",
+      GH_TOKEN: "mock-only",
+      GITHUB_REF_NAME: "v0.1.0-beta.3",
+      GITHUB_SHA: "0123456789abcdef0123456789abcdef01234567",
+      RELEASE_VERSION: "0.1.0-beta.3",
+      MOCK_LOG: log,
+      MOCK_CREATED: created,
+      MOCK_UPLOADED: uploaded,
+    };
+    try {
+      for (const [scenario, expectedExit, expectedPost, expectedUpload] of [
+        ["delayed", 0, true, true],
+        ["existing", 0, false, true],
+        ["duplicate", 1, false, false],
+        ["late_duplicate", 1, true, false],
+        ["existing_asset", 1, true, false],
+        ["not_draft", 1, true, false],
+        ["wrong_target", 1, false, false],
+      ]) {
+        writeFileSync(log, "");
+        rmSync(created, { force: true });
+        rmSync(uploaded, { force: true });
+        const result = spawnSync("bash", ["-c", `${mockGh}\n${script}`], {
+          cwd: directory,
+          encoding: "utf8",
+          env: { ...environment, MOCK_SCENARIO: scenario },
+        });
+        assert.equal(result.status, expectedExit, `${name} ${scenario}: ${result.stderr}`);
+        const calls = readFileSync(log, "utf8");
+        assert.equal(calls.includes("api -X POST"), expectedPost, `${name} ${scenario}: create`);
+        assert.equal(calls.includes("release upload"), expectedUpload, `${name} ${scenario}: upload`);
+        assert.ok(!calls.includes("--clobber"), `${name} ${scenario}: no overwrite`);
+        if (expectedUpload) {
+          const upload = calls.split("\n").find((line) => line.startsWith("release upload "));
+          assert.deepEqual(upload.split(" ").slice(3), [
+            "release-assets/linux/deb/Cassette_0.1.0-beta.3_amd64.deb",
+            "release-assets/linux/rpm/Cassette-0.1.0-beta.3-1.x86_64.rpm",
+            "release-assets/linux/appimage/Cassette_0.1.0-beta.3_amd64.AppImage",
+            "release-assets/linux/appimage/Cassette_0.1.0-beta.3_amd64.AppImage.sig",
+          ]);
+        }
+        if (scenario === "delayed") {
+          assert.match(calls, /api repos\/atilla-m\/cassette\/releases\/123/);
+          assert.equal(calls.match(/api --paginate/g)?.length, 2);
+        }
+      }
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 }
 
