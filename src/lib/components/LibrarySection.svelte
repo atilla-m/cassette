@@ -16,7 +16,7 @@
     <h2 id={title.toLowerCase().replaceAll(" ", "-")}>{title}</h2>
     {#if onViewAll}
       <button type="button" onclick={onViewAll}>{viewAllLabel}</button>
-    {:else}
+    {:else if viewAllLabel}
       <span class="section-label">{viewAllLabel}</span>
     {/if}
   </div>

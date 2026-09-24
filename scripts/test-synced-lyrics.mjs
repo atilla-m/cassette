@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   parseLrcLine,
   parseLrcLyrics,
+  hasSyncedLyricsIntro,
   resolveSyncedLyricsState,
   startsSyncedLyricBreak,
 } from "../src/lib/utils/syncedLyrics.ts";
@@ -41,9 +42,12 @@ test("recognizes conservative explicit instrumental markers", () => {
 test("shows an intro before the first timed cue", () => {
   const cues = parseLrcLyrics("[00:05.00]Opening lyric");
 
+  assert.equal(hasSyncedLyricsIntro(cues), true);
   assert.deepEqual(resolveSyncedLyricsState(cues, 0), { kind: "intro", activeCueIndex: -1 });
   assert.deepEqual(resolveSyncedLyricsState(cues, 4), { kind: "intro", activeCueIndex: -1 });
   assert.deepEqual(resolveSyncedLyricsState(cues, 5), { kind: "lyric", activeCueIndex: 0 });
+  assert.equal(hasSyncedLyricsIntro(parseLrcLyrics("[00:00.00]Opening lyric")), false);
+  assert.equal(hasSyncedLyricsIntro(parseLrcLyrics("[00:00.00]Opening lyric"), 2), true);
 });
 
 test("does not infer breaks from long lyric gaps or invent an outro", () => {

@@ -98,6 +98,12 @@ export function startsSyncedLyricBreak(cues: SyncedLyricCue[], cueIndex: number)
   return cues[cueIndex]?.kind === "break" && (cueIndex === 0 || cues[cueIndex - 1]?.kind !== "break");
 }
 
+// Keep the intro cue in the timeline after it stops being active. Removing it
+// changes the rendered grid and makes the opening note vanish on the first line.
+export function hasSyncedLyricsIntro(cues: SyncedLyricCue[], offsetSeconds = 0) {
+  return resolveSyncedLyricsState(cues, 0, offsetSeconds).kind === "intro";
+}
+
 function isExplicitInstrumentalMarker(text: string) {
   const normalized = unwrapMarker(text.trim().toLocaleLowerCase()).replace(/\s+/g, " ");
 

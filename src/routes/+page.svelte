@@ -135,11 +135,14 @@
     type PlaybackSeekRequest,
   } from "$lib/utils/playbackSeek";
   import {
+    hasSyncedLyricsIntro,
     parseLrcLyrics,
     resolveSyncedLyricsState,
     startsSyncedLyricBreak,
     type SyncedLyricCue,
   } from "$lib/utils/syncedLyrics";
+  import { sortAlbumDisplayTracks, type AlbumTrackSortKey } from "$lib/utils/albumTrackSort";
+  import { stepView, visitView, type ViewHistory } from "$lib/utils/viewHistory";
   import {
     STATS_PAGE_SIZE,
     nextStatsLimit,
@@ -153,7 +156,7 @@
   import { listen } from "@tauri-apps/api/event";
   import { ask } from "@tauri-apps/plugin-dialog";
   import { openPath, openUrl } from "@tauri-apps/plugin-opener";
-  import { onMount } from "svelte";
+  import { onMount, untrack } from "svelte";
   import packageInfo from "../../package.json";
 
   type SongSortKey = "title" | "artist" | "album" | "duration" | "recentlyAdded" | "recentlyPlayed" | "playCount";
@@ -176,7 +179,11 @@
   type ContextMenuItem = {
     label: string;
     disabled?: boolean;
-    action: () => void | Promise<void>;
+    action?: () => void | Promise<void>;
+    items?: ContextMenuItem[];
+    checked?: boolean;
+    toggle?: boolean;
+    radio?: boolean;
   };
   type ContextMenuState = {
     x: number;
@@ -190,6 +197,19 @@
   type ArtistNavigationOrigin =
     | { view: "Artists" }
     | { view: "Genres"; genreName: string };
+  type ViewLocation = {
+    view: string;
+    albumId: string | null;
+    albumOrigin: AlbumNavigationOrigin;
+    artistName: string | null;
+    artistOrigin: ArtistNavigationOrigin;
+    genreName: string | null;
+    playlistId: string | null;
+    likedSongs: boolean;
+    mixBuilder: boolean;
+    libraryHealth: boolean;
+    videoId: string | null;
+  };
   type ThemeId = "cassette-teal" | "rose-noir" | "royal-gold" | "glacier" | "obsidian";
   type ThemePreset = {
     id: ThemeId;
@@ -521,6 +541,16 @@
   let selectedArtistName = $state<string | null>(null);
   let artistNavigationOrigin = $state<ArtistNavigationOrigin>({ view: "Artists" });
   let selectedGenreName = $state<string | null>(null);
+  let viewHistory = $state<ViewHistory<ViewLocation>>({
+    entries: [{
+      view: "Albums", albumId: null, albumOrigin: { view: "Albums" },
+      artistName: null, artistOrigin: { view: "Artists" }, genreName: null,
+      playlistId: null, likedSongs: false, mixBuilder: false, libraryHealth: false, videoId: null,
+    }],
+    index: 0,
+  });
+  let canNavigateBack = $derived(viewHistory.index > 0);
+  let canNavigateForward = $derived(viewHistory.index < viewHistory.entries.length - 1);
   let isLikedSongsOpen = $state(false);
   let isMixBuilderOpen = $state(false);
   let isCreatePlaylistOpen = $state(false);
@@ -539,6 +569,8 @@
   let songFormatFilter = $state("All");
   let albumSort = $state<AlbumSortKey>("title");
   let albumSortDirection = $state<SortDirection>("asc");
+  let albumTrackSort = $state<AlbumTrackSortKey>("trackNumber");
+  let albumTrackSortDirection = $state<SortDirection>("asc");
   let artistSort = $state<ArtistSortKey>("name");
   let artistSortDirection = $state<SortDirection>("asc");
   let genreSort = $state<GenreSortKey>("name");
@@ -591,7 +623,6 @@
   let lyricsLookupMessage = $state<string | null>(null);
   let lyricsLookupError = $state<string | null>(null);
   let isLyricsOptionsOpen = $state(false);
-  let lyricsReturnView = $state<string | null>(null);
   let tagEditorData = $state<TrackTagEditorData | null>(null);
   let tagEditorTrack = $state<Track | null>(null);
   let tagEditorDraft = $state<TagEditorDraft>(emptyTagEditorDraft());
@@ -682,8 +713,11 @@
     selectedAlbum ? tracksForAlbum(selectedAlbum) : [],
   );
   let selectedAlbumSearchTracks = $derived(searchFilterAlbumTracks(selectedAlbumTracks, normalizedSearchQuery));
-  let selectedAlbumDiscGroups = $derived(albumDiscGroups(selectedAlbumSearchTracks));
-  let selectedAlbumIsMultiDisc = $derived(albumHasMultipleDiscs(selectedAlbumSearchTracks));
+  let selectedAlbumDisplayTracks = $derived(sortAlbumDisplayTracks(selectedAlbumSearchTracks, albumTrackSort, albumTrackSortDirection));
+  let selectedAlbumDiscGroups = $derived(albumTrackSort === "trackNumber"
+    ? albumDiscGroups(selectedAlbumDisplayTracks)
+    : [{ discNumber: null, tracks: selectedAlbumDisplayTracks }]);
+  let selectedAlbumIsMultiDisc = $derived(albumTrackSort === "trackNumber" && albumHasMultipleDiscs(selectedAlbumSearchTracks));
   let selectedAlbumDurationLabel = $derived(albumTotalDurationLabel(selectedAlbumTracks));
   let selectedAlbumFormatSummary = $derived(albumFormatSummary(selectedAlbumTracks));
   let selectedArtistTracks = $derived(selectedArtist ? tracksForArtist(selectedArtist) : []);
@@ -766,6 +800,7 @@
   let syncedLyricLines = $derived(currentLyrics?.kind === "synced" ? parseLrcLyrics(currentLyrics.text) : []);
   let lyricsOffsetSeconds = $derived(currentLyrics?.offsetSeconds ?? 0);
   let syncedLyricsState = $derived(resolveSyncedLyricsState(syncedLyricLines, positionSeconds, lyricsOffsetSeconds));
+  let hasLyricsIntro = $derived(hasSyncedLyricsIntro(syncedLyricLines, lyricsOffsetSeconds));
   let activeLyricsScrollKey = $derived(
     syncedLyricsState.kind === "intro"
       ? "intro"
@@ -907,6 +942,15 @@
       selectedVideoId = null;
       isEditingVideo = false;
     }
+  });
+
+  $effect(() => {
+    const location = currentViewLocation();
+    const [previousHistory, nextHistory] = untrack(() => [
+      viewHistory,
+      visitView(viewHistory, location, sameViewLocation),
+    ]);
+    if (nextHistory !== previousHistory) viewHistory = nextHistory;
   });
 
   $effect(() => {
@@ -3696,12 +3740,38 @@
     event.stopPropagation();
     const button = event.currentTarget as HTMLElement;
     const bounds = button.getBoundingClientRect();
+    const sortOptions: { key: AlbumTrackSortKey; label: string }[] = [
+      { key: "trackNumber", label: "Track number" },
+      { key: "title", label: "Title" },
+      { key: "artist", label: "Artist" },
+      { key: "duration", label: "Duration" },
+      { key: "mostPlayed", label: "Most played" },
+      { key: "leastPlayed", label: "Least played" },
+    ];
 
     openContextMenu(Math.max(8, bounds.right - 210), bounds.bottom + 6, [
       {
         label: "Edit album tags…",
         disabled: selectedAlbumTracks.length === 0,
         action: () => openAlbumTagEditor(),
+      },
+      {
+        label: "Sort songs",
+        items: [
+          ...sortOptions.map(({ key, label }) => ({
+            label,
+            checked: albumTrackSort === key,
+            radio: true,
+            action: () => { albumTrackSort = key; },
+          })),
+          {
+            label: "Descending order",
+            checked: albumTrackSortDirection === "desc",
+            toggle: true,
+            disabled: albumTrackSort === "mostPlayed" || albumTrackSort === "leastPlayed",
+            action: () => { albumTrackSortDirection = nextSortDirection(albumTrackSortDirection); },
+          },
+        ],
       },
     ]);
   }
@@ -3870,27 +3940,60 @@
     mainElement?.scrollTo({ top: 0 });
   }
 
+  function currentViewLocation(): ViewLocation {
+    return {
+      view: activeView,
+      albumId: selectedAlbumId,
+      albumOrigin: albumNavigationOrigin,
+      artistName: selectedArtistName,
+      artistOrigin: artistNavigationOrigin,
+      genreName: selectedGenreName,
+      playlistId: selectedPlaylistId,
+      likedSongs: isLikedSongsOpen,
+      mixBuilder: isMixBuilderOpen,
+      libraryHealth: isLibraryHealthOpen,
+      videoId: selectedVideoId,
+    };
+  }
+
+  function sameViewLocation(left: ViewLocation, right: ViewLocation) {
+    return JSON.stringify(left) === JSON.stringify(right);
+  }
+
+  function navigateViewHistory(direction: -1 | 1) {
+    const nextHistory = stepView(viewHistory, direction);
+    if (nextHistory === viewHistory) return;
+
+    viewHistory = nextHistory;
+    const location = nextHistory.entries[nextHistory.index];
+    void saveActiveVideoProgress(true);
+    activeView = location.view;
+    selectedAlbumId = location.albumId;
+    albumNavigationOrigin = location.albumOrigin;
+    selectedArtistName = location.artistName;
+    artistNavigationOrigin = location.artistOrigin;
+    selectedGenreName = location.genreName;
+    selectedPlaylistId = location.playlistId;
+    isLikedSongsOpen = location.likedSongs;
+    isMixBuilderOpen = location.mixBuilder;
+    isLibraryHealthOpen = location.libraryHealth;
+    selectedVideoId = location.videoId;
+    isCreatePlaylistOpen = false;
+    isPlaylistEditMode = false;
+    isLyricsOptionsOpen = false;
+    isLyricsPickerOpen = false;
+    clearGenreEditState();
+    searchQuery = "";
+    mainElement?.scrollTo({ top: 0 });
+  }
+
   function handleNowPlayingSelect() {
     handleLyricsSelect();
   }
 
   function handleLyricsSelect() {
-    if (activeView !== "Now Playing") {
-      lyricsReturnView = activeView;
-    }
-
     activeView = "Now Playing";
     isQueueOpen = false;
-    mainElement?.scrollTo({ top: 0 });
-  }
-
-  function handleCloseLyrics() {
-    activeView = lyricsReturnView && lyricsReturnView !== "Now Playing" && lyricsReturnView !== "Home"
-      ? lyricsReturnView
-      : "Albums";
-    lyricsReturnView = null;
-    isLyricsOptionsOpen = false;
-    isLyricsPickerOpen = false;
     mainElement?.scrollTo({ top: 0 });
   }
 
@@ -3900,6 +4003,20 @@
 
   function handleAlbumSelect(album: Album) {
     selectAlbumId(album.id, albumOriginForCurrentView());
+  }
+
+  function handleAlbumArtistSelect(artistName: string) {
+    const artist = displayArtists.find((candidate) => candidate.name === artistName);
+    if (artist) handleArtistSelect(artist);
+  }
+
+  function handleGenreNameSelect(genreName: string) {
+    const genre = displayGenres.find((candidate) => candidate.name === genreName);
+    if (genre) handleGenreSelect(genre);
+  }
+
+  function artistTotalPlays(artistName: string) {
+    return displayArtists.find((candidate) => candidate.name === artistName)?.playCount ?? 0;
   }
 
   async function handleShuffleLibrary() {
@@ -4448,90 +4565,6 @@
     isPlaylistEditMode = false;
     isLibraryHealthOpen = true;
     selectedPlaylistId = null;
-    searchQuery = "";
-    mainElement?.scrollTo({ top: 0 });
-  }
-
-  function handleAlbumDetailBack() {
-    const origin = albumNavigationOrigin;
-
-    selectedAlbumId = null;
-    clearGenreEditState();
-    searchQuery = "";
-
-    if (origin.view === "Artists") {
-      activeView = "Artists";
-      selectedArtistName = origin.artistName;
-      artistNavigationOrigin = { view: "Artists" };
-      selectedGenreName = null;
-    } else if (origin.view === "Genres") {
-      activeView = "Genres";
-      selectedGenreName = origin.genreName;
-      selectedArtistName = null;
-      artistNavigationOrigin = { view: "Artists" };
-    } else {
-      activeView = "Albums";
-      selectedArtistName = null;
-      artistNavigationOrigin = { view: "Artists" };
-      selectedGenreName = null;
-    }
-
-    albumNavigationOrigin = { view: "Albums" };
-    mainElement?.scrollTo({ top: 0 });
-  }
-
-  function albumBackLabel() {
-    if (albumNavigationOrigin.view === "Artists") {
-      return `← ${albumNavigationOrigin.artistName}`;
-    }
-
-    if (albumNavigationOrigin.view === "Genres") {
-      return `← ${albumNavigationOrigin.genreName}`;
-    }
-
-    return "← Albums";
-  }
-
-  function handleArtistDetailBack() {
-    const origin = artistNavigationOrigin;
-
-    selectedArtistName = null;
-    clearGenreEditState();
-    searchQuery = "";
-
-    if (origin.view === "Genres") {
-      activeView = "Genres";
-      selectedGenreName = origin.genreName;
-    } else {
-      activeView = "Artists";
-      selectedGenreName = null;
-    }
-
-    artistNavigationOrigin = { view: "Artists" };
-    mainElement?.scrollTo({ top: 0 });
-  }
-
-  function artistBackLabel() {
-    if (artistNavigationOrigin.view === "Genres") {
-      return `← ${artistNavigationOrigin.genreName}`;
-    }
-
-    return "← Artists";
-  }
-
-  function handleBackToArtists() {
-    selectedArtistName = null;
-    artistNavigationOrigin = { view: "Artists" };
-    albumNavigationOrigin = { view: "Albums" };
-    clearGenreEditState();
-    searchQuery = "";
-    mainElement?.scrollTo({ top: 0 });
-  }
-
-  function handleBackToGenres() {
-    selectedGenreName = null;
-    albumNavigationOrigin = { view: "Albums" };
-    artistNavigationOrigin = { view: "Artists" };
     searchQuery = "";
     mainElement?.scrollTo({ top: 0 });
   }
@@ -5367,6 +5400,7 @@
     }
 
     details.push(songCountLabel(albumTracks.length));
+    if (showAlbumPlayCounts) details.push(playsLabel(album.playCount));
 
     if (selectedAlbumDurationLabel) {
       details.push(selectedAlbumDurationLabel);
@@ -6708,6 +6742,12 @@
       class="home"
       bind:this={mainElement}
     >
+      {#if activeView !== "Now Playing"}
+        <div class="view-history-controls" role="group" aria-label="View history">
+          <button type="button" aria-label="Back to previous view" title="Back" disabled={!canNavigateBack} onclick={() => navigateViewHistory(-1)}>‹</button>
+          <button type="button" aria-label="Forward to next view" title="Forward" disabled={!canNavigateForward} onclick={() => navigateViewHistory(1)}>›</button>
+        </div>
+      {/if}
       {#if activeView !== "Now Playing" && !isAlbumDetailView && !isArtistDetailView && !isGenreDetailView && !isPlaylistDetailView}
         <header class="home-header">
           <div>
@@ -6773,9 +6813,10 @@
         <section class="lyrics-view" aria-labelledby="lyrics-view-title">
           {#if currentTrack}
             <header class="lyrics-view-top">
-              <button class="lyrics-close-button" type="button" onclick={handleCloseLyrics}>
-                ← Back
-              </button>
+              <div class="view-history-controls lyrics-history-controls" role="group" aria-label="View history">
+                <button type="button" aria-label="Back to previous view" title="Back" disabled={!canNavigateBack} onclick={() => navigateViewHistory(-1)}>‹</button>
+                <button type="button" aria-label="Forward to next view" title="Forward" disabled={!canNavigateForward} onclick={() => navigateViewHistory(1)}>›</button>
+              </div>
               <div class="lyrics-title-block">
                 <h2 id="lyrics-view-title">Lyrics</h2>
               </div>
@@ -6860,13 +6901,14 @@
                   </div>
                 {:else if currentLyrics?.kind === "synced" && syncedLyricLines.length > 0}
                   <div class="synced-lyrics" bind:this={lyricsPanelElement}>
-                    {#if syncedLyricsState.kind === "intro"}
+                    {#if hasLyricsIntro}
                       <button
-                        class="lyrics-break-cue active"
-                        data-active="true"
+                        class:active={syncedLyricsState.kind === "intro"}
+                        class="lyrics-break-cue"
+                        data-active={syncedLyricsState.kind === "intro" ? "true" : undefined}
                         type="button"
                         aria-label={lyricBreakLabel(null)}
-                        aria-current="true"
+                        aria-current={syncedLyricsState.kind === "intro" ? "true" : undefined}
                         onclick={() => void handleSeek(0)}
                       >
                         <span aria-hidden="true">♪</span>
@@ -7015,9 +7057,10 @@
             {/if}
           {:else}
             <header class="lyrics-view-top">
-              <button class="lyrics-close-button" type="button" onclick={handleCloseLyrics}>
-                ← Back
-              </button>
+              <div class="view-history-controls lyrics-history-controls" role="group" aria-label="View history">
+                <button type="button" aria-label="Back to previous view" title="Back" disabled={!canNavigateBack} onclick={() => navigateViewHistory(-1)}>‹</button>
+                <button type="button" aria-label="Forward to next view" title="Forward" disabled={!canNavigateForward} onclick={() => navigateViewHistory(1)}>›</button>
+              </div>
               <div class="lyrics-title-block">
                 <h2 id="lyrics-view-title">Lyrics</h2>
               </div>
@@ -7278,7 +7321,6 @@
       {:else if activeView === "Albums"}
         {#if selectedAlbum}
           <section class="detail-view" aria-labelledby="album-detail-title">
-            <button class="back-button album-detail-back" type="button" onclick={handleAlbumDetailBack}>{albumBackLabel()}</button>
             <div class="album-detail-header" style={`--item-color: ${selectedAlbum.color}`}>
               <button
                 class="album-detail-overflow"
@@ -7319,12 +7361,21 @@
               <div class="detail-copy album-detail-copy">
                 <p class="eyebrow">Album</p>
                 <h3 id="album-detail-title">{selectedAlbum.title}</h3>
-                <p class="album-detail-artist">{selectedAlbum.artist}</p>
+                <p class="album-detail-artist">
+                  {#if displayArtists.some((artist) => artist.name === selectedAlbum.artist)}
+                    <button type="button" onclick={() => handleAlbumArtistSelect(selectedAlbum.artist)}>{selectedAlbum.artist}</button>
+                  {:else}
+                    {selectedAlbum.artist}
+                  {/if}
+                </p>
                 <div class="album-detail-meta" aria-label={albumHeroDetails(selectedAlbum, selectedAlbumTracks)}>
                   {#if selectedAlbum.year}
                     <span>{selectedAlbum.year}</span>
                   {/if}
                   <span>{songCountLabel(selectedAlbumTracks.length)}</span>
+                  {#if showAlbumPlayCounts}
+                    <span>{playsLabel(selectedAlbum.playCount)}</span>
+                  {/if}
                   {#if selectedAlbumDurationLabel}
                     <span>{selectedAlbumDurationLabel}</span>
                   {/if}
@@ -7334,7 +7385,7 @@
                 </div>
                 <div class="album-genre-chip-list" aria-label="Album genres">
                   {#each selectedAlbumGenres as genre}
-                    <span class:muted={genre === "Unknown Genre"}>{genre}</span>
+                    <button type="button" class:muted={genre === "Unknown Genre"} onclick={() => handleGenreNameSelect(genre)}>{genre}</button>
                   {/each}
                 </div>
                 <div class="album-detail-actions">
@@ -7381,7 +7432,7 @@
               </div>
             {/if}
 
-            <LibrarySection title="Album Songs" viewAllLabel={normalizedSearchQuery ? `${selectedAlbumSearchTracks.length} ${selectedAlbumSearchTracks.length === 1 ? "match" : "matches"}` : `${selectedAlbumTracks.length} total`}>
+            <LibrarySection title="Album Songs" viewAllLabel="">
               {#if selectedAlbumTracks.length === 0}
                 <div class="group-empty">
                   <h3>No songs found for this album</h3>
@@ -7520,7 +7571,6 @@
       {:else if activeView === "Artists"}
         {#if selectedArtist}
           <section class="detail-view" aria-labelledby="artist-detail-title">
-            <button class="back-button album-detail-back" type="button" onclick={handleArtistDetailBack}>{artistBackLabel()}</button>
             <div class="artist-detail-header" style={`--item-color: ${selectedArtist.color}`}>
               <div class="artist-avatar detail-avatar" style={`--item-color: ${selectedArtist.color}`} aria-hidden="true">
                 {selectedArtist.name.slice(0, 1)}
@@ -7528,13 +7578,14 @@
               <div class="detail-copy">
                 <p class="eyebrow">Artist</p>
                 <h3 id="artist-detail-title">{selectedArtist.name}</h3>
-                <div class="album-detail-meta" aria-label={`${selectedArtist.name} summary`}>
+                <div class="album-detail-meta" aria-label={`${selectedArtist.name} summary${showArtistPlayCounts ? `, ${playsLabel(selectedArtist.playCount)}` : ""}`}>
                   <span>{artistSongCount(selectedArtist)}</span>
                   <span>{selectedArtistAlbums.length} {selectedArtistAlbums.length === 1 ? "album" : "albums"}</span>
+                  {#if showArtistPlayCounts}<span>{playsLabel(selectedArtist.playCount)}</span>{/if}
                 </div>
                 <div class="album-genre-chip-list" aria-label="Artist genres">
                   {#each selectedArtistGenres as genre}
-                    <span class:muted={genre === "Unknown Genre"}>{genre}</span>
+                    <button type="button" class:muted={genre === "Unknown Genre"} onclick={() => handleGenreNameSelect(genre)}>{genre}</button>
                   {/each}
                 </div>
                 <div class="album-detail-actions artist-detail-actions">
@@ -7593,7 +7644,7 @@
                         </div>
                         <button class="album-card-copy" type="button" onclick={() => handleAlbumSelect(album)}>
                           <strong>{album.title}</strong>
-                          <small>{albumDetail(album)}</small>
+                          <small>{albumDetail(album)}{showAlbumPlayCounts ? ` · ${playsLabel(album.playCount)}` : ""}</small>
                         </button>
                       </div>
                     </article>
@@ -7651,7 +7702,6 @@
       {:else if activeView === "Genres"}
         {#if selectedGenre}
           <section class="detail-view" aria-labelledby="genre-detail-title">
-            <button class="back-button album-detail-back" type="button" onclick={handleBackToGenres}>← Genres</button>
             <div class="genre-detail-header" style={`--item-color: ${selectedGenre.color}`}>
               <div class="genre-mark detail-avatar" style={`--item-color: ${selectedGenre.color}`} aria-hidden="true">
                 {selectedGenre.name.slice(0, 1)}
@@ -7659,10 +7709,11 @@
               <div class="detail-copy">
                 <p class="eyebrow">Genre</p>
                 <h3 id="genre-detail-title">{selectedGenre.name}</h3>
-                <div class="album-detail-meta" aria-label={`${selectedGenre.name} summary`}>
+                <div class="album-detail-meta" aria-label={`${selectedGenre.name} summary${showGenrePlayCounts ? `, ${playsLabel(selectedGenre.playCount)}` : ""}`}>
                   <span>{songCountLabel(selectedGenreTracks.length)}</span>
                   <span>{selectedGenreArtists.length} {selectedGenreArtists.length === 1 ? "artist" : "artists"}</span>
                   <span>{selectedGenreAlbums.length} {selectedGenreAlbums.length === 1 ? "album" : "albums"}</span>
+                  {#if showGenrePlayCounts}<span>{playsLabel(selectedGenre.playCount)}</span>{/if}
                 </div>
                 <div class="album-detail-actions genre-detail-actions">
                   <button type="button" disabled={selectedGenreTracks.length === 0} onclick={() => void handlePlaySelectedGenre()}>
@@ -7720,7 +7771,7 @@
                         </div>
                         <button class="album-card-copy" type="button" onclick={() => handleAlbumSelect(album)}>
                           <strong>{album.title}</strong>
-                          <small>{albumDetail(album)}</small>
+                          <small>{albumDetail(album)}{showAlbumPlayCounts ? ` · ${playsLabel(album.playCount)}` : ""}</small>
                         </button>
                       </div>
                     </article>
@@ -7744,7 +7795,7 @@
                       </div>
                       <div>
                         <h3>{artist.name}</h3>
-                        <p>{artistSongCount(artist)}</p>
+                        <p>{artistSongCount(artist)}{showArtistPlayCounts ? ` · ${playsLabel(artistTotalPlays(artist.name))}` : ""}</p>
                       </div>
                     </button>
                   {/each}
@@ -10271,7 +10322,6 @@
 
   .home.albums-landing-view {
     --content-bottom-padding: 28px;
-    padding-top: 26px;
   }
 
   .home.album-detail-view {
@@ -10288,11 +10338,10 @@
 
   .home.songs-library-view {
     --content-bottom-padding: 34px;
-    padding-top: 26px;
   }
 
   .home.lyrics-mode {
-    padding: clamp(22px, 3vw, 38px) clamp(22px, 4vw, 56px);
+    padding: 32px 32px var(--content-bottom-padding);
   }
 
   .home-header {
@@ -11055,7 +11104,6 @@
 
   .home.playlist-detail-view {
     --content-bottom-padding: 28px;
-    padding-top: 26px;
   }
 
   .playlist-card-grid {
@@ -11459,7 +11507,6 @@
     text-underline-offset: 3px;
   }
 
-  .lyrics-close-button,
   .lyrics-options-button,
   .lyrics-options-header button,
   .lyrics-option-actions button {
@@ -11475,18 +11522,6 @@
     padding: 0 12px;
   }
 
-  .lyrics-close-button {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    border-color: rgba(78, 90, 106, 0.56);
-    background: rgba(22, 27, 34, 0.5);
-    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.12);
-    color: var(--text);
-  }
-
-  .lyrics-close-button:hover,
-  .lyrics-close-button:focus-visible,
   .lyrics-options-button:hover,
   .lyrics-options-button:focus-visible,
   .lyrics-options-button.active,
@@ -12163,6 +12198,44 @@
     color: var(--text-dim);
   }
 
+  .view-history-controls {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 16px;
+  }
+
+  .view-history-controls button {
+    width: 36px;
+    height: 36px;
+    border: 1px solid var(--border-strong);
+    border-radius: 8px;
+    background: var(--panel-strong);
+    color: var(--text);
+    font: inherit;
+    font-size: 1.5rem;
+    line-height: 1;
+    cursor: pointer;
+  }
+
+  .view-history-controls button:hover:not(:disabled),
+  .view-history-controls button:focus-visible {
+    border-color: var(--accent-strong);
+    background: var(--panel-hover);
+    outline: none;
+  }
+
+  .view-history-controls button:disabled {
+    color: var(--text-dim);
+    cursor: default;
+    opacity: 0.5;
+  }
+
+  .lyrics-history-controls {
+    margin: 0;
+    justify-self: start;
+  }
+
   .playlist-detail-back {
     justify-self: start;
   }
@@ -12306,11 +12379,6 @@
   .artist-detail-actions,
   .genre-detail-actions {
     margin-top: 2px;
-  }
-
-  .album-detail-back {
-    border-color: rgba(64, 77, 93, 0.72);
-    background: color-mix(in srgb, var(--panel) 78%, transparent);
   }
 
   .album-detail-header {
@@ -12463,6 +12531,23 @@
     font-size: 1rem;
   }
 
+  .album-detail-artist button {
+    border: 0;
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
+    font: inherit;
+    padding: 0;
+  }
+
+  .album-detail-artist button:hover,
+  .album-detail-artist button:focus-visible {
+    color: var(--accent-text);
+    outline: none;
+    text-decoration: underline;
+    text-underline-offset: 3px;
+  }
+
   .album-detail-meta,
   .album-genre-chip-list {
     display: flex;
@@ -12471,7 +12556,7 @@
   }
 
   .album-detail-meta span,
-  .album-genre-chip-list span {
+  .album-genre-chip-list button {
     min-height: 28px;
     border: 1px solid rgba(61, 74, 91, 0.72);
     border-radius: 999px;
@@ -12483,13 +12568,21 @@
     padding: 7px 10px;
   }
 
-  .album-genre-chip-list span {
+  .album-genre-chip-list button {
     border-color: color-mix(in srgb, var(--accent) 34%, transparent);
     background: rgba(23, 51, 47, 0.34);
     color: var(--accent-text);
+    cursor: pointer;
+    font-family: inherit;
   }
 
-  .album-genre-chip-list span.muted {
+  .album-genre-chip-list button:hover,
+  .album-genre-chip-list button:focus-visible {
+    border-color: var(--accent-strong);
+    outline: none;
+  }
+
+  .album-genre-chip-list button.muted {
     border-color: rgba(61, 74, 91, 0.56);
     background: rgba(12, 15, 20, 0.36);
     color: var(--text-soft);
@@ -15894,7 +15987,10 @@
 
     .home.playlist-detail-view {
       --content-bottom-padding: 28px;
-      padding-top: 22px;
+    }
+
+    .home.lyrics-mode {
+      padding: 22px 16px var(--content-bottom-padding);
     }
 
     .home-header {
