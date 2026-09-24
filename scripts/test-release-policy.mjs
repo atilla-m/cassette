@@ -293,6 +293,10 @@ function draftReleaseScript(release) {
 
 const mockGh = String.raw`
 MOCK_ASSETS_UPLOADED=0
+jq() {
+  # Windows jq.exe writes CRLF; model the Linux release runner's LF output.
+  command jq "$@" | tr -d '\r'
+}
 gh() {
   printf '%s\n' "$*" >> "$MOCK_LOG"
   case "$1 $2" in
