@@ -82,6 +82,7 @@
   } from "$lib/api/updates";
   import CompactDropdown, { type DropdownOption } from "$lib/components/CompactDropdown.svelte";
   import ContextMenu from "$lib/components/ContextMenu.svelte";
+  import CoverArtViewer from "$lib/components/CoverArtViewer.svelte";
   import LibrarySection from "$lib/components/LibrarySection.svelte";
   import NowPlayingBar from "$lib/components/NowPlayingBar.svelte";
   import Sidebar from "$lib/components/Sidebar.svelte";
@@ -501,6 +502,7 @@
   let hasLoadedCache = $state(false);
   let playlists = $state<Playlist[]>([]);
   let currentTrack = $state<Track | null>(null);
+  let artworkViewer = $state<{ source: string; title: string; opener: HTMLElement } | null>(null);
   let currentTrackIndex = $state<number | null>(null);
   let playbackQueue = $state<Track[]>([]);
   let currentQueueIndex = $state<number | null>(null);
@@ -1071,6 +1073,10 @@
       : null;
 
     function handleKeydown(event: KeyboardEvent) {
+      if (artworkViewer) {
+        // The viewer handles Escape/Tab. Do not run page shortcuts behind it.
+        return;
+      }
       if (isAlbumTagEditorOpen) {
         if (event.key === "Escape" && !isSavingAlbumTagEditor) {
           event.preventDefault();
@@ -6718,6 +6724,13 @@
       event.currentTarget.hidden = false;
     }
   }
+
+  function openArtworkViewer(event: MouseEvent, path: string, title: string) {
+    const source = localImageSource(path);
+    if (!source || !(event.currentTarget instanceof HTMLElement)) return;
+    // Snapshot the clicked cover; later track changes must not replace it.
+    artworkViewer = { source, title, opener: event.currentTarget };
+  }
 </script>
 
 <svelte:head>
@@ -6725,7 +6738,7 @@
 </svelte:head>
 
 <div class="app-shell">
-  <div class:lyrics-mode={activeView === "Now Playing"} class="workspace">
+  <div class:lyrics-mode={activeView === "Now Playing"} class="workspace" inert={artworkViewer !== null}>
     {#if activeView !== "Now Playing"}
       <Sidebar items={visibleNavItems} active={activeView} onNavigate={handleNavigate} />
     {/if}
@@ -6741,6 +6754,7 @@
       class:songs-library-view={activeView === "Songs"}
       class="home"
       bind:this={mainElement}
+      tabindex="-1"
     >
       {#if activeView !== "Now Playing"}
         <div class="view-history-controls" role="group" aria-label="View history">
@@ -6845,17 +6859,24 @@
                     onerror={hideBrokenImage}
                   />
                 {/if}
-                <div class="lyrics-cover" aria-hidden="true">
-                  {#if currentTrackCoverArtSrc}
+                {#if currentTrackCoverArtSrc && currentTrack?.coverArtPath}
+                  <button
+                    class="lyrics-cover cover-open-button"
+                    type="button"
+                    aria-label={`View full cover art for ${currentTrack.title}`}
+                    onclick={(event) => openArtworkViewer(event, currentTrack?.coverArtPath ?? "", currentTrack?.title ?? "Current track")}
+                  >
                     <img
                       src={currentTrackCoverArtSrc}
                       alt=""
                       onload={showLoadedImage}
                       onerror={hideBrokenImage}
                     />
-                  {/if}
-                  <span></span>
-                </div>
+                    <span></span>
+                  </button>
+                {:else}
+                  <div class="lyrics-cover" aria-hidden="true"><span></span></div>
+                {/if}
                 <div class="lyrics-sidecar-copy">
                   <h3>{currentTrack.title}</h3>
                   <p>
@@ -7341,8 +7362,14 @@
                 />
               {/if}
               <div class="album-detail-cover-shell">
-                <div class="album-art detail-cover" style={`--item-color: ${selectedAlbum.color}`} aria-hidden="true">
-                  {#if selectedAlbum.coverArtPath}
+                {#if selectedAlbum.coverArtPath}
+                  <button
+                    class="album-art detail-cover cover-open-button"
+                    style={`--item-color: ${selectedAlbum.color}`}
+                    type="button"
+                    aria-label={`View full cover art for ${selectedAlbum.title}`}
+                    onclick={(event) => openArtworkViewer(event, selectedAlbum.coverArtPath!, selectedAlbum.title)}
+                  >
                     <img
                       src={localImageSource(selectedAlbum.coverArtPath) ?? ""}
                       alt=""
@@ -7350,13 +7377,15 @@
                       onerror={hideBrokenImage}
                     />
                     <span class="album-art-disc"></span>
-                  {:else}
+                  </button>
+                {:else}
+                  <div class="album-art detail-cover" style={`--item-color: ${selectedAlbum.color}`} aria-hidden="true">
                     <span class="album-art-placeholder">
                       <strong>{albumInitials(selectedAlbum)}</strong>
                       <small>{selectedAlbum.artist}</small>
                     </span>
-                  {/if}
-                </div>
+                  </div>
+                {/if}
               </div>
               <div class="detail-copy album-detail-copy">
                 <p class="eyebrow">Album</p>
@@ -10109,6 +10138,16 @@
     </div>
   {/if}
 
+  {#if artworkViewer}
+    <CoverArtViewer
+      source={artworkViewer.source}
+      title={artworkViewer.title}
+      opener={artworkViewer.opener}
+      fallbackFocus={mainElement}
+      onClose={() => { artworkViewer = null; }}
+    />
+  {/if}
+
   {#if !isVideoPlaybackActive}
     <NowPlayingBar
       track={currentTrack}
@@ -10847,6 +10886,18 @@
     box-shadow:
       0 14px 30px rgba(0, 0, 0, 0.22),
       inset 0 0 0 1px rgba(255, 255, 255, 0.14);
+  }
+
+  .cover-open-button {
+    border: 0;
+    padding: 0;
+    color: inherit;
+    cursor: zoom-in;
+  }
+
+  .cover-open-button:focus-visible {
+    outline: 3px solid var(--focus-ring);
+    outline-offset: 4px;
   }
 
   .album-art img {
