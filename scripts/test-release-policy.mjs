@@ -292,11 +292,12 @@ function draftReleaseScript(release) {
 }
 
 const mockGh = String.raw`
+MOCK_ASSETS_UPLOADED=0
 gh() {
   printf '%s\n' "$*" >> "$MOCK_LOG"
   case "$1 $2" in
     "api --paginate")
-      if [[ "$MOCK_SCENARIO" == duplicate || ( "$MOCK_SCENARIO" == late_duplicate && -f "$MOCK_CREATED" ) ]]; then
+      if [[ "$MOCK_SCENARIO" == duplicate || ( "$MOCK_SCENARIO" == late_duplicate && "$(< "$MOCK_LOG")" == *"api -X POST"* ) ]]; then
         printf '[[{"id":123,"tag_name":"v0.1.0-beta.3"},{"id":124,"tag_name":"v0.1.0-beta.3"}]]\n'
       elif [[ "$MOCK_SCENARIO" == existing ]]; then
         printf '[[{"id":123,"tag_name":"v0.1.0-beta.3"}]]\n'
@@ -309,7 +310,6 @@ gh() {
       [[ "$3" == POST && "$4" == "repos/$GH_REPO/releases" ]]
       [[ " $* " == *" -f tag_name=$GITHUB_REF_NAME "* && " $* " == *" -f target_commitish=$GITHUB_SHA "* ]]
       [[ " $* " == *" -F draft=true "* && " $* " == *" -F prerelease=true "* ]]
-      : > "$MOCK_CREATED"
       printf '{"id":123,"tag_name":"v0.1.0-beta.3"}\n'
       ;;
     "api repos/$GH_REPO/git/ref/tags/$GITHUB_REF_NAME")
@@ -325,7 +325,7 @@ gh() {
     "api repos/$GH_REPO/releases/123")
       if [[ "$MOCK_SCENARIO" == existing_asset ]]; then
         assets='[{"name":"Cassette_0.1.0-beta.3_amd64.deb"}]'
-      elif [[ -f "$MOCK_UPLOADED" ]]; then
+      elif [[ "$MOCK_ASSETS_UPLOADED" == 1 ]]; then
         assets='[{"name":"Cassette_0.1.0-beta.3_amd64.deb"},{"name":"Cassette-0.1.0-beta.3-1.x86_64.rpm"},{"name":"Cassette_0.1.0-beta.3_amd64.AppImage"},{"name":"Cassette_0.1.0-beta.3_amd64.AppImage.sig"}]'
       else
         assets='[]'
@@ -339,7 +339,7 @@ gh() {
       ;;
     "release upload")
       [[ " $* " != *" --clobber "* ]]
-      : > "$MOCK_UPLOADED"
+      MOCK_ASSETS_UPLOADED=1
       ;;
     *) printf 'Unexpected gh call: %s\n' "$*" >&2; return 1 ;;
   esac
@@ -353,8 +353,6 @@ for (const [name, ending] of [["LF", "\n"], ["CRLF", "\r\n"]]) {
   test(`draft creation uses returned ID even while ${name} release lists remain stale`, () => {
     const directory = mkdtempSync(join(tmpdir(), "cassette-draft-race-test-"));
     const log = join(directory, "gh-calls");
-    const created = join(directory, "created");
-    const uploaded = join(directory, "uploaded");
     writeFileSync(log, "");
     const script = draftReleaseScript(read(".github/workflows/release.yml").replace(/\r?\n/g, ending));
     const environment = {
@@ -364,11 +362,8 @@ for (const [name, ending] of [["LF", "\n"], ["CRLF", "\r\n"]]) {
       GITHUB_REF_NAME: "v0.1.0-beta.3",
       GITHUB_SHA: "0123456789abcdef0123456789abcdef01234567",
       RELEASE_VERSION: "0.1.0-beta.3",
-      // Git Bash on Windows does not interpret Node's D:\\... paths as POSIX paths.
-      // The spawned shell already runs in directory, so use relative fixture paths.
+      // The spawned Git Bash already runs in directory, so use a relative path.
       MOCK_LOG: "gh-calls",
-      MOCK_CREATED: "created",
-      MOCK_UPLOADED: "uploaded",
     };
     try {
       for (const [scenario, expectedExit, expectedPost, expectedUpload] of [
@@ -381,9 +376,7 @@ for (const [name, ending] of [["LF", "\n"], ["CRLF", "\r\n"]]) {
         ["wrong_target", 1, false, false],
       ]) {
         writeFileSync(log, "");
-        rmSync(created, { force: true });
-        rmSync(uploaded, { force: true });
-        const result = spawnSync(testBash, ["-c", `${mockGh}\n${script}`], {
+        const result = spawnSync(testBash, ["-x", "-c", `${mockGh}\n${script}`], {
           cwd: directory,
           encoding: "utf8",
           env: { ...environment, MOCK_SCENARIO: scenario },
