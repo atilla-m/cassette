@@ -345,6 +345,9 @@ gh() {
   esac
 }
 `;
+const testBash = process.platform === "win32"
+  ? join(process.env.ProgramFiles ?? "C:\\Program Files", "Git", "bin", "bash.exe")
+  : "bash";
 
 for (const [name, ending] of [["LF", "\n"], ["CRLF", "\r\n"]]) {
   test(`draft creation uses returned ID even while ${name} release lists remain stale`, () => {
@@ -361,9 +364,11 @@ for (const [name, ending] of [["LF", "\n"], ["CRLF", "\r\n"]]) {
       GITHUB_REF_NAME: "v0.1.0-beta.3",
       GITHUB_SHA: "0123456789abcdef0123456789abcdef01234567",
       RELEASE_VERSION: "0.1.0-beta.3",
-      MOCK_LOG: log,
-      MOCK_CREATED: created,
-      MOCK_UPLOADED: uploaded,
+      // Git Bash on Windows does not interpret Node's D:\\... paths as POSIX paths.
+      // The spawned shell already runs in directory, so use relative fixture paths.
+      MOCK_LOG: "gh-calls",
+      MOCK_CREATED: "created",
+      MOCK_UPLOADED: "uploaded",
     };
     try {
       for (const [scenario, expectedExit, expectedPost, expectedUpload] of [
@@ -378,13 +383,14 @@ for (const [name, ending] of [["LF", "\n"], ["CRLF", "\r\n"]]) {
         writeFileSync(log, "");
         rmSync(created, { force: true });
         rmSync(uploaded, { force: true });
-        const result = spawnSync("bash", ["-c", `${mockGh}\n${script}`], {
+        const result = spawnSync(testBash, ["-c", `${mockGh}\n${script}`], {
           cwd: directory,
           encoding: "utf8",
           env: { ...environment, MOCK_SCENARIO: scenario },
         });
-        assert.equal(result.status, expectedExit, `${name} ${scenario}: ${result.stderr}`);
         const calls = readFileSync(log, "utf8");
+        assert.equal(result.status, expectedExit,
+          `${name} ${scenario}: ${result.error?.message ?? ""} ${result.stderr}; calls: ${calls}`);
         assert.equal(calls.includes("api -X POST"), expectedPost, `${name} ${scenario}: create`);
         assert.equal(calls.includes("release upload"), expectedUpload, `${name} ${scenario}: upload`);
         assert.ok(!calls.includes("--clobber"), `${name} ${scenario}: no overwrite`);
