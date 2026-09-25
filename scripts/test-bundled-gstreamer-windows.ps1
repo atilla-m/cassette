@@ -28,4 +28,4 @@ foreach ($element in $manifest.elementProviders.PSObject.Properties.Name) {
   $result = & (Join-Path $testRoot "gst-inspect-1.0.exe") $element 2>&1 | Out-String
   if ($LASTEXITCODE -ne 0) { throw "Isolated GStreamer cannot load $element`: $result" }
 }
-Write-Host "Isolated runtime loaded all $($manifest.elementProviders.PSObject.Properties.Count) required elements without system GStreamer on PATH."
+Write-Host "Isolated runtime loaded all $(@($manifest.elementProviders.PSObject.Properties.Name).Count) required elements without system GStreamer on PATH."

@@ -732,7 +732,15 @@ def verify_windows_payload(audit: Audit, root: Path, label: str) -> set[str]:
         audit.fail(f"{label}: extracted installer contains no LICENSE resource")
     elif not any(sha256_file(path) == audit.license_hash for path in licenses):
         audit.fail(f"{label}: extracted installer LICENSE does not match repository LICENSE")
-    return verify_windows_runtime(audit, root, label)
+    allowed = verify_windows_runtime(audit, root, label)
+    if not any(
+        (path.parent / "gstreamer-1.0-0.dll").is_file()
+        and (path.parent / "lib/gstreamer-1.0").is_dir()
+        and (path.parent / "third-party/gstreamer/manifest.json").is_file()
+        for path in executables
+    ):
+        audit.fail(f"{label}: private GStreamer runtime is not installed beside cassette.exe")
+    return allowed
 
 
 def audit_artifact(audit: Audit, path: Path, temporary_root: Path) -> None:
