@@ -112,6 +112,8 @@ Document the user-facing uninstall commands as `sudo dnf remove cassette` for RP
 
 Do not block the Linux beta.3 on this section. Perform these checks on clean x86_64 VMs before a later Windows beta, not only on a CI runner. Follow [GSTREAMER-WINDOWS.md](GSTREAMER-WINDOWS.md).
 
+For the beta.4 diagnostic branch, the private runtime replaces the older manual-GStreamer/PATH plan below. The historical beta.3 release scope is unchanged; the newer diagnostic checklist is in [GSTREAMER-WINDOWS.md](GSTREAMER-WINDOWS.md). Do not treat CI package creation as clean Windows desktop qualification.
+
 - [ ] Verify the documented missing-GStreamer behavior before installing GStreamer.
 - [ ] Install the official GStreamer 1.26.11 MSVC x86_64 runtime and make its `bin` directory available in `PATH`.
 - [ ] Verify Cassette starts without development files installed.

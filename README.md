@@ -75,22 +75,18 @@ Run only the command appropriate for the installed package. Package removal does
 rm -r -- "${XDG_DATA_HOME:-$HOME/.local/share}/io.github.atilla.cassette"
 ```
 
-## Windows 10/11 x86_64 (deferred)
+## Windows 10/11 x86_64 (beta.4 diagnostic preparation)
 
-Cassette uses the MSVC build of GStreamer. The planned beta installers are not self-contained: install the official GStreamer **1.26.11 MSVC x86_64 runtime** before starting Cassette.
-
-1. Download `gstreamer-1.0-msvc-x86_64-1.26.11.msi` from the [official GStreamer 1.26.11 MSVC directory](https://gstreamer.freedesktop.org/pkg/windows/1.26.11/msvc/).
-2. Install the complete runtime, keeping its directory structure intact.
-3. Ensure the runtime's `bin` directory is visible in `PATH` before launching Cassette. With the release-build layout this is `C:\gstreamer\1.0\msvc_x86_64\bin`; use the actual directory if you installed it elsewhere.
+The beta.4 development branch builds an **unreleased diagnostic NSIS installer** with a private, verified GStreamer 1.26.11 MSVC runtime and WebView2's offline installer. It does not require a separate GStreamer installation or a manual `PATH` edit. Use the exact CI artifact and SHA-256 from the branch's qualification report; do not confuse it with the published Linux beta.3 downloads. Clean Windows 10/11 installation and playback are still pending manual qualification.
 
 Windows is not included in the Linux-first `0.1.0-beta.3` release. The following limitations remain relevant to its later qualification:
 
 - Linux desktop notifications, MPRIS, and CD detection/ripping are unavailable.
 - Experimental video/DVD functionality is disabled and unsupported.
-- Missing or undiscoverable GStreamer runtime files can prevent the dynamically linked application from starting.
-- The planned NSIS installer is unsigned and has not passed clean Windows 10/11 testing.
+- The bundled GStreamer files and WebView2 are required. The installer carries WebView2 offline; a damaged or incomplete GStreamer installation needs reinstalling from the verified installer. A missing core DLL can fail in the Windows loader before Cassette's own error dialog.
+- The diagnostic NSIS installer is unsigned. Windows SmartScreen may warn; verify its SHA-256 and source before choosing to run it. This is not a signed or generally qualified Windows release.
 - MSI is excluded from this beta because its version rules cannot represent `0.1.0-beta.3` faithfully.
-- Tauri's WebView2 download bootstrapper may require network access if WebView2 is missing.
+- Windows does not use the Linux AppImage updater. For a future Windows update, download the newer installer from Releases and run it; no automatic package repository or self-installing Windows updater is configured.
 
 See [docs/GSTREAMER-WINDOWS.md](docs/GSTREAMER-WINDOWS.md) for the build and runtime strategy.
 

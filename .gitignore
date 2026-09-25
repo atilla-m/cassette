@@ -18,3 +18,4 @@ vite.config.ts.timestamp-*
 /src-tauri/cassette-updater.key.pub
 /scripts/update-verifier/target/
 /scripts/__pycache__/
+/src-tauri/windows-runtime/

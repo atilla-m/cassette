@@ -29,6 +29,14 @@ from update_signature import validate_signature
 
 EXPECTED_VERSION = "0.1.0-beta.3"
 EXPECTED_LICENSE = "GPL-3.0-or-later"
+WINDOWS_GSTREAMER_VERSION = "1.26.11"
+WINDOWS_GSTREAMER_MSI_SHA256 = "31cbc21fa0950b5c1e79c80959b2799805cb05a7a35953a13a9f790776137605"
+WINDOWS_REQUIRED_ELEMENTS = {
+    "playbin", "uridecodebin", "decodebin3", "filesrc", "typefind",
+    "audioconvert", "audioresample", "autoaudiosink", "id3demux",
+    "flacdec", "oggdemux", "vorbisdec", "opusdec", "wavparse",
+    "qtdemux", "avdec_mp3", "avdec_aac",
+}
 NATIVE_TAURI_DEV_URL_EXCEPTIONS = {
     b"http://localhost:1420",
     b"ws://localhost:1420",
@@ -411,7 +419,10 @@ def audit_configuration(audit: Audit) -> None:
         audit.fail("Production CSP contains a development frontend URL")
 
 
-def audit_filename(audit: Audit, relative: Path, artifact_label: str, windows_bundle: bool) -> None:
+def audit_filename(
+    audit: Audit, relative: Path, artifact_label: str, windows_bundle: bool,
+    allowed_windows_runtime: set[str] | None = None,
+) -> None:
     normalized = relative.as_posix().lower()
     name = relative.name.lower()
     suffix = relative.suffix.lower()
@@ -433,7 +444,7 @@ def audit_filename(audit: Audit, relative: Path, artifact_label: str, windows_bu
     if suffix in PRIVATE_KEY_SUFFIXES or private_pem or name == ".env":
         audit.fail(f"{artifact_label}: packaged credential-like file {relative.as_posix()}")
 
-    if windows_bundle:
+    if windows_bundle and normalized not in (allowed_windows_runtime or set()):
         if "gstreamer" in normalized and suffix in {".dll", ".exe", ".cache"}:
             audit.fail(f"{artifact_label}: bundled external GStreamer runtime file {relative.as_posix()}")
         if suffix == ".dll" and (name.startswith("gst") or name.startswith("libgst")):
@@ -511,11 +522,14 @@ def scan_file(
         audit.native_dev_url_exceptions += len(allowed_native_urls)
 
 
-def scan_tree(audit: Audit, root: Path, artifact_label: str, *, windows_bundle: bool = False) -> None:
+def scan_tree(
+    audit: Audit, root: Path, artifact_label: str, *, windows_bundle: bool = False,
+    allowed_windows_runtime: set[str] | None = None,
+) -> None:
     patterns = content_patterns(audit)
     for path in sorted(candidate for candidate in root.rglob("*") if candidate.is_file()):
         relative = path.relative_to(root)
-        audit_filename(audit, relative, artifact_label, windows_bundle)
+        audit_filename(audit, relative, artifact_label, windows_bundle, allowed_windows_runtime)
         suffix = path.suffix.lower()
         frontend = suffix in FRONTEND_SUFFIXES
         native = path.name.lower() in {"cassette", "cassette.exe"}
@@ -637,7 +651,74 @@ def verify_appdir_host_libraries(audit: Audit, root: Path, label: str) -> None:
         )
 
 
-def verify_windows_payload(audit: Audit, root: Path, label: str) -> None:
+def verify_windows_runtime(audit: Audit, root: Path, label: str) -> set[str]:
+    marker = "third-party/gstreamer/manifest.json"
+    manifests = [
+        path for path in root.rglob("manifest.json")
+        if path.relative_to(root).as_posix().lower().endswith(marker)
+    ]
+    if len(manifests) != 1:
+        audit.fail(f"{label}: expected exactly one bundled GStreamer manifest, found {len(manifests)}")
+        return set()
+    manifest_path = manifests[0]
+    relative_marker = manifest_path.relative_to(root).as_posix()
+    installation_prefix = relative_marker[:-len(marker)]
+    allowed = {relative_marker.lower()}
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError) as error:
+        audit.fail(f"{label}: invalid GStreamer manifest: {error}")
+        return allowed
+    if (manifest.get("schemaVersion") != 1
+            or manifest.get("gstreamerVersion") != WINDOWS_GSTREAMER_VERSION
+            or manifest.get("runtimeMsiSha256") != WINDOWS_GSTREAMER_MSI_SHA256):
+        audit.fail(f"{label}: bundled GStreamer provenance is incorrect")
+    if set(manifest.get("elementProviders", {})) != WINDOWS_REQUIRED_ELEMENTS:
+        audit.fail(f"{label}: GStreamer element allowlist is incomplete")
+
+    files = manifest.get("files")
+    if not isinstance(files, list) or not files:
+        audit.fail(f"{label}: GStreamer manifest has no files")
+        return allowed
+    seen: set[str] = set()
+    for entry in files:
+        if not isinstance(entry, dict):
+            audit.fail(f"{label}: invalid GStreamer file entry")
+            continue
+        name, digest = entry.get("path"), entry.get("sha256")
+        if (not isinstance(name, str) or not name or name.startswith("/")
+                or "\\" in name or ".." in name.split("/")
+                or not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest)):
+            audit.fail(f"{label}: unsafe GStreamer file entry")
+            continue
+        normalized = name.lower()
+        if normalized in seen:
+            audit.fail(f"{label}: duplicate GStreamer file {name}")
+            continue
+        seen.add(normalized)
+        permitted = (
+            ("/" not in name and normalized.endswith(".dll"))
+            or (normalized.startswith("lib/gstreamer-1.0/") and normalized.endswith(".dll"))
+            or normalized == "libexec/gstreamer-1.0/gst-plugin-scanner.exe"
+            or (normalized.startswith("third-party/gstreamer/")
+                and Path(name).suffix.lower() in {".txt", ".md", "", ".license"})
+        )
+        if not permitted:
+            audit.fail(f"{label}: disallowed bundled GStreamer path {name}")
+            continue
+        relative = installation_prefix + name
+        candidate = root / relative
+        if not candidate.is_file() or sha256_file(candidate) != digest:
+            audit.fail(f"{label}: bundled GStreamer file missing or changed: {name}")
+        allowed.add(relative.lower())
+    if "gstreamer-1.0-0.dll" not in seen:
+        audit.fail(f"{label}: bundled GStreamer core DLL is missing")
+    if "third-party/gstreamer/notice.txt" not in seen:
+        audit.fail(f"{label}: bundled GStreamer notice is missing")
+    return allowed
+
+
+def verify_windows_payload(audit: Audit, root: Path, label: str) -> set[str]:
     executables = [path for path in root.rglob("*.exe") if path.name.lower() == "cassette.exe"]
     if not executables:
         audit.fail(f"{label}: extracted installer contains no Cassette executable")
@@ -651,6 +732,7 @@ def verify_windows_payload(audit: Audit, root: Path, label: str) -> None:
         audit.fail(f"{label}: extracted installer contains no LICENSE resource")
     elif not any(sha256_file(path) == audit.license_hash for path in licenses):
         audit.fail(f"{label}: extracted installer LICENSE does not match repository LICENSE")
+    return verify_windows_runtime(audit, root, label)
 
 
 def audit_artifact(audit: Audit, path: Path, temporary_root: Path) -> None:
@@ -690,15 +772,15 @@ def audit_artifact(audit: Audit, path: Path, temporary_root: Path) -> None:
             scan_tree(audit, path, label)
         elif kind == "nsis":
             root = extract_nsis(path, destination)
-            verify_windows_payload(audit, root, label)
-            scan_tree(audit, root, label, windows_bundle=True)
+            allowed = verify_windows_payload(audit, root, label)
+            scan_tree(audit, root, label, windows_bundle=True, allowed_windows_runtime=allowed)
         elif kind == "msi":
             root = extract_msi(path, destination)
             if root is None:
                 audit.warn(f"{label}: MSI extraction is unsupported on this host; container scan only")
             else:
-                verify_windows_payload(audit, root, label)
-                scan_tree(audit, root, label, windows_bundle=True)
+                allowed = verify_windows_payload(audit, root, label)
+                scan_tree(audit, root, label, windows_bundle=True, allowed_windows_runtime=allowed)
         elif kind in {"directory"}:
             scan_tree(audit, path, label)
         else:

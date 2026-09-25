@@ -1,0 +1,22 @@
+{
+  "bundle": {
+    "resources": {
+      "../LICENSE": "LICENSE",
+      "windows-runtime/bin/*.dll": ".",
+      "windows-runtime/plugins/*.dll": "lib/gstreamer-1.0",
+      "windows-runtime/scanner/gst-plugin-scanner.exe": "libexec/gstreamer-1.0/gst-plugin-scanner.exe",
+      "windows-runtime/notices/**/*": "third-party/gstreamer",
+      "windows-runtime/manifest.json": "third-party/gstreamer/manifest.json"
+    },
+    "windows": {
+      "bundleVCRuntime": true,
+      "webviewInstallMode": {
+        "type": "offlineInstaller",
+        "silent": true
+      },
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    }
+  }
+}

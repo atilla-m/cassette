@@ -73,6 +73,7 @@ jobs:
       - run: npm run build
       - run: npm run check
       - run: npm run test:updater
+      - run: python3 scripts/test-windows-runtime-audit.py
       - run: python3 scripts/test-signature-safety.py
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
       - run: cargo test --manifest-path src-tauri/Cargo.toml
@@ -159,10 +160,19 @@ jobs:
           }
           if (-not $aacAvailable) { throw "No supported AAC decoder is installed." }
 
+      - name: Stage verified private Windows GStreamer runtime
+        shell: pwsh
+        run: ./scripts/stage-gstreamer-windows.ps1
+
+      - name: Test private runtime without system GStreamer on PATH
+        shell: pwsh
+        run: ./scripts/test-bundled-gstreamer-windows.ps1
+
       - run: npm ci
       - run: npm run build
       - run: npm run check
       - run: npm run test:updater
+      - run: python scripts/test-windows-runtime-audit.py
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
       - run: cargo test --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc
       - run: cargo check --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc
