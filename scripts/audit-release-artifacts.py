@@ -90,6 +90,11 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def same_text_ignoring_crlf(first: Path, second: Path) -> bool:
+    """Compare tracked text after Windows checkout's LF-to-CRLF conversion."""
+    return first.read_bytes().replace(b"\r\n", b"\n") == second.read_bytes().replace(b"\r\n", b"\n")
+
+
 def command_path(name: str) -> str | None:
     return shutil.which(name)
 
@@ -687,7 +692,8 @@ def verify_windows_runtime(audit: Audit, root: Path, label: str) -> set[str]:
             r"(?:vcruntime140(?:_1)?|msvcp140(?:_1|_2|_atomic_wait|_codecvt_ids)?|concrt140)\.dll",
             re.IGNORECASE,
         )
-        if (not all(isinstance(name, str) and permitted_vc.fullmatch(name) for name in names)
+        if (not all(isinstance(name, str) and name == name.lower()
+                    and permitted_vc.fullmatch(name) for name in names)
                 or len({name.lower() for name in names}) != len(names)):
             audit.fail(f"{label}: Microsoft VC runtime file list is unsafe")
         else:
@@ -711,6 +717,8 @@ def verify_windows_runtime(audit: Audit, root: Path, label: str) -> set[str]:
             audit.fail(f"{label}: unsafe GStreamer file entry")
             continue
         normalized = name.lower()
+        if normalized in vc_dlls and name != normalized:
+            audit.fail(f"{label}: Microsoft VC runtime path casing is noncanonical: {name}")
         if normalized in seen:
             audit.fail(f"{label}: duplicate GStreamer file {name}")
             continue
@@ -756,7 +764,7 @@ def verify_windows_payload(audit: Audit, root: Path, label: str) -> set[str]:
     licenses = [path for path in root.rglob("*") if path.is_file() and path.name.upper() == "LICENSE"]
     if not licenses:
         audit.fail(f"{label}: extracted installer contains no LICENSE resource")
-    elif not any(sha256_file(path) == audit.license_hash for path in licenses):
+    elif not any(same_text_ignoring_crlf(path, audit.license_path) for path in licenses):
         audit.fail(f"{label}: extracted installer LICENSE does not match repository LICENSE")
     allowed = verify_windows_runtime(audit, root, label)
     if not any(

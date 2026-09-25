@@ -90,6 +90,23 @@ class WindowsRuntimeAuditTests(unittest.TestCase):
         result, _ = self.audit()
         self.assertTrue(any("unlisted Microsoft VC runtime" in error for error in result.errors))
 
+    def test_vc_runtime_path_case_must_match_installed_filename(self):
+        value = json.loads(self.manifest.read_text(encoding="utf-8"))
+        for entry in value["files"]:
+            if entry["path"] == "vcruntime140.dll":
+                entry["path"] = "VCRUNTIME140.dll"
+        self.manifest.write_text(json.dumps(value), encoding="utf-8")
+        result, _ = self.audit()
+        self.assertTrue(any("path casing is noncanonical" in error for error in result.errors))
+
+    def test_license_comparison_accepts_only_lf_crlf_difference(self):
+        windows_copy = self.root / "windows-license"
+        windows_copy.write_bytes(b"GPL text\r\nsecond line\r\n")
+        self.license.write_bytes(b"GPL text\nsecond line\n")
+        self.assertTrue(audit_module.same_text_ignoring_crlf(windows_copy, self.license))
+        windows_copy.write_bytes(b"GPL text\r\nchanged line\r\n")
+        self.assertFalse(audit_module.same_text_ignoring_crlf(windows_copy, self.license))
+
     def test_unlisted_gstreamer_dll_still_fails(self):
         result, allowed = self.audit()
         self.assertFalse(result.errors)

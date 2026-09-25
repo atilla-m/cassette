@@ -157,7 +157,10 @@ if (-not $selectedVcDlls.ContainsKey("vcruntime140.dll")) {
 }
 
 foreach ($name in ($selectedBinDlls.Keys | Sort-Object)) {
-  Add-StagedFile $selectedBinDlls[$name] "bin" $name
+  # dumpbin preserves an import's spelling (often uppercase), while the
+  # redistributable's actual filename may be lowercase. Record the installed
+  # filename so the manifest also audits on case-sensitive hosts.
+  Add-StagedFile $selectedBinDlls[$name] "bin" (Split-Path -Leaf $selectedBinDlls[$name])
 }
 foreach ($source in ($selectedPlugins.Keys | Sort-Object)) {
   $name = Split-Path -Leaf $source
@@ -220,7 +223,7 @@ $manifest = [ordered]@{
   runtimeMsiSha256 = $runtimeMsiSha256
   vcRuntime = [ordered]@{
     source = "Microsoft.VC143.CRT x64"
-    dlls = @($selectedVcDlls.Keys | Sort-Object)
+    dlls = @($selectedVcDlls.Values | ForEach-Object { Split-Path -Leaf $_ } | Sort-Object)
   }
   elementProviders = $elementProviders
   files = @($staged | Sort-Object { $_.path })
