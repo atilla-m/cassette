@@ -6738,7 +6738,7 @@
 </svelte:head>
 
 <div class="app-shell">
-  <div class:lyrics-mode={activeView === "Now Playing"} class="workspace" inert={artworkViewer !== null}>
+  <div class:lyrics-mode={activeView === "Now Playing"} class="workspace">
     {#if activeView !== "Now Playing"}
       <Sidebar items={visibleNavItems} active={activeView} onNavigate={handleNavigate} />
     {/if}

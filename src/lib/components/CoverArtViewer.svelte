@@ -14,22 +14,33 @@
   let dialog: HTMLElement | undefined;
   let closeButton: HTMLButtonElement | undefined;
   let imageState = $state<"loading" | "loaded" | "error">("loading");
+  let closing = false;
   const reducedMotion = typeof window !== "undefined"
     && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
   onMount(() => {
     closeButton?.focus({ preventScroll: true });
     return () => {
-      const focusTarget = opener.isConnected ? opener : fallbackFocus;
-      focusTarget?.focus({ preventScroll: true });
+      // Restore only after the viewer and its window-level focus trap are gone.
+      queueMicrotask(() => {
+        const focusTarget = opener.isConnected ? opener : fallbackFocus;
+        focusTarget?.focus({ preventScroll: true });
+      });
     };
   });
 
+  function requestClose() {
+    if (closing) return;
+    closing = true;
+    onClose();
+  }
+
   function handleKeydown(event: KeyboardEvent) {
+    if (closing) return;
     if (event.key === "Escape") {
       event.preventDefault();
       event.stopPropagation();
-      onClose();
+      requestClose();
     } else if (event.key === "Tab") {
       // The close button is the viewer's only focusable control.
       event.preventDefault();
@@ -38,7 +49,7 @@
   }
 
   function handleFocusIn(event: FocusEvent) {
-    if (event.target instanceof Node && !dialog?.contains(event.target)) {
+    if (!closing && event.target instanceof Node && !dialog?.contains(event.target)) {
       closeButton?.focus({ preventScroll: true });
     }
   }
@@ -49,8 +60,8 @@
 <div
   class="cover-viewer-backdrop"
   role="presentation"
-  onclick={(event) => { if (event.target === event.currentTarget) onClose(); }}
-  transition:fade={{ duration: reducedMotion ? 0 : 170 }}
+  onclick={(event) => { if (event.target === event.currentTarget) requestClose(); }}
+  in:fade={{ duration: reducedMotion ? 0 : 170 }}
 >
   <div
     bind:this={dialog}
@@ -58,11 +69,11 @@
     role="dialog"
     aria-modal="true"
     aria-labelledby="cover-viewer-title"
-    transition:scale={{ duration: reducedMotion ? 0 : 170, start: 0.97, opacity: 0 }}
+    in:scale={{ duration: reducedMotion ? 0 : 170, start: 0.97, opacity: 0 }}
   >
     <header>
       <h2 id="cover-viewer-title">{title} cover art</h2>
-      <button bind:this={closeButton} type="button" aria-label="Close cover art viewer" onclick={onClose}>×</button>
+      <button bind:this={closeButton} type="button" aria-label="Close cover art viewer" onclick={requestClose}>×</button>
     </header>
     <div class="cover-viewer-content" aria-live="polite">
       <img
