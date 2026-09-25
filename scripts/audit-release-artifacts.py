@@ -675,6 +675,25 @@ def verify_windows_runtime(audit: Audit, root: Path, label: str) -> set[str]:
         audit.fail(f"{label}: bundled GStreamer provenance is incorrect")
     if set(manifest.get("elementProviders", {})) != WINDOWS_REQUIRED_ELEMENTS:
         audit.fail(f"{label}: GStreamer element allowlist is incomplete")
+    vc_runtime = manifest.get("vcRuntime")
+    vc_dlls: set[str] = set()
+    if (not isinstance(vc_runtime, dict)
+            or vc_runtime.get("source") != "Microsoft.VC143.CRT x64"
+            or not isinstance(vc_runtime.get("dlls"), list)):
+        audit.fail(f"{label}: Microsoft VC runtime provenance is missing")
+    else:
+        names = vc_runtime["dlls"]
+        permitted_vc = re.compile(
+            r"(?:vcruntime140(?:_1)?|msvcp140(?:_1|_2|_atomic_wait|_codecvt_ids)?|concrt140)\.dll",
+            re.IGNORECASE,
+        )
+        if (not all(isinstance(name, str) and permitted_vc.fullmatch(name) for name in names)
+                or len({name.lower() for name in names}) != len(names)):
+            audit.fail(f"{label}: Microsoft VC runtime file list is unsafe")
+        else:
+            vc_dlls = {name.lower() for name in names}
+            if "vcruntime140.dll" not in vc_dlls:
+                audit.fail(f"{label}: required Microsoft VC runtime is missing")
 
     files = manifest.get("files")
     if not isinstance(files, list) or not files:
@@ -713,6 +732,13 @@ def verify_windows_runtime(audit: Audit, root: Path, label: str) -> set[str]:
         allowed.add(relative.lower())
     if "gstreamer-1.0-0.dll" not in seen:
         audit.fail(f"{label}: bundled GStreamer core DLL is missing")
+    if not vc_dlls.issubset(seen):
+        audit.fail(f"{label}: listed Microsoft VC runtime files are missing")
+    if any(name in seen and name not in vc_dlls for name in (
+            "vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll",
+            "msvcp140_1.dll", "msvcp140_2.dll", "msvcp140_atomic_wait.dll",
+            "msvcp140_codecvt_ids.dll", "concrt140.dll")):
+        audit.fail(f"{label}: an unlisted Microsoft VC runtime file was bundled")
     if "third-party/gstreamer/notice.txt" not in seen:
         audit.fail(f"{label}: bundled GStreamer notice is missing")
     return allowed

@@ -25,6 +25,7 @@ class WindowsRuntimeAuditTests(unittest.TestCase):
         self.installed = self.root / "app" / "resources"
         self.files = {
             "gstreamer-1.0-0.dll": b"core",
+            "vcruntime140.dll": b"signed-microsoft-vc-runtime-fixture",
             "lib/gstreamer-1.0/gstplayback.dll": b"plugin",
             "libexec/gstreamer-1.0/gst-plugin-scanner.exe": b"scanner",
             "third-party/gstreamer/NOTICE.txt": b"notice",
@@ -37,6 +38,10 @@ class WindowsRuntimeAuditTests(unittest.TestCase):
             "schemaVersion": 1,
             "gstreamerVersion": audit_module.WINDOWS_GSTREAMER_VERSION,
             "runtimeMsiSha256": audit_module.WINDOWS_GSTREAMER_MSI_SHA256,
+            "vcRuntime": {
+                "source": "Microsoft.VC143.CRT x64",
+                "dlls": ["vcruntime140.dll"],
+            },
             "elementProviders": {name: "gstplayback.dll" for name in audit_module.WINDOWS_REQUIRED_ELEMENTS},
             "files": [
                 {"path": name, "sha256": audit_module.sha256_file(self.installed / name)}
@@ -70,6 +75,20 @@ class WindowsRuntimeAuditTests(unittest.TestCase):
         self.manifest.write_text(json.dumps(value), encoding="utf-8")
         result, _ = self.audit()
         self.assertTrue(any("element allowlist" in error for error in result.errors))
+
+    def test_missing_vc_runtime_fails(self):
+        value = json.loads(self.manifest.read_text(encoding="utf-8"))
+        del value["vcRuntime"]
+        self.manifest.write_text(json.dumps(value), encoding="utf-8")
+        result, _ = self.audit()
+        self.assertTrue(any("Microsoft VC runtime provenance" in error for error in result.errors))
+
+    def test_unlisted_vc_runtime_fails(self):
+        value = json.loads(self.manifest.read_text(encoding="utf-8"))
+        value["vcRuntime"]["dlls"] = []
+        self.manifest.write_text(json.dumps(value), encoding="utf-8")
+        result, _ = self.audit()
+        self.assertTrue(any("unlisted Microsoft VC runtime" in error for error in result.errors))
 
     def test_unlisted_gstreamer_dll_still_fails(self):
         result, allowed = self.audit()

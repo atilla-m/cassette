@@ -87,6 +87,24 @@ $dumpbin = Get-ChildItem -LiteralPath (Join-Path $visualStudio "VC/Tools/MSVC") 
   Sort-Object FullName -Descending | Select-Object -First 1
 if (-not $dumpbin) { throw "MSVC dumpbin.exe is unavailable" }
 
+# The pinned Tauri version statically links its own VC runtime, but the
+# official GStreamer MSVC binaries import the dynamic VC runtime. Stage only
+# the DLLs actually imported, from Visual Studio's licensed x64 redist set.
+$redistRoot = Join-Path $visualStudio "VC/Redist/MSVC"
+$vcRedist = Get-ChildItem -LiteralPath $redistRoot -Directory -ErrorAction Stop |
+  Sort-Object Name -Descending |
+  ForEach-Object { Join-Path $_.FullName "x64/Microsoft.VC143.CRT" } |
+  Where-Object { Test-Path -LiteralPath (Join-Path $_ "vcruntime140.dll") -PathType Leaf } |
+  Select-Object -First 1
+if (-not $vcRedist) { throw "The Microsoft Visual C++ x64 redistributable DLLs are unavailable" }
+$availableVcDlls = [System.Collections.Generic.Dictionary[string,string]]::new([StringComparer]::OrdinalIgnoreCase)
+Get-ChildItem -LiteralPath $vcRedist -Filter "*.dll" -File | ForEach-Object {
+  if ($_.Name -match '^(VCRUNTIME140(_1)?|MSVCP140(_1|_2|_atomic_wait|_codecvt_ids)?|CONCRT140)\.dll$') {
+    $availableVcDlls[$_.Name] = $_.FullName
+  }
+}
+$selectedVcDlls = [System.Collections.Generic.Dictionary[string,string]]::new([StringComparer]::OrdinalIgnoreCase)
+
 $availableDlls = [System.Collections.Generic.Dictionary[string,string]]::new([StringComparer]::OrdinalIgnoreCase)
 Get-ChildItem -LiteralPath $bin -Filter "*.dll" -File | ForEach-Object {
   $availableDlls[$_.Name] = $_.FullName
@@ -112,8 +130,20 @@ while ($pending.Count -gt 0) {
       $pending.Enqueue($dependency)
     } elseif ($name -match '^(api-ms-win-|ext-ms-win-)') {
       continue
-    } elseif ($name -match '^(VCRUNTIME140(_1)?|MSVCP140|CONCRT140)\.dll$') {
-      throw "VC runtime dependency $name for $current is not included in the verified GStreamer runtime"
+    } elseif ($name -match '^(VCRUNTIME140(_1)?|MSVCP140(_1|_2|_atomic_wait|_codecvt_ids)?|CONCRT140)\.dll$') {
+      if (-not $availableVcDlls.ContainsKey($name)) {
+        throw "VC runtime dependency $name for $current is absent from the Visual Studio x64 redist set"
+      }
+      $dependency = $availableVcDlls[$name]
+      $signature = Get-AuthenticodeSignature -LiteralPath $dependency
+      if ($signature.Status -ne 'Valid' -or
+          -not $signature.SignerCertificate -or
+          $signature.SignerCertificate.Subject -notmatch 'Microsoft Corporation') {
+        throw "VC runtime dependency $name does not have a valid Microsoft signature"
+      }
+      $selectedVcDlls[$name] = $dependency
+      $selectedBinDlls[$name] = $dependency
+      $pending.Enqueue($dependency)
     } elseif (-not (Test-Path -LiteralPath (Join-Path ([Environment]::SystemDirectory) $name))) {
       throw "Non-system PE dependency $name for $current is absent from the official runtime"
     }
@@ -121,6 +151,9 @@ while ($pending.Count -gt 0) {
 }
 if (-not $selectedBinDlls.ContainsKey("gstreamer-1.0-0.dll")) {
   $selectedBinDlls["gstreamer-1.0-0.dll"] = Join-Path $bin "gstreamer-1.0-0.dll"
+}
+if (-not $selectedVcDlls.ContainsKey("vcruntime140.dll")) {
+  throw "GStreamer unexpectedly does not import vcruntime140.dll; recheck the private runtime staging policy"
 }
 
 foreach ($name in ($selectedBinDlls.Keys | Sort-Object)) {
@@ -164,6 +197,9 @@ $notice = @(
   "GStreamer source: https://gitlab.freedesktop.org/gstreamer/gstreamer/-/tree/$version",
   "Only the DLLs and plugins named in manifest.json are bundled. No development files or shared GStreamer installation are included.",
   "GStreamer and its dependencies retain their upstream licenses. Accompanying upstream license texts are in this directory.",
+  "Microsoft VC runtime DLLs are copied only from Visual Studio's Microsoft.VC143.CRT x64 redistributable directory after Authenticode verification.",
+  "Microsoft redistribution terms and DLL list: https://learn.microsoft.com/en-us/visualstudio/releases/2022/redistribution and https://learn.microsoft.com/en-us/cpp/windows/determining-which-dlls-to-redistribute",
+  "Microsoft VC runtime files in this installer: $((($selectedVcDlls.Keys | Sort-Object) -join ', '))",
   "Codec patent and redistribution review, plus clean Windows 10/11 desktop qualification, remain required before a Windows release.",
   "Selected plugins and reported licenses:"
 )
@@ -182,8 +218,12 @@ $manifest = [ordered]@{
   gstreamerVersion = $version
   runtimeMsiUrl = $sourceUrl
   runtimeMsiSha256 = $runtimeMsiSha256
+  vcRuntime = [ordered]@{
+    source = "Microsoft.VC143.CRT x64"
+    dlls = @($selectedVcDlls.Keys | Sort-Object)
+  }
   elementProviders = $elementProviders
   files = @($staged | Sort-Object { $_.path })
 }
 $manifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $output "manifest.json") -Encoding utf8
-Write-Host "Staged $($selectedBinDlls.Count) runtime DLLs, $($selectedPlugins.Count) plugins, scanner, and notices at $output"
+Write-Host "Staged $($selectedBinDlls.Count) runtime DLLs (including $($selectedVcDlls.Count) Microsoft VC redist DLLs), $($selectedPlugins.Count) plugins, scanner, and notices at $output"
