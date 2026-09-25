@@ -112,8 +112,9 @@ while ($pending.Count -gt 0) {
       $pending.Enqueue($dependency)
     } elseif ($name -match '^(api-ms-win-|ext-ms-win-)') {
       continue
-    } elseif (-not (Test-Path -LiteralPath (Join-Path ([Environment]::SystemDirectory) $name)) -and
-            $name -notmatch '^(VCRUNTIME140(_1)?|MSVCP140|CONCRT140)\.dll$') {
+    } elseif ($name -match '^(VCRUNTIME140(_1)?|MSVCP140|CONCRT140)\.dll$') {
+      throw "VC runtime dependency $name for $current is not included in the verified GStreamer runtime"
+    } elseif (-not (Test-Path -LiteralPath (Join-Path ([Environment]::SystemDirectory) $name))) {
       throw "Non-system PE dependency $name for $current is absent from the official runtime"
     }
   }

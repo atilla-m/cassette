@@ -9,7 +9,6 @@
       "windows-runtime/manifest.json": "third-party/gstreamer/manifest.json"
     },
     "windows": {
-      "bundleVCRuntime": true,
       "webviewInstallMode": {
         "type": "offlineInstaller",
         "silent": true
