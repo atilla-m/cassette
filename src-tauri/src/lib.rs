@@ -1528,7 +1528,8 @@ fn update_album_tags(
     let restoration = released_playback
         .take()
         .map(TagEditPlaybackRelease::restore)
-        .transpose();
+        .transpose()
+        .map(|_| ());
     #[cfg(not(target_os = "windows"))]
     let restoration: Result<(), String> = Ok(());
     let mut result = match batch_result {
@@ -1623,7 +1624,8 @@ fn update_track_tags(
     let restoration = released_playback
         .take()
         .map(TagEditPlaybackRelease::restore)
-        .transpose();
+        .transpose()
+        .map(|_| ());
     #[cfg(not(target_os = "windows"))]
     let restoration: Result<(), String> = Ok(());
     if let Err(error) = write_result {
