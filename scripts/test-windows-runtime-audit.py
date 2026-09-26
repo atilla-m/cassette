@@ -144,6 +144,12 @@ class WindowsRuntimeAuditTests(unittest.TestCase):
         )
         self.assertFalse(result.errors)
 
+    def test_wasapi_system_imports_are_exactly_allowlisted(self):
+        self.assertTrue({"mfplat.dll", "mmdevapi.dll"}.issubset(
+            audit_module.WINDOWS_SYSTEM_DLLS,
+        ))
+        self.assertNotIn("mfreadwrite.dll", audit_module.WINDOWS_SYSTEM_DLLS)
+
     @staticmethod
     def synthetic_pe_importing(name):
         data = bytearray(2048)
