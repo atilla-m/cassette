@@ -41,8 +41,9 @@ WINDOWS_REQUIRED_ELEMENTS = {
 # Keep this deliberately narrow: new imports require an explicit review.
 WINDOWS_SYSTEM_DLLS = {
     "advapi32.dll", "bcrypt.dll", "bcryptprimitives.dll", "comctl32.dll",
-    "crypt32.dll", "dwmapi.dll", "gdi32.dll", "kernel32.dll", "ntdll.dll",
-    "ole32.dll", "oleaut32.dll", "shell32.dll", "shlwapi.dll", "user32.dll",
+    "crypt32.dll", "dnsapi.dll", "dwmapi.dll", "gdi32.dll", "iphlpapi.dll",
+    "kernel32.dll", "ntdll.dll", "ole32.dll", "oleaut32.dll", "shell32.dll",
+    "shlwapi.dll", "user32.dll",
     "ws2_32.dll",
 }
 NATIVE_TAURI_DEV_URL_EXCEPTIONS = {

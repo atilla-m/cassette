@@ -109,6 +109,9 @@ class WindowsRuntimeAuditTests(unittest.TestCase):
         self.assertFalse(audit_module.same_text_ignoring_crlf(windows_copy, self.license))
 
     def test_native_startup_import_must_be_installed_beside_executable(self):
+        self.assertTrue({"dnsapi.dll", "iphlpapi.dll"}.issubset(
+            audit_module.WINDOWS_SYSTEM_DLLS,
+        ))
         application = self.root / "cassette.exe"
         application.write_bytes(self.synthetic_pe_importing("gio-2.0-0.dll"))
         result = audit_module.Audit(self.root, audit_module.EXPECTED_VERSION, self.license)
