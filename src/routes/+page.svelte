@@ -605,6 +605,8 @@
   let playbackSessionEventId: string | null = null;
   let playbackSessionListenedSeconds = 0;
   let playbackSessionStartedAtMs: number | null = null;
+  let isTagWriteSuspendingPlayback = false;
+  let tagWritePlaybackGeneration = 0;
   let positionSeconds = $state(0);
   let lastConfirmedPlaybackPositionSeconds = 0;
   const playbackSeekCoordinator = new PlaybackSeekCoordinator();
@@ -1024,17 +1026,19 @@
     ];
 
     const statusIntervalId = window.setInterval(async () => {
-      if (!currentTrack || (!isPlaying && !hasCurrentTrackEnded)) {
+      if (isTagWriteSuspendingPlayback || !currentTrack || (!isPlaying && !hasCurrentTrackEnded)) {
         return;
       }
 
       const statusTrackPath = currentTrack.filePath;
+      const tagWriteGeneration = tagWritePlaybackGeneration;
       const positionSnapshot = playbackSeekCoordinator.capturePositionUpdate(statusTrackPath);
 
       try {
         const status = await getPlaybackStatus();
 
-        if (currentTrack?.filePath !== statusTrackPath || status.filePath !== statusTrackPath) {
+        if (isTagWriteSuspendingPlayback || tagWriteGeneration !== tagWritePlaybackGeneration
+          || currentTrack?.filePath !== statusTrackPath || status.filePath !== statusTrackPath) {
           return;
         }
 
@@ -1045,12 +1049,14 @@
           await handlePlaybackStatusUpdate(status, "status");
         }
       } catch (error) {
-        playbackError = error instanceof Error ? error.message : String(error);
+        if (!isTagWriteSuspendingPlayback && tagWriteGeneration === tagWritePlaybackGeneration) {
+          playbackError = error instanceof Error ? error.message : String(error);
+        }
       }
     }, 1000);
 
     const progressIntervalId = window.setInterval(() => {
-      if (!currentTrack || !isPlaying || playbackSeekCoordinator.hasPendingSeek(currentTrack.filePath)) {
+      if (isTagWriteSuspendingPlayback || !currentTrack || !isPlaying || playbackSeekCoordinator.hasPendingSeek(currentTrack.filePath)) {
         return;
       }
 
@@ -3415,6 +3421,34 @@
     };
   }
 
+  function holdPlaybackClockForTagWrite(paths: string[]): boolean {
+    if (platformCapabilities?.os !== "windows" || !currentTrack || !paths.includes(currentTrack.filePath)) {
+      return false;
+    }
+    updatePlaybackListenClock(false);
+    isTagWriteSuspendingPlayback = true;
+    tagWritePlaybackGeneration += 1;
+    return true;
+  }
+
+  async function releasePlaybackClockAfterTagWrite(held: boolean) {
+    if (!held) return;
+    try {
+      const status = await getPlaybackStatus();
+      if (currentTrack?.filePath === status.filePath) {
+        applyPlaybackStatus(status);
+        await handlePlaybackStatusUpdate(status, "status");
+      }
+    } catch (error) {
+      updatePlaybackListenClock(false);
+      isPlaying = false;
+      playbackError = error instanceof Error ? error.message : String(error);
+    } finally {
+      isTagWriteSuspendingPlayback = false;
+      tagWritePlaybackGeneration += 1;
+    }
+  }
+
   async function handleSaveTagEditor() {
     if (!tagEditorTrack || !tagEditorData || isSavingTagEditor) {
       return;
@@ -3436,6 +3470,7 @@
     tagEditorMessage = "Writing tags...";
     const savedSnapshot = normalizedTagEditorDraft(tagEditorDraft);
     let shouldCloseAfterSave = false;
+    const heldPlaybackClock = holdPlaybackClockForTagWrite([tagEditorTrack.filePath]);
 
     try {
       const changedFields = (Object.keys(tagEditorDraft) as Array<keyof TagEditorDraft>).filter(tagEditorFieldChanged);
@@ -3448,6 +3483,7 @@
       tagEditorMessage = null;
       tagEditorError = error instanceof Error ? error.message : String(error);
     } finally {
+      await releasePlaybackClockAfterTagWrite(heldPlaybackClock);
       if (shouldCloseAfterSave) {
         window.setTimeout(() => {
           isSavingTagEditor = false;
@@ -3700,6 +3736,9 @@
       total: albumTagEditorData?.editableTrackCount ?? 0,
       fileName: null,
     };
+    const heldPlaybackClock = holdPlaybackClockForTagWrite(
+      albumTagEditorData?.tracks.filter((item) => item.editable).map((item) => item.track.filePath) ?? [],
+    );
 
     try {
       const result = await updateAlbumTags(request);
@@ -3727,6 +3766,7 @@
       albumTagEditorError = error instanceof Error ? error.message : String(error);
       albumTagEditorStage = "edit";
     } finally {
+      await releasePlaybackClockAfterTagWrite(heldPlaybackClock);
       isSavingAlbumTagEditor = false;
     }
   }

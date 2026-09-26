@@ -29,6 +29,8 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::Mutex;
+#[cfg(any(target_os = "windows", test))]
+use std::sync::MutexGuard;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -577,6 +579,119 @@ struct PlaybackState {
     current_path: Option<String>,
     is_playing: bool,
     has_ended: bool,
+}
+
+// Windows does not permit renaming a file while playbin's source has it open.
+// Keep the playback lock for the entire replacement/rollback transaction so a
+// concurrent play, pause, or seek cannot change the session being restored.
+#[cfg(any(target_os = "windows", test))]
+struct TagEditPlaybackRelease<'a> {
+    playback: MutexGuard<'a, PlaybackState>,
+    path: String,
+    position: gst::ClockTime,
+    was_playing: bool,
+    had_ended: bool,
+}
+
+#[cfg(any(target_os = "windows", test))]
+impl TagEditPlaybackRelease<'_> {
+    fn restore(mut self) -> Result<(), String> {
+        let result = (|| {
+            let playbin = self
+                .playback
+                .playbin
+                .as_ref()
+                .ok_or_else(|| "Playback backend disappeared during tag editing.".to_owned())?;
+            set_gst_state(playbin, gst::State::Null)?;
+            wait_for_gst_state(playbin, gst::State::Null)?;
+            let uri = gst::glib::filename_to_uri(Path::new(&self.path), None)
+                .map_err(|error| format!("Could not restore playback URI: {error}"))?;
+            playbin.set_property("uri", uri.as_str());
+            set_gst_state(playbin, gst::State::Paused)?;
+            wait_for_gst_state(playbin, gst::State::Paused)?;
+            if self.position > gst::ClockTime::ZERO {
+                playbin
+                    .seek_simple(
+                        gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
+                        self.position,
+                    )
+                    .map_err(|error| format!("Could not restore playback position: {error}"))?;
+            }
+            if self.was_playing {
+                set_gst_state(playbin, gst::State::Playing)?;
+            }
+            check_for_playback_error(playbin)?;
+            Ok(())
+        })();
+        if result.is_err() {
+            self.playback.is_playing = false;
+            self.playback.has_ended = false;
+        } else {
+            self.playback.is_playing = self.was_playing;
+            self.playback.has_ended = self.had_ended;
+        }
+        result
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn release_playback_for_tag_edit<'a>(
+    playback: &'a Mutex<PlaybackState>,
+    targets: &[PathBuf],
+) -> Result<Option<TagEditPlaybackRelease<'a>>, String> {
+    let mut playback = playback
+        .lock()
+        .map_err(|_| "Playback state is unavailable.".to_owned())?;
+    let Some(current_path) = playback.current_path.clone() else {
+        return Ok(None);
+    };
+    let canonical_current = Path::new(&current_path).canonicalize().ok();
+    if !targets
+        .iter()
+        .any(|target| Some(target.as_path()) == canonical_current.as_deref())
+    {
+        return Ok(None);
+    }
+    playback.refresh()?;
+    let Some(playbin) = playback.playbin.as_ref() else {
+        return Ok(None);
+    };
+    let position = playbin
+        .query_position::<gst::ClockTime>()
+        .unwrap_or(gst::ClockTime::ZERO);
+    let snapshot = (
+        current_path,
+        position,
+        playback.is_playing,
+        playback.has_ended,
+    );
+    let release_result = set_gst_state(playbin, gst::State::Null)
+        .and_then(|()| wait_for_gst_state(playbin, gst::State::Null));
+    if let Err(error) = release_result {
+        // Do not proceed to replacement unless the file handle is proven closed.
+        let release = TagEditPlaybackRelease {
+            playback,
+            path: snapshot.0,
+            position: snapshot.1,
+            was_playing: snapshot.2,
+            had_ended: snapshot.3,
+        };
+        let restore = release.restore();
+        return Err(match restore {
+            Ok(()) => error,
+            Err(restore_error) => {
+                format!("{error}; playback restoration also failed: {restore_error}")
+            }
+        });
+    }
+    drain_playback_bus(playbin);
+    Ok(Some(TagEditPlaybackRelease {
+        playback,
+        path: snapshot.0,
+        position: snapshot.1,
+        was_playing: snapshot.2,
+        had_ended: snapshot.3,
+    }))
 }
 
 #[derive(Debug, Default)]
@@ -1384,16 +1499,56 @@ fn update_album_tags(
     mpris: State<'_, MprisState>,
     tag_writes: State<'_, Mutex<TagWriteState>>,
 ) -> Result<AlbumTagUpdateResult, String> {
-    let result = update_album_tags_batch(
+    #[cfg(target_os = "windows")]
+    let mut released_playback = None;
+    let mut progress = |phase: &str, completed: usize, total: usize, file_name: Option<String>| {
+        emit_album_tag_progress(&app, phase, completed, total, file_name);
+    };
+    let mut hook = |stage| {
+        #[cfg(target_os = "windows")]
+        if let AlbumBatchStage::BeforeBatchReplace(paths) = stage {
+            released_playback = release_playback_for_tag_edit(playback.inner(), &paths)?;
+        }
+        #[cfg(not(target_os = "windows"))]
+        let _ = stage;
+        Ok(())
+    };
+    let batch_result = update_album_tags_batch_with_hook(
         &request,
-        &app,
         library.inner(),
         tag_writes.inner(),
         app.path()
             .app_data_dir()
             .ok()
             .map(|path| path.join("cover-art")),
-    )?;
+        &mut hook,
+        &mut progress,
+    );
+    #[cfg(target_os = "windows")]
+    let restoration = released_playback
+        .take()
+        .map(TagEditPlaybackRelease::restore)
+        .transpose();
+    #[cfg(not(target_os = "windows"))]
+    let restoration: Result<(), String> = Ok(());
+    let mut result = match batch_result {
+        Ok(result) => result,
+        Err(error) => {
+            return Err(match restoration {
+                Ok(()) => error,
+                Err(restore_error) => {
+                    format!("{error}; playback restoration also failed: {restore_error}")
+                }
+            });
+        }
+    };
+    if let Err(error) = restoration {
+        result.outcome = "recovery_required".to_owned();
+        result.summary = format!(
+            "{} Tags may have changed, but the loaded track could not be restored: {error}",
+            result.summary
+        );
+    }
 
     if !result.updated_tracks.is_empty() {
         let current_status = playback.lock().ok().map(|playback| playback.status());
@@ -1449,7 +1604,36 @@ fn update_track_tags(
     validate_album_target_preflight(&cached_track, &target_path)?;
     let canonical_key = target_path.to_string_lossy().into_owned();
     let _write_guard = TagWriteGuard::new(&tag_writes, canonical_key)?;
-    update_track_tags_file_masked(&target_path, &request, mask)?;
+    #[cfg(target_os = "windows")]
+    let mut released_playback = None;
+    let write_result =
+        update_track_tags_file_masked_with_hook(&target_path, &request, mask, &mut |stage| {
+            #[cfg(target_os = "windows")]
+            if stage == TagWriteStage::AfterTemporaryVerification {
+                released_playback = release_playback_for_tag_edit(
+                    playback.inner(),
+                    std::slice::from_ref(&target_path),
+                )?;
+            }
+            #[cfg(not(target_os = "windows"))]
+            let _ = stage;
+            Ok(())
+        });
+    #[cfg(target_os = "windows")]
+    let restoration = released_playback
+        .take()
+        .map(TagEditPlaybackRelease::restore)
+        .transpose();
+    #[cfg(not(target_os = "windows"))]
+    let restoration: Result<(), String> = Ok(());
+    if let Err(error) = write_result {
+        return Err(match restoration {
+            Ok(()) => error,
+            Err(restore_error) => {
+                format!("{error}; playback restoration also failed: {restore_error}")
+            }
+        });
+    }
 
     let scanned_at = unix_timestamp();
     let mut updated_track = rescan_single_track_after_tag_write(
@@ -1483,6 +1667,11 @@ fn update_track_tags(
         );
     }
 
+    if let Err(error) = restoration {
+        return Err(format!(
+            "Tags were saved and the library was refreshed, but the loaded track could not be restored: {error}"
+        ));
+    }
     Ok(updated_track)
 }
 
@@ -6074,6 +6263,18 @@ fn set_gst_state(playbin: &gst::Element, state: gst::State) -> Result<(), String
         .map_err(|error| format!("Playback failed: {error}"))
 }
 
+#[cfg(any(target_os = "windows", test))]
+fn wait_for_gst_state(playbin: &gst::Element, expected: gst::State) -> Result<(), String> {
+    let (result, actual, _) = playbin.state(gst::ClockTime::from_seconds(10));
+    result.map_err(|error| format!("Playback state transition failed: {error}"))?;
+    if actual != expected {
+        return Err(format!(
+            "Playback did not reach {expected:?} during tag editing (current state: {actual:?})."
+        ));
+    }
+    Ok(())
+}
+
 fn check_for_playback_error(playbin: &gst::Element) -> Result<(), String> {
     let Some(bus) = playbin.bus() else {
         return Ok(());
@@ -7399,8 +7600,9 @@ fn prepare_album_tag_edit(
     })
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum AlbumBatchStage {
+    BeforeBatchReplace(Vec<PathBuf>),
     BeforeReplace(usize),
     AfterReplace(usize),
     BeforeRollback(usize),
@@ -7760,26 +7962,6 @@ where
     Ok(())
 }
 
-fn update_album_tags_batch(
-    request: &UpdateAlbumTagsRequest,
-    app: &AppHandle,
-    library: &Mutex<LibraryDatabase>,
-    tag_writes: &Mutex<TagWriteState>,
-    cover_art_dir: Option<PathBuf>,
-) -> Result<AlbumTagUpdateResult, String> {
-    let mut progress = |phase: &str, completed: usize, total: usize, file_name: Option<String>| {
-        emit_album_tag_progress(app, phase, completed, total, file_name);
-    };
-    update_album_tags_batch_with_hook(
-        request,
-        library,
-        tag_writes,
-        cover_art_dir,
-        &mut |_| Ok(()),
-        &mut progress,
-    )
-}
-
 fn update_album_tags_batch_with_hook<F, P>(
     request: &UpdateAlbumTagsRequest,
     library: &Mutex<LibraryDatabase>,
@@ -7863,6 +8045,15 @@ where
                 item.track.file_name
             ));
         }
+    }
+
+    if let Err(error) = hook(AlbumBatchStage::BeforeBatchReplace(
+        prepared.iter().map(|item| item.path.clone()).collect(),
+    )) {
+        cleanup_prepared_album_tag_edits(&prepared);
+        return Err(format!(
+            "Could not prepare playback for album tag replacement: {error} No files were changed."
+        ));
     }
 
     progress("writing", 0, total, None);
@@ -8342,11 +8533,24 @@ fn update_track_tags_file(path: &Path, request: &UpdateTrackTagsRequest) -> Resu
     update_track_tags_file_masked(path, request, TagFieldMask::all())
 }
 
+#[cfg(test)]
 fn update_track_tags_file_masked(
     path: &Path,
     request: &UpdateTrackTagsRequest,
     mask: TagFieldMask,
 ) -> Result<(), String> {
+    update_track_tags_file_masked_with_hook(path, request, mask, &mut |_| Ok(()))
+}
+
+fn update_track_tags_file_masked_with_hook<F>(
+    path: &Path,
+    request: &UpdateTrackTagsRequest,
+    mask: TagFieldMask,
+    hook: &mut F,
+) -> Result<(), String>
+where
+    F: FnMut(TagWriteStage) -> Result<(), String>,
+{
     validate_update_track_tags_request(request)?;
     if !mask.any() {
         return Err("Choose at least one tag field to change.".to_owned());
@@ -8359,7 +8563,7 @@ fn update_track_tags_file_masked(
             .unwrap_or_else(|| "This tag container is not safely writable.".to_owned()));
     }
 
-    safe_update_track_tags_masked_with_hook(path, request, mask, &mut |_| Ok(()))
+    safe_update_track_tags_masked_with_hook(path, request, mask, hook)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -10931,7 +11135,11 @@ mod tag_editor_tests {
     }
 
     fn synthetic_pcm_wav() -> Vec<u8> {
-        let pcm = vec![0_u8; 1600];
+        synthetic_pcm_wav_with_pcm_length(1600)
+    }
+
+    fn synthetic_pcm_wav_with_pcm_length(pcm_length: usize) -> Vec<u8> {
+        let pcm = vec![0_u8; pcm_length];
         let mut wav = Vec::new();
         wav.extend_from_slice(b"RIFF");
         wav.extend_from_slice(&(36 + pcm.len() as u32).to_le_bytes());
@@ -11450,7 +11658,7 @@ mod tag_editor_tests {
             {
                 let path = directory.join(format!("track-{:02}.{extension}", index + 1));
                 let bytes = if extension == "wav" {
-                    synthetic_pcm_wav()
+                    synthetic_pcm_wav_with_pcm_length(64_000)
                 } else {
                     synthetic_format_bytes(extension)
                 };
@@ -11524,6 +11732,273 @@ mod tag_editor_tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.directory);
         }
+    }
+
+    fn synthetic_loaded_playback(path: &Path, paused: bool) -> Mutex<PlaybackState> {
+        gst::init().expect("initialize synthetic playback");
+        let playbin = gst::ElementFactory::make("playbin")
+            .build()
+            .expect("create synthetic playbin");
+        let sink = gst::ElementFactory::make("fakesink")
+            .build()
+            .expect("create test-only audio sink");
+        playbin.set_property("audio-sink", &sink);
+        let mut playback = PlaybackState {
+            playbin: Some(playbin),
+            ..PlaybackState::default()
+        };
+        let file_path = path.to_string_lossy().into_owned();
+        playback.play(&file_path).expect("load synthetic track");
+        wait_for_gst_state(playback.playbin.as_ref().unwrap(), gst::State::Playing)
+            .expect("synthetic track reaches playing");
+        playback
+            .seek(1.0, &file_path)
+            .expect("seek synthetic track");
+        if paused {
+            playback.pause().expect("pause synthetic track");
+            wait_for_gst_state(playback.playbin.as_ref().unwrap(), gst::State::Paused)
+                .expect("synthetic track reaches paused");
+        }
+        Mutex::new(playback)
+    }
+
+    fn assert_restored_playback(playback: &Mutex<PlaybackState>, path: &Path, paused: bool) {
+        let mut playback = playback.lock().expect("lock restored playback");
+        playback.refresh().expect("refresh restored playback");
+        let status = playback.status();
+        assert_eq!(status.file_path.as_deref(), path.to_str());
+        assert_eq!(status.is_playing, !paused);
+        assert!(!status.has_ended);
+        assert!(
+            status.position_seconds >= 1,
+            "position was lost: {status:?}"
+        );
+        playback.shutdown();
+    }
+
+    #[test]
+    fn synthetic_loaded_track_edit_restores_playing_and_paused_sessions() {
+        for paused in [false, true] {
+            let directory = std::env::temp_dir().join(format!(
+                "Cassette Loaded Tag Test-{}-{}",
+                std::process::id(),
+                unique_timestamp_nanos()
+            ));
+            fs::create_dir(&directory).expect("create disposable library");
+            let path = directory.join("loaded track.wav");
+            fs::write(&path, synthetic_pcm_wav_with_pcm_length(64_000))
+                .expect("write disposable audio");
+            let mut request = UpdateTrackTagsRequest {
+                track_id: path.to_string_lossy().into_owned(),
+                title: Some("Original title".to_owned()),
+                artist: Some("Original artist".to_owned()),
+                album: Some("Original album".to_owned()),
+                album_artist: None,
+                genre: None,
+                year: None,
+                track_number: None,
+                disc_number: None,
+            };
+            update_track_tags_file(&path, &request).expect("seed synthetic tags");
+            let original_audio = audio_payload_fingerprint(&path).expect("hash audio");
+            let playback = synthetic_loaded_playback(&path, paused);
+            request.title = Some("Edited title".to_owned());
+            let mut release = None;
+            let result = update_track_tags_file_masked_with_hook(
+                &path,
+                &request,
+                TagFieldMask::all(),
+                &mut |stage| {
+                    if stage == TagWriteStage::AfterTemporaryVerification {
+                        release =
+                            release_playback_for_tag_edit(&playback, std::slice::from_ref(&path))?;
+                        assert!(release.is_some(), "loaded file must be released");
+                    }
+                    Ok(())
+                },
+            );
+            let restoration = release.take().expect("release was reached").restore();
+            result.expect("replace loaded track");
+            restoration.expect("restore playback");
+            assert_eq!(
+                track_tag_values_from_file(&read_tagged_file(&path).expect("read edited tags"))
+                    .title
+                    .as_deref(),
+                Some("Edited title")
+            );
+            assert_eq!(
+                audio_payload_fingerprint(&path).expect("hash preserved audio"),
+                original_audio
+            );
+            assert_restored_playback(&playback, &path, paused);
+            fs::remove_dir_all(directory).expect("remove disposable library");
+        }
+    }
+
+    #[test]
+    fn synthetic_loaded_track_failed_edit_restores_original_and_playback() {
+        let directory = std::env::temp_dir().join(format!(
+            "Cassette Loaded Failure Test-{}-{}",
+            std::process::id(),
+            unique_timestamp_nanos()
+        ));
+        fs::create_dir(&directory).expect("create disposable library");
+        let path = directory.join("loaded failure.wav");
+        fs::write(&path, synthetic_pcm_wav_with_pcm_length(64_000))
+            .expect("write disposable audio");
+        let request = UpdateTrackTagsRequest {
+            track_id: path.to_string_lossy().into_owned(),
+            title: Some("Original title".to_owned()),
+            artist: None,
+            album: None,
+            album_artist: None,
+            genre: None,
+            year: None,
+            track_number: None,
+            disc_number: None,
+        };
+        update_track_tags_file(&path, &request).expect("seed synthetic tags");
+        let original = fs::read(&path).expect("read original bytes");
+        let playback = synthetic_loaded_playback(&path, true);
+        let mut changed = request;
+        changed.title = Some("Rejected title".to_owned());
+        let mut release = None;
+        let result = update_track_tags_file_masked_with_hook(
+            &path,
+            &changed,
+            TagFieldMask::all(),
+            &mut |stage| {
+                match stage {
+                    TagWriteStage::AfterTemporaryVerification => {
+                        release =
+                            release_playback_for_tag_edit(&playback, std::slice::from_ref(&path))?;
+                    }
+                    TagWriteStage::BeforeEditedFileBecomesFinal => {
+                        return Err("controlled replacement failure".to_owned());
+                    }
+                    _ => {}
+                }
+                Ok(())
+            },
+        );
+        let restoration = release.take().expect("release was reached").restore();
+        assert!(result
+            .expect_err("must reject controlled failure")
+            .contains("controlled replacement failure"));
+        restoration.expect("restore original playback");
+        assert_eq!(fs::read(&path).expect("read restored bytes"), original);
+        assert_restored_playback(&playback, &path, true);
+        fs::remove_dir_all(directory).expect("remove disposable library");
+    }
+
+    #[test]
+    fn synthetic_album_edit_releases_only_loaded_member_and_preserves_history() {
+        let fixture = SyntheticSixFormatAlbumFixture::new();
+        let loaded_path = fixture.paths[4].clone();
+        let playback = synthetic_loaded_playback(&loaded_path, false);
+        let first_id = fixture.paths[0].to_string_lossy().into_owned();
+        fixture
+            .library
+            .lock()
+            .expect("lock library")
+            .record_play(&first_id, "before-loaded-album-edit")
+            .expect("record existing history");
+        let mut release = None;
+        let result = update_album_tags_batch_with_hook(
+            &fixture.request(),
+            &fixture.library,
+            &fixture.writes,
+            None,
+            &mut |stage| {
+                if let AlbumBatchStage::BeforeBatchReplace(paths) = stage {
+                    release = release_playback_for_tag_edit(&playback, &paths)?;
+                    assert!(release.is_some(), "loaded album member must be released");
+                }
+                Ok(())
+            },
+            &mut |_, _, _, _| {},
+        );
+        let restoration = release.take().expect("release was reached").restore();
+        assert_eq!(result.expect("album edit").outcome, "success");
+        restoration.expect("restore album playback");
+        assert_restored_playback(&playback, &loaded_path, false);
+        let library = fixture.library.lock().expect("lock preserved history");
+        assert_eq!(
+            library
+                .track_by_id(&first_id)
+                .expect("look up track")
+                .unwrap()
+                .play_count,
+            1
+        );
+    }
+
+    #[test]
+    fn synthetic_loaded_album_failure_rolls_back_and_restores_paused_session() {
+        let fixture = SyntheticSixFormatAlbumFixture::new();
+        let originals = fixture
+            .paths
+            .iter()
+            .map(|path| fs::read(path).unwrap())
+            .collect::<Vec<_>>();
+        let loaded_path = fixture.paths[4].clone();
+        let playback = synthetic_loaded_playback(&loaded_path, true);
+        let mut release = None;
+        let result = update_album_tags_batch_with_hook(
+            &fixture.request(),
+            &fixture.library,
+            &fixture.writes,
+            None,
+            &mut |stage| {
+                match stage {
+                    AlbumBatchStage::BeforeBatchReplace(paths) => {
+                        release = release_playback_for_tag_edit(&playback, &paths)?;
+                    }
+                    AlbumBatchStage::AfterReplace(4) => {
+                        return Err("controlled loaded-album failure".to_owned());
+                    }
+                    _ => {}
+                }
+                Ok(())
+            },
+            &mut |_, _, _, _| {},
+        )
+        .expect("structured batch failure");
+        release
+            .take()
+            .expect("loaded album member was released")
+            .restore()
+            .expect("restore paused playback");
+        assert_eq!(result.outcome, "rolled_back");
+        for (path, original) in fixture.paths.iter().zip(originals) {
+            assert_eq!(fs::read(path).expect("read rolled-back track"), original);
+        }
+        assert_restored_playback(&playback, &loaded_path, true);
+    }
+
+    #[test]
+    fn synthetic_album_edit_does_not_release_unrelated_playback() {
+        let fixture = SyntheticSixFormatAlbumFixture::new();
+        let unrelated = fixture.directory.join("unrelated.wav");
+        fs::write(&unrelated, synthetic_pcm_wav_with_pcm_length(64_000))
+            .expect("write unrelated disposable track");
+        let playback = synthetic_loaded_playback(&unrelated, false);
+        let result = update_album_tags_batch_with_hook(
+            &fixture.request(),
+            &fixture.library,
+            &fixture.writes,
+            None,
+            &mut |stage| {
+                if let AlbumBatchStage::BeforeBatchReplace(paths) = stage {
+                    assert!(release_playback_for_tag_edit(&playback, &paths)?.is_none());
+                }
+                Ok(())
+            },
+            &mut |_, _, _, _| {},
+        )
+        .expect("edit unrelated album");
+        assert_eq!(result.outcome, "success");
+        assert_restored_playback(&playback, &unrelated, false);
     }
 
     #[test]
