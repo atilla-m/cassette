@@ -28,6 +28,7 @@ class WindowsRuntimeAuditTests(unittest.TestCase):
             "gstreamer-1.0-0.dll": b"core",
             "vcruntime140.dll": b"signed-microsoft-vc-runtime-fixture",
             "lib/gstreamer-1.0/gstplayback.dll": b"plugin",
+            "lib/gstreamer-1.0/gsttypefindfunctions.dll": b"typefind",
             "libexec/gstreamer-1.0/gst-plugin-scanner.exe": b"scanner",
             "third-party/gstreamer/NOTICE.txt": b"notice",
         }
@@ -44,6 +45,7 @@ class WindowsRuntimeAuditTests(unittest.TestCase):
                 "dlls": ["vcruntime140.dll"],
             },
             "elementProviders": {name: "gstplayback.dll" for name in audit_module.WINDOWS_REQUIRED_ELEMENTS},
+            "typefindProvider": "gsttypefindfunctions.dll",
             "files": [
                 {"path": name, "sha256": audit_module.sha256_file(self.installed / name)}
                 for name in self.files
@@ -76,6 +78,20 @@ class WindowsRuntimeAuditTests(unittest.TestCase):
         self.manifest.write_text(json.dumps(value), encoding="utf-8")
         result, _ = self.audit()
         self.assertTrue(any("element allowlist" in error for error in result.errors))
+
+    def test_missing_typefind_plugin_fails(self):
+        value = json.loads(self.manifest.read_text(encoding="utf-8"))
+        del value["typefindProvider"]
+        self.manifest.write_text(json.dumps(value), encoding="utf-8")
+        result, _ = self.audit()
+        self.assertTrue(any("typefindfunctions provider" in error for error in result.errors))
+
+    def test_unlisted_hardware_sink_provider_fails(self):
+        value = json.loads(self.manifest.read_text(encoding="utf-8"))
+        value["elementProviders"]["wasapi2sink"] = "gstmissing.dll"
+        self.manifest.write_text(json.dumps(value), encoding="utf-8")
+        result, _ = self.audit()
+        self.assertTrue(any("provider for wasapi2sink" in error for error in result.errors))
 
     def test_missing_vc_runtime_fails(self):
         value = json.loads(self.manifest.read_text(encoding="utf-8"))

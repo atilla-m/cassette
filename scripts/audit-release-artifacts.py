@@ -35,7 +35,7 @@ WINDOWS_REQUIRED_ELEMENTS = {
     "playbin", "uridecodebin", "decodebin3", "filesrc", "typefind",
     "audioconvert", "audioresample", "autoaudiosink", "id3demux",
     "flacdec", "oggdemux", "vorbisdec", "opusdec", "wavparse",
-    "qtdemux", "avdec_mp3", "avdec_aac",
+    "qtdemux", "avdec_mp3", "avdec_aac", "wasapi2sink", "wasapisink",
 }
 # Only operating-system DLLs may be absent from Cassette's installed folder.
 # Keep this deliberately narrow: new imports require an explicit review.
@@ -751,8 +751,13 @@ def verify_windows_runtime(audit: Audit, root: Path, label: str) -> set[str]:
             or manifest.get("gstreamerVersion") != WINDOWS_GSTREAMER_VERSION
             or manifest.get("runtimeMsiSha256") != WINDOWS_GSTREAMER_MSI_SHA256):
         audit.fail(f"{label}: bundled GStreamer provenance is incorrect")
-    if set(manifest.get("elementProviders", {})) != WINDOWS_REQUIRED_ELEMENTS:
+    providers = manifest.get("elementProviders")
+    if not isinstance(providers, dict) or set(providers) != WINDOWS_REQUIRED_ELEMENTS:
         audit.fail(f"{label}: GStreamer element allowlist is incomplete")
+        providers = {}
+    typefind_provider = manifest.get("typefindProvider")
+    if typefind_provider != "gsttypefindfunctions.dll":
+        audit.fail(f"{label}: GStreamer typefindfunctions provider is missing")
     vc_runtime = manifest.get("vcRuntime")
     vc_dlls: set[str] = set()
     if (not isinstance(vc_runtime, dict)
@@ -813,6 +818,11 @@ def verify_windows_runtime(audit: Audit, root: Path, label: str) -> set[str]:
         allowed.add(relative.lower())
     if "gstreamer-1.0-0.dll" not in seen:
         audit.fail(f"{label}: bundled GStreamer core DLL is missing")
+    for feature, provider in [*providers.items(), ("typefindfunctions", typefind_provider)]:
+        if (not isinstance(provider, str)
+                or not re.fullmatch(r"gst[a-z0-9_]+\.dll", provider, re.IGNORECASE)
+                or f"lib/gstreamer-1.0/{provider.lower()}" not in seen):
+            audit.fail(f"{label}: provider for {feature} is not in the bundled plugin allowlist")
     if not vc_dlls.issubset(seen):
         audit.fail(f"{label}: listed Microsoft VC runtime files are missing")
     if any(name in seen and name not in vc_dlls for name in (

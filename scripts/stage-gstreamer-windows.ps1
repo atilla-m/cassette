@@ -45,31 +45,44 @@ $elements = @(
   "playbin", "uridecodebin", "decodebin3", "filesrc", "typefind",
   "audioconvert", "audioresample", "autoaudiosink", "id3demux",
   "flacdec", "oggdemux", "vorbisdec", "opusdec", "wavparse",
-  "qtdemux", "avdec_mp3", "avdec_aac"
+  "qtdemux", "avdec_mp3", "avdec_aac", "wasapi2sink", "wasapisink"
 )
 $selectedPlugins = [System.Collections.Generic.Dictionary[string,string]]::new([StringComparer]::OrdinalIgnoreCase)
 $elementProviders = [ordered]@{}
 $env:PATH = "$bin;$env:PATH"
 $env:GST_PLUGIN_PATH_1_0 = $plugins
-foreach ($element in $elements) {
-  $details = (& $inspect $element 2>&1 | Out-String)
-  if ($LASTEXITCODE -ne 0) { throw "Required GStreamer element unavailable: $element`n$details" }
+function Select-PluginProvider {
+  param([string]$Feature, [switch]$RequireHardwareSink)
+  $details = (& $inspect $Feature 2>&1 | Out-String)
+  if ($LASTEXITCODE -ne 0) { throw "Required GStreamer feature unavailable: $Feature`n$details" }
+  if ($RequireHardwareSink -and $details -notmatch '(?m)^\s*Klass\s+Sink/Audio/Hardware\s*$') {
+    throw "$Feature is not a Windows hardware audio sink"
+  }
   $filenameMatch = [regex]::Match($details, '(?m)^\s*Filename\s+(.+?)\s*$')
   $licenseMatch = [regex]::Match($details, '(?m)^\s*License\s+(.+?)\s*$')
   if (-not $filenameMatch.Success -or -not $licenseMatch.Success) {
-    throw "Could not read provider and license for element $element"
+    throw "Could not read provider and license for GStreamer feature $Feature"
   }
   $provider = [IO.Path]::GetFullPath($filenameMatch.Groups[1].Value.Trim())
   if (-not $provider.StartsWith("$plugins\", [StringComparison]::OrdinalIgnoreCase) -or
       -not $provider.EndsWith(".dll", [StringComparison]::OrdinalIgnoreCase)) {
-    throw "Element $element is not provided by a DLL in the verified runtime: $provider"
+    throw "Feature $Feature is not provided by a DLL in the verified runtime: $provider"
   }
   $license = $licenseMatch.Groups[1].Value.Trim()
   if ($license -notmatch '^(LGPL(?:[- .0-9+]*)?|MIT|BSD(?:[- .0-9+]*)?)$') {
-    throw "Refusing a non-allowlisted GStreamer plugin license for $element`: $license"
+    throw "Refusing a non-allowlisted GStreamer plugin license for $Feature`: $license"
   }
   $selectedPlugins[$provider] = $license
-  $elementProviders[$element] = Split-Path -Leaf $provider
+  return (Split-Path -Leaf $provider)
+}
+foreach ($element in $elements) {
+  $elementProviders[$element] = Select-PluginProvider $element -RequireHardwareSink:($element -in @("wasapi2sink", "wasapisink"))
+}
+# The typefind *element* comes from coreelements; media signatures are supplied
+# by a distinct plugin containing GstTypeFindFactory registrations.
+$typefindProvider = Select-PluginProvider "typefindfunctions"
+if ($typefindProvider -ine "gsttypefindfunctions.dll") {
+  throw "Unexpected typefindfunctions plugin provider: $typefindProvider"
 }
 
 $scanner = Get-ChildItem -LiteralPath $root -Filter "gst-plugin-scanner.exe" -File -Recurse |
@@ -235,6 +248,7 @@ $manifest = [ordered]@{
     dlls = @($selectedVcDlls.Values | ForEach-Object { Split-Path -Leaf $_ } | Sort-Object)
   }
   elementProviders = $elementProviders
+  typefindProvider = $typefindProvider
   files = @($staged | Sort-Object { $_.path })
 }
 $manifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $output "manifest.json") -Encoding utf8
