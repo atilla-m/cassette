@@ -37,6 +37,14 @@ WINDOWS_REQUIRED_ELEMENTS = {
     "flacdec", "oggdemux", "vorbisdec", "opusdec", "wavparse",
     "qtdemux", "avdec_mp3", "avdec_aac",
 }
+# Only operating-system DLLs may be absent from Cassette's installed folder.
+# Keep this deliberately narrow: new imports require an explicit review.
+WINDOWS_SYSTEM_DLLS = {
+    "advapi32.dll", "bcrypt.dll", "bcryptprimitives.dll", "comctl32.dll",
+    "crypt32.dll", "dwmapi.dll", "gdi32.dll", "kernel32.dll", "ntdll.dll",
+    "ole32.dll", "oleaut32.dll", "shell32.dll", "shlwapi.dll", "user32.dll",
+    "ws2_32.dll",
+}
 NATIVE_TAURI_DEV_URL_EXCEPTIONS = {
     b"http://localhost:1420",
     b"ws://localhost:1420",
@@ -349,6 +357,70 @@ def pe_resource_types(path: Path) -> set[int]:
         if not identifier & 0x80000000:
             types.add(identifier & 0xFFFF)
     return types
+
+
+def pe_imported_dlls(path: Path) -> set[str]:
+    """Read PE import names without depending on the build host's DLL search path."""
+    data = path.read_bytes()
+    if len(data) < 64 or data[:2] != b"MZ":
+        raise ValueError(f"not a PE file: {path}")
+    pe_offset = struct.unpack_from("<I", data, 60)[0]
+    if pe_offset + 24 > len(data) or data[pe_offset:pe_offset + 4] != b"PE\0\0":
+        raise ValueError(f"invalid PE header: {path}")
+    coff = pe_offset + 4
+    section_count = struct.unpack_from("<H", data, coff + 2)[0]
+    optional_size = struct.unpack_from("<H", data, coff + 16)[0]
+    optional = coff + 20
+    if optional + optional_size > len(data):
+        raise ValueError(f"truncated PE optional header: {path}")
+    magic = struct.unpack_from("<H", data, optional)[0]
+    if magic not in (0x10B, 0x20B):
+        raise ValueError(f"unsupported PE optional header: {path}")
+    directory = optional + (112 if magic == 0x20B else 96)
+    directory_count = struct.unpack_from("<I", data, directory - 4)[0]
+    if directory_count < 2 or directory + 16 > optional + optional_size:
+        return set()
+    import_rva, _ = struct.unpack_from("<II", data, directory + 8)
+    if not import_rva:
+        return set()
+    sections = []
+    section_start = optional + optional_size
+    for index in range(section_count):
+        offset = section_start + index * 40
+        if offset + 40 > len(data):
+            raise ValueError(f"truncated PE section table: {path}")
+        virtual_size, virtual_address, raw_size, raw_offset = struct.unpack_from(
+            "<IIII", data, offset + 8,
+        )
+        sections.append((virtual_address, max(virtual_size, raw_size), raw_size, raw_offset))
+
+    def rva_to_offset(rva: int) -> int:
+        for address, extent, raw_size, offset in sections:
+            displacement = rva - address
+            if 0 <= displacement < extent and displacement < raw_size:
+                resolved = offset + displacement
+                if resolved < len(data):
+                    return resolved
+        raise ValueError(f"unmapped PE import RVA in {path}")
+
+    imports: set[str] = set()
+    descriptor = rva_to_offset(import_rva)
+    for _ in range(4096):
+        if descriptor + 20 > len(data):
+            raise ValueError(f"truncated PE import table: {path}")
+        values = struct.unpack_from("<IIIII", data, descriptor)
+        if values == (0, 0, 0, 0, 0):
+            return imports
+        name_offset = rva_to_offset(values[3])
+        name_end = data.find(b"\0", name_offset, min(name_offset + 256, len(data)))
+        if name_end < 0:
+            raise ValueError(f"unterminated PE import name: {path}")
+        name = data[name_offset:name_end].decode("ascii", "strict").lower()
+        if not re.fullmatch(r"[a-z0-9_.+-]+\.dll", name):
+            raise ValueError(f"invalid PE import name {name!r}: {path}")
+        imports.add(name)
+        descriptor += 20
+    raise ValueError(f"oversized PE import table: {path}")
 
 
 def parse_control_fields(control: str) -> dict[str, str]:
@@ -752,6 +824,44 @@ def verify_windows_runtime(audit: Audit, root: Path, label: str) -> set[str]:
     return allowed
 
 
+def verify_windows_binary_imports(
+    audit: Audit, root: Path, executable: Path, allowed_runtime: set[str], label: str,
+) -> None:
+    """Ensure loader-time imports resolve within the installed app or Windows."""
+    application_dir = executable.parent
+    local_dlls = {
+        path.name.lower(): path
+        for path in application_dir.iterdir()
+        if path.is_file() and path.suffix.lower() == ".dll"
+    }
+    binaries = [executable]
+    packaged = {
+        path.relative_to(root).as_posix().lower(): path
+        for path in root.rglob("*") if path.is_file()
+    }
+    for relative in sorted(allowed_runtime):
+        candidate = packaged.get(relative)
+        if candidate and candidate.suffix.lower() in {".dll", ".exe"}:
+            binaries.append(candidate)
+    for binary in binaries:
+        try:
+            imports = pe_imported_dlls(binary)
+        except (OSError, UnicodeError, ValueError) as error:
+            audit.fail(f"{label}: cannot inspect PE imports of {binary.name}: {error}")
+            continue
+        for name in imports:
+            if name.startswith(("api-ms-win-", "ext-ms-win-")) or name in WINDOWS_SYSTEM_DLLS:
+                continue
+            dependency = local_dlls.get(name)
+            if dependency is None:
+                audit.fail(
+                    f"{label}: {binary.name} imports {name}, absent beside cassette.exe "
+                    "before startup"
+                )
+            elif dependency.relative_to(root).as_posix().lower() not in allowed_runtime:
+                audit.fail(f"{label}: {binary.name} imports unlisted DLL {name}")
+
+
 def verify_windows_payload(audit: Audit, root: Path, label: str) -> set[str]:
     executables = [path for path in root.rglob("*.exe") if path.name.lower() == "cassette.exe"]
     if not executables:
@@ -774,6 +884,8 @@ def verify_windows_payload(audit: Audit, root: Path, label: str) -> set[str]:
         for path in executables
     ):
         audit.fail(f"{label}: private GStreamer runtime is not installed beside cassette.exe")
+    for executable in executables:
+        verify_windows_binary_imports(audit, root, executable, allowed, label)
     return allowed
 
 
@@ -857,6 +969,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--license", type=Path, default=Path("LICENSE"))
     parser.add_argument("--frontend", action="append", type=Path, default=[])
     parser.add_argument("--artifact", action="append", type=Path, default=[])
+    parser.add_argument("--installed-windows-dir", type=Path)
     return parser.parse_args()
 
 
@@ -876,6 +989,17 @@ def main() -> int:
     for frontend in args.frontend:
         frontend_path = frontend if frontend.is_absolute() else workspace / frontend
         scan_frontend(audit, frontend_path.resolve())
+
+    if args.installed_windows_dir is not None:
+        installed = args.installed_windows_dir.resolve()
+        if not installed.is_dir():
+            audit.fail(f"Windows installer did not create the expected directory: {installed}")
+        else:
+            allowed = verify_windows_payload(audit, installed, "installed Windows package")
+            scan_tree(
+                audit, installed, "installed Windows package",
+                windows_bundle=True, allowed_windows_runtime=allowed,
+            )
 
     with tempfile.TemporaryDirectory(prefix="cassette-artifact-audit-") as temporary:
         temporary_root = Path(temporary)

@@ -191,6 +191,10 @@ jobs:
             --artifact src-tauri/target/x86_64-pc-windows-msvc/release/cassette.exe `
             --artifact src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/Cassette_0.1.0-beta.3_x64-setup.exe
 
+      - name: Install and smoke-test without build-machine GStreamer
+        shell: pwsh
+        run: ./scripts/test-installed-windows-runtime.ps1
+
       - name: Upload exact Windows CI artifacts
         uses: actions/upload-artifact@v4
         with:

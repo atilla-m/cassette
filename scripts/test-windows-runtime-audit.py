@@ -3,6 +3,7 @@
 
 import importlib.util
 import json
+import struct
 import tempfile
 import unittest
 from pathlib import Path
@@ -106,6 +107,43 @@ class WindowsRuntimeAuditTests(unittest.TestCase):
         self.assertTrue(audit_module.same_text_ignoring_crlf(windows_copy, self.license))
         windows_copy.write_bytes(b"GPL text\r\nchanged line\r\n")
         self.assertFalse(audit_module.same_text_ignoring_crlf(windows_copy, self.license))
+
+    def test_native_startup_import_must_be_installed_beside_executable(self):
+        application = self.root / "cassette.exe"
+        application.write_bytes(self.synthetic_pe_importing("gio-2.0-0.dll"))
+        result = audit_module.Audit(self.root, audit_module.EXPECTED_VERSION, self.license)
+        audit_module.verify_windows_binary_imports(
+            result, self.root, application, set(), "synthetic installer",
+        )
+        self.assertTrue(any("gio-2.0-0.dll, absent beside cassette.exe" in error
+                            for error in result.errors))
+
+        (self.root / "gio-2.0-0.dll").write_bytes(self.synthetic_pe_importing("KERNEL32.dll"))
+        result = audit_module.Audit(self.root, audit_module.EXPECTED_VERSION, self.license)
+        audit_module.verify_windows_binary_imports(
+            result, self.root, application, {"gio-2.0-0.dll"}, "synthetic installer",
+        )
+        self.assertFalse(result.errors)
+
+    @staticmethod
+    def synthetic_pe_importing(name):
+        data = bytearray(2048)
+        data[:2] = b"MZ"
+        struct.pack_into("<I", data, 60, 0x80)
+        data[0x80:0x84] = b"PE\0\0"
+        struct.pack_into("<HH", data, 0x84, 0x8664, 1)
+        struct.pack_into("<H", data, 0x84 + 16, 240)
+        optional = 0x84 + 20
+        struct.pack_into("<H", data, optional, 0x20B)
+        struct.pack_into("<I", data, optional + 108, 16)
+        struct.pack_into("<II", data, optional + 112 + 8, 0x1000, 40)
+        section = optional + 240
+        data[section:section + 8] = b".rdata\0\0"
+        struct.pack_into("<IIII", data, section + 8, 0x600, 0x1000, 0x600, 0x200)
+        struct.pack_into("<IIIII", data, 0x200, 0, 0, 0, 0x1100, 0)
+        encoded = name.encode("ascii") + b"\0"
+        data[0x300:0x300 + len(encoded)] = encoded
+        return bytes(data)
 
     def test_unlisted_gstreamer_dll_still_fails(self):
         result, allowed = self.audit()

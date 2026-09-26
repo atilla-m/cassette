@@ -115,6 +115,15 @@ $pending.Enqueue($scanner.FullName)
 $pending.Enqueue($inspect)
 foreach ($plugin in $selectedPlugins.Keys) { $pending.Enqueue($plugin) }
 $selectedBinDlls = [System.Collections.Generic.Dictionary[string,string]]::new([StringComparer]::OrdinalIgnoreCase)
+# cassette.exe links GIO directly. Its imports are resolved by the Windows
+# loader before main(), so process-local PATH setup cannot rescue a missing
+# DLL. The packaged executable's complete import closure is checked again
+# after NSIS installation; this seed makes the current native link explicit.
+if (-not $availableDlls.ContainsKey("gio-2.0-0.dll")) {
+  throw "The verified GStreamer runtime is missing Cassette's direct GIO dependency"
+}
+$selectedBinDlls["gio-2.0-0.dll"] = $availableDlls["gio-2.0-0.dll"]
+$pending.Enqueue($availableDlls["gio-2.0-0.dll"])
 $visited = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
 while ($pending.Count -gt 0) {
   $current = $pending.Dequeue()
