@@ -103,7 +103,11 @@ foreach ($sink in @("wasapi2sink", "wasapisink")) {
 }
 foreach ($extension in @("flac", "mp3", "ogg", "opus", "wav", "m4a")) {
   $file = Join-Path $fixtureRoot "tone.$extension"
-  $decode = & $launch -m -v filesrc "location=$file" ! decodebin ! audioconvert ! audioresample ! fakesink sync=false 2>&1 | Out-String
+  if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "Missing playback fixture: $file" }
+  # Cassette passes a file URI to playbin. gst-launch's pipeline parser treats
+  # backslashes in a Windows filesrc location as escapes, not path separators.
+  $uri = [Uri]::new([IO.Path]::GetFullPath($file)).AbsoluteUri
+  $decode = & $launch -m -v uridecodebin "uri=$uri" ! audioconvert ! audioresample ! fakesink sync=false 2>&1 | Out-String
   if ($LASTEXITCODE -ne 0 -or $decode -notmatch 'audio/x-raw' -or $decode -notmatch 'Got EOS from element') {
     throw "Installed package could not typefind and decode $extension to raw audio/EOS: $decode"
   }
