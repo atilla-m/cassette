@@ -36,6 +36,7 @@ WINDOWS_REQUIRED_ELEMENTS = {
     "audioconvert", "audioresample", "autoaudiosink", "id3demux",
     "flacdec", "oggdemux", "vorbisdec", "opusdec", "wavparse",
     "qtdemux", "avdec_mp3", "avdec_aac", "wasapi2sink", "wasapisink",
+    "flacparse", "mpegaudioparse", "aacparse", "vorbisparse", "opusparse",
 }
 # Only operating-system DLLs may be absent from Cassette's installed folder.
 # Keep this deliberately narrow: new imports require an explicit review.

@@ -79,6 +79,12 @@ class WindowsRuntimeAuditTests(unittest.TestCase):
         result, _ = self.audit()
         self.assertTrue(any("element allowlist" in error for error in result.errors))
 
+    def test_all_six_format_parsers_are_required(self):
+        self.assertTrue({
+            "flacparse", "mpegaudioparse", "aacparse", "vorbisparse",
+            "opusparse", "wavparse",
+        }.issubset(audit_module.WINDOWS_REQUIRED_ELEMENTS))
+
     def test_missing_typefind_plugin_fails(self):
         value = json.loads(self.manifest.read_text(encoding="utf-8"))
         del value["typefindProvider"]
