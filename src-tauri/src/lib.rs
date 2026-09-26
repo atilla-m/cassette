@@ -645,10 +645,13 @@ fn release_playback_for_tag_edit<'a>(
     let Some(current_path) = playback.current_path.clone() else {
         return Ok(None);
     };
-    let canonical_current = Path::new(&current_path).canonicalize().ok();
+    let Some(canonical_current) = Path::new(&current_path).canonicalize().ok() else {
+        return Ok(None);
+    };
     if !targets
         .iter()
-        .any(|target| Some(target.as_path()) == canonical_current.as_deref())
+        .filter_map(|target| target.canonicalize().ok())
+        .any(|target| target == canonical_current)
     {
         return Ok(None);
     }
