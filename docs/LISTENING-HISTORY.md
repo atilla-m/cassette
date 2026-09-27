@@ -24,7 +24,7 @@ Unmatched or ambiguous history is retained, exported again and included in stati
 
 All-time totals are **not** blindly added. A known undated baseline is identified by its original source and reference; overlapping versions use the larger already-known baseline, not their sum. Unrelated undated baselines, inconsistent original IDs/timestamps, changed coverage provenance, or new dated events whose overlap with existing undated totals is unknown cause an explicit refusal. There is no “force import” that guesses those dates or totals. Restore into an empty disposable profile when independent devices' legacy totals cannot be reconciled.
 
-Imports are limited to 256 MiB and two million events; custom chart ranges to 100 years. Audio-identity verification reads the library files and can take time for a large library. Queries and transfer commands run off the UI thread; transfer previews and ranking lists render incrementally.
+Imports are limited to 256 MiB and two million events; custom chart ranges to 100 years. Backup totals must fit JSON's exact-integer range (at most 9,007,199,254,740,991), and overflow is refused rather than rounded. Audio-identity verification reads the library files and can take time for a large library. Queries and transfer commands run off the UI thread; transfer previews and ranking lists render incrementally. Qualifying-play times are captured before waiting for the library lock, and out-of-order writes cannot move the latest-played timestamp backward.
 
 ## Isolated manual diagnostic
 

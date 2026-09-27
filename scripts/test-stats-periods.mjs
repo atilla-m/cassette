@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { statsRangeForPeriod } from "../src/lib/utils/statsPeriod.ts";
-import { resolveStatsPlayback } from "../src/lib/utils/listeningStats.ts";
+import { resolveStatsPlayback, statsDayValueLabel } from "../src/lib/utils/listeningStats.ts";
 
 process.env.TZ = "America/New_York";
 
@@ -62,4 +62,14 @@ test("period playback/context actions use authoritative tracks and omit unavaila
   assert.deepEqual(selection.queue, [actual, another]);
   assert.equal(rows[0].playCount, 2);
   assert.equal(resolveStatsPlayback("pending:missing", rows, library), null);
+});
+
+test("selected chart-day values refresh with the snapshot, including zero and changed periods", () => {
+  const day = "2026-03-08";
+  const dates = [day, "2026-03-09"];
+  assert.equal(statsDayValueLabel(day, dates, [0, 2]), `${day}: 0 plays`);
+  assert.equal(statsDayValueLabel(day, dates, [1, 2]), `${day}: 1 plays`);
+  assert.equal(statsDayValueLabel(day, ["2026-04-01"], [3]), null);
+  assert.equal(statsDayValueLabel(null, dates, [1, 2]), null);
+  assert.equal(statsDayValueLabel(day, dates, []), null);
 });

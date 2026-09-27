@@ -1,5 +1,12 @@
 import type { Track } from "$lib/types/library";
 
+export function statsDayValueLabel(day: string | null, chartDates: string[], dailyPlays: number[]) {
+  if (!day) return null;
+  const index = chartDates.indexOf(day);
+  if (index < 0 || dailyPlays[index] === undefined) return null;
+  return `${day}: ${dailyPlays[index]} plays`;
+}
+
 // Period rows contain display-only counts. Playback and context actions must use
 // current library records, never those overlays or an unavailable history row.
 export function resolveStatsPlayback(trackId: string, periodQueue: Track[], libraryById: Map<string, Track>) {

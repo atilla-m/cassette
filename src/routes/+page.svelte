@@ -96,7 +96,7 @@
   import TrackList from "$lib/components/TrackList.svelte";
   import { buildAlbums, buildArtists, buildGenres } from "$lib/data/libraryViews";
   import { statsRangeForPeriod, type StatsPeriod } from "$lib/utils/statsPeriod";
-  import { resolveStatsPlayback } from "$lib/utils/listeningStats";
+  import { resolveStatsPlayback, statsDayValueLabel } from "$lib/utils/listeningStats";
   import type { ListeningStats, ListeningImportPreview } from "$lib/types/listening";
   import { albums as mockAlbums, artists as mockArtists, genres as mockGenres, navItems } from "$lib/data/mockLibrary";
   import { ENABLE_EXPERIMENTAL_VIDEOS } from "$lib/featureFlags";
@@ -618,7 +618,6 @@
   let historyPreviewLimit = $state(STATS_PAGE_SIZE);
   let statsChartOffset = $state(0);
   let statsSelectedDay = $state<string | null>(null);
-  let statsSelectedDayLabel = $state<string | null>(null);
   let albumGenreDraft = $state("");
   let artistGenreDraft = $state("");
   let isSavingGenreAssignment = $state(false);
@@ -697,6 +696,7 @@
   let sortedArtists = $derived(sortArtists(displayArtists, artistSort, artistSortDirection));
   let sortedGenres = $derived(sortGenres(displayGenres, genreSort, genreSortDirection));
   let statsRange = $derived(statsRangeForPeriod(statsPeriod, new Date(statsClock), statsCustomFrom, statsCustomTo, statsSelectedMonth, statsSelectedYear));
+  let statsSelectedDayLabel = $derived(statsDayValueLabel(statsSelectedDay, statsRange?.chartDates ?? [], statsSnapshot?.dailyPlays ?? []));
   let statsTrackCounts = $derived(new Map(statsSnapshot?.trackCounts.map((item) => [item.trackId, item]) ?? []));
   let statsPendingTracks = $derived<Track[]>((statsSnapshot?.pendingTracks ?? []).map((item) => ({
     id: item.trackId, filePath: "", fileName: "Retained listening history (not in library)", extension: "history",
@@ -887,7 +887,6 @@
     void statsSelectedYear;
     statsChartOffset = 0;
     statsSelectedDay = null;
-    statsSelectedDayLabel = null;
   });
 
   $effect(() => {
@@ -7386,7 +7385,6 @@
                   {#each statsChartDates as day, index (day)}
                     <button type="button" class="stats-chart-day" aria-pressed={statsSelectedDay === day} aria-label={`${day}: ${statsSnapshot.dailyPlays[index + statsChartOffset] ?? 0} plays`} title={`${day}: ${statsSnapshot.dailyPlays[index + statsChartOffset] ?? 0} plays`} onclick={() => {
                       statsSelectedDay = day;
-                      statsSelectedDayLabel = `${day}: ${statsSnapshot?.dailyPlays[index + statsChartOffset] ?? 0} plays`;
                     }}>
                       <span class="stats-chart-value">{statsSnapshot.dailyPlays[index + statsChartOffset] ?? 0}</span>
                       <span class="stats-chart-bar" style={`height: ${Math.max(3, ((statsSnapshot.dailyPlays[index + statsChartOffset] ?? 0) / statsMaxDailyPlays) * 96)}px`}></span>

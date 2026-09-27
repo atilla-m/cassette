@@ -12,6 +12,7 @@ use tauri::State;
 use uuid::Uuid;
 
 const BACKUP_VERSION: u32 = 1;
+const MAX_EXACT_PLAYS: i64 = 9_007_199_254_740_991;
 const MAX_BACKUP_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_BACKUP_EVENTS: usize = 2_000_000;
 
@@ -784,6 +785,7 @@ fn validate_backup(backup: &PortableBackup) -> Result<(), String> {
     let mut event_ids = HashSet::new();
     let mut global_baseline_keys = HashSet::new();
     let mut event_count = 0_usize;
+    let mut all_time_total = 0_i64;
     for track in &backup.tracks {
         let reference = &track.reference;
         if reference.reference_id.len() != 64
@@ -858,6 +860,12 @@ fn validate_backup(backup: &PortableBackup) -> Result<(), String> {
             return Err(
                 "Backup all-time total disagrees with events and undated plays.".to_owned(),
             );
+        }
+        all_time_total = all_time_total
+            .checked_add(track.all_time_total)
+            .ok_or_else(|| "Backup all-time total overflowed.".to_owned())?;
+        if all_time_total > MAX_EXACT_PLAYS {
+            return Err("Backup totals exceed the exact JSON integer range.".to_owned());
         }
     }
     Ok(())
@@ -1411,6 +1419,7 @@ pub(crate) fn export_listening_history(
         .lock()
         .map_err(|_| "Library cache is unavailable.".to_owned())?;
     let (backup, result) = library.export_backup()?;
+    validate_backup(&backup)?;
     let bytes = serde_json::to_vec_pretty(&backup)
         .map_err(|error| format!("Could not encode history backup: {error}"))?;
     if bytes.len() as u64 > MAX_BACKUP_BYTES {
@@ -1929,6 +1938,23 @@ pub(super) mod tests {
             }
             assert!(validate_backup(&invalid).is_err());
         }
+        let mut enormous = backup.clone();
+        let source_id = enormous.source_id.clone();
+        enormous.tracks[0].events.clear();
+        enormous.tracks[0].all_time_total = MAX_EXACT_PLAYS;
+        enormous.tracks[0].baselines = vec![PortableBaseline {
+            source_id,
+            origin_reference_id: enormous.tracks[0].reference.reference_id.clone(),
+            undated_plays: MAX_EXACT_PLAYS,
+        }];
+        validate_backup(&enormous).unwrap();
+        let mut another = enormous.tracks[0].clone();
+        another.reference.reference_id = sha256_text("another-enormous-track");
+        another.baselines[0].origin_reference_id = another.reference.reference_id.clone();
+        enormous.tracks.push(another);
+        assert!(validate_backup(&enormous).is_err());
+        assert!(import_backup(&mut destination, &enormous).is_err());
+        assert_eq!(total(&destination, &copy.id), 0);
     }
 
     #[test]
