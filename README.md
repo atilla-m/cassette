@@ -1,28 +1,28 @@
 # Cassette
 
-Cassette is a private, local-first desktop music library and player for Linux. It scans folders you choose, keeps its library and listening history locally, and provides albums, artists, genres, songs, playlists, queue management, synced lyrics, statistics, themes, and guarded FLAC metadata editing.
+Cassette is a private, local-first desktop music library and player for Linux. It scans folders you choose, keeps its library and listening history locally, and provides albums, artists, genres, songs, playlists, queue management, synced lyrics, statistics, themes, and guarded metadata editing.
 
 ## Beta status
 
-Cassette [`0.1.0-beta.3`](https://github.com/atilla-m/cassette/releases/tag/v0.1.0-beta.3) is the current public Linux x86_64 prerelease. It has been tested on Ubuntu 24.04 and Fedora 44. Windows build infrastructure remains in CI, but Windows installer qualification and distribution are deferred to a later beta.
+Cassette 0.1.0-beta.4 is a Linux x86_64 prerelease. Get available packages from [Releases](https://github.com/atilla-m/cassette/releases); the [beta.3 release](https://github.com/atilla-m/cassette/releases/tag/v0.1.0-beta.3) remains available. Ubuntu 24.04 and Fedora 44 were tested for prior Linux betas; consult the beta.4 release notes for this candidate's completed qualification. Windows distribution is deferred pending its separate manual check.
 
-Choose the beta.3 file matching the installation method:
+Choose the beta.4 file matching the installation method once the release is published:
 
-- `Cassette_0.1.0-beta.3_amd64.AppImage` is the portable, signed AppImage and the recommended download.
-- `Cassette_0.1.0-beta.3_amd64.deb` is for the tested Ubuntu 24.04 package path.
-- `Cassette-0.1.0-beta.3-1.x86_64.rpm` is for the tested Fedora 44 package path.
+- `Cassette_0.1.0-beta.4_amd64.AppImage` is the portable, signed AppImage and the recommended download.
+- `Cassette_0.1.0-beta.4_amd64.deb` is for the Ubuntu 24.04 package path.
+- `Cassette-0.1.0-beta.4-1.x86_64.rpm` is for the Fedora 44 package path.
 
-Beta.3 adds per-user AppImage application-menu integration; transient/replaced playback notifications and streamlined theme choices; detailed timestamped play history; instrumental-break cues and stable lyric seeking; expanded play counts, sorting, and full Stats lists; and guarded album-wide FLAC tag editing. Date-filtered Stats screens are not included. Cassette Teal remains the default user-selectable theme, alongside Glacier and Obsidian. The hidden Rose Noir and Royal Gold implementations remain in the source for possible later reactivation.
+Beta.4 carries those beta.3 improvements and adds guarded six-format tag editing (subject to the restrictions below), browser-style back/forward navigation, linked artist/genre labels, consistent browse counts, album-song sorting, a persistent opening instrumental cue, the cover-art viewer, and a draft-release race fix. Date-filtered Stats screens and lyrics editing are not included. Cassette Teal remains the default user-selectable theme, alongside Glacier and Obsidian.
 
 Modern UI work is reserved for a future release. This beta does not include a Modern/Legacy interface switch or promise the rejected Modern design. Experimental video and DVD functionality is disabled and unsupported in this beta; hidden backend code and tools such as `lsdvd`, `ffmpeg`, `ffprobe`, and `mpv` are not part of the beta runtime contract.
 
-The Linux beta formats are DEB, RPM, and AppImage. AppImage updates are signed and require explicit user confirmation. DEB and RPM stay under the system package manager: Cassette may notify those users about a newer version and open its GitHub release page, but it will not invoke `sudo`, `apt`, `dpkg`, `dnf`, or `rpm`, and it will not convert an installation to AppImage. Download a newer DEB or RPM from Releases and install it with APT or DNF; no automatic package repository is configured. Windows NSIS work remains available in CI but is not a beta.3 release asset. MSI is deferred because WiX/MSI cannot represent the authoritative `0.1.0-beta.3` prerelease identifier without changing the project version.
+The Linux beta formats are DEB, RPM, and AppImage. AppImage updates are signed and require explicit user confirmation. DEB and RPM stay under the system package manager: Cassette may notify those users about a newer version and open its GitHub release page, but it will not invoke `sudo`, `apt`, `dpkg`, `dnf`, or `rpm`, and it will not convert an installation to AppImage. Download a newer DEB or RPM from Releases and install it with APT or DNF; no automatic package repository is configured. Windows NSIS work remains available in CI but is not a beta.4 release asset. MSI is excluded because WiX/MSI cannot faithfully represent the authoritative `0.1.0-beta.4` prerelease identifier.
 
-The beta uses the stock Tauri desktop icons as an accepted known limitation. DEB and RPM packages are not repository-signed, and planned Windows installers remain unsigned; package managers, desktop security tools, or Windows SmartScreen may warn about an unrecognized publisher. Tauri updater signatures are a separate mandatory verification layer for AppImage updates.
+The beta uses the stock Tauri desktop icons as an accepted known limitation. DEB and RPM packages are not repository-signed, and planned Windows installers remain unsigned; package managers or desktop security tools may warn about an unrecognized publisher. Tauri updater signatures are a separate mandatory verification layer for AppImage updates.
 
 ## Linux x86_64
 
-The AppImage is the recommended download. It can run without replacing a system package. The production updater public key and beta endpoint remain configured; updates are never forced, and development builds do not contact the update feed. The public feed currently serves beta.3.
+The AppImage is the recommended download. It can run without replacing a system package. The production updater public key and beta endpoint remain configured; updates are never forced, and development builds do not contact the update feed. Only publication of the exact beta.4 prerelease updates the public feed.
 
 A clean Ubuntu 24.04 installation required the FUSE 2 compatibility library before the AppImage could mount and run:
 
@@ -77,26 +77,11 @@ rm -r -- "${XDG_DATA_HOME:-$HOME/.local/share}/io.github.atilla.cassette"
 
 ## Windows 10/11 x86_64 (deferred)
 
-Cassette uses the MSVC build of GStreamer. The planned beta installers are not self-contained: install the official GStreamer **1.26.11 MSVC x86_64 runtime** before starting Cassette.
+Windows installer work remains on a separate feature branch and is not part of the Linux beta.4 release. Its remaining manual loaded-track editing check must pass before Windows distribution. No Windows installer is included among beta.4's four assets. See [docs/GSTREAMER-WINDOWS.md](docs/GSTREAMER-WINDOWS.md) for development context; it is not a beta.4 installation guide.
 
-1. Download `gstreamer-1.0-msvc-x86_64-1.26.11.msi` from the [official GStreamer 1.26.11 MSVC directory](https://gstreamer.freedesktop.org/pkg/windows/1.26.11/msvc/).
-2. Install the complete runtime, keeping its directory structure intact.
-3. Ensure the runtime's `bin` directory is visible in `PATH` before launching Cassette. With the release-build layout this is `C:\gstreamer\1.0\msvc_x86_64\bin`; use the actual directory if you installed it elsewhere.
+## Tag editors
 
-Windows is not included in the Linux-first `0.1.0-beta.3` release. The following limitations remain relevant to its later qualification:
-
-- Linux desktop notifications, MPRIS, and CD detection/ripping are unavailable.
-- Experimental video/DVD functionality is disabled and unsupported.
-- Missing or undiscoverable GStreamer runtime files can prevent the dynamically linked application from starting.
-- The planned NSIS installer is unsigned and has not passed clean Windows 10/11 testing.
-- MSI is excluded from this beta because its version rules cannot represent `0.1.0-beta.3` faithfully.
-- Tauri's WebView2 download bootstrapper may require network access if WebView2 is missing.
-
-See [docs/GSTREAMER-WINDOWS.md](docs/GSTREAMER-WINDOWS.md) for the build and runtime strategy.
-
-## Tag editors in the development branch
-
-The individual-song and album editors can write FLAC, MP3, Ogg/Vorbis, Opus, WAV, and M4A files containing AAC audio. The album editor lists every affected file and any file it must exclude; leaving a shared field unchanged retains each song's own value. Editing writes metadata into the audio file, so keep independent backups of important music. The published beta.3 package still has FLAC-only editing until a later release includes this work.
+The individual-song and album editors can write FLAC, MP3, Ogg/Vorbis, Opus, WAV, and M4A files containing AAC audio. The album editor lists every affected file and any file it must exclude; leaving a shared field unchanged retains each song's own value. Editing writes metadata into the audio file, so keep independent backups of important music.
 
 Cassette preserves MP3 and WAV ID3v2.3 or ID3v2.4 layouts. Existing ID3v2.2 tags, MP3 files tagged only with ID3v1/APEv2, and WAV files tagged only with RIFF INFO are read-only because writing the shared editor fields would require a tag-format conversion. Raw AAC/ADTS is outside the six library formats; M4A/AAC means AAC in an MP4 container. The editor verifies the unchanged audio payload and unrelated metadata before replacing the original file. If verification fails, the original remains in place.
 
@@ -121,7 +106,7 @@ The 13 ignored real-media fixture tests are intentionally excluded from normal v
 
 Report beta problems through [Cassette GitHub Issues](https://github.com/atilla-m/cassette/issues). Include the operating system, package format, Cassette version, relevant GStreamer/runtime details, reproduction steps, and sanitized logs; do not attach private library databases or personal media.
 
-The release process is documented in [docs/RELEASING.md](docs/RELEASING.md), with release-path and artifact-scanner details in [docs/ARTIFACT-SAFETY.md](docs/ARTIFACT-SAFETY.md).
+The active release process is documented in [docs/RELEASING-beta.4.md](docs/RELEASING-beta.4.md), with release-path and artifact-scanner details in [docs/ARTIFACT-SAFETY.md](docs/ARTIFACT-SAFETY.md). The beta.3 checklist remains as historical evidence.
 Updater security, signing-key custody, and beta-feed publication are documented in [docs/UPDATES.md](docs/UPDATES.md).
 
 Cassette is free software licensed under the [GNU General Public License version 3 or later](LICENSE) (`GPL-3.0-or-later`). The full license is included in application bundle resources.

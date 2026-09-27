@@ -11,7 +11,7 @@ const read = (path) => readFileSync(new URL(`../${path}`, import.meta.url), "utf
 const pkg = JSON.parse(read("package.json"));
 const config = JSON.parse(read("src-tauri/tauri.conf.json"));
 const overlay = JSON.parse(read("src-tauri/tauri.updater.conf.json"));
-const expectedVersion = "0.1.0-beta.3";
+const expectedVersion = "0.1.0-beta.4";
 const assertCargoLockVersion = (path, packageName) => {
   const contents = read(path);
   const pattern = new RegExp(`name = "${packageName}"\\r?\\nversion = "${expectedVersion.replaceAll(".", "\\.")}"`);
@@ -29,6 +29,10 @@ test("active release version sources remain synchronized", () => {
   assertCargoLockVersion("src-tauri/Cargo.lock", "cassette");
   assert.match(read("scripts/update-verifier/Cargo.toml"), new RegExp(`^version = "${expectedVersion.replaceAll(".", "\\.")}"$`, "m"));
   assertCargoLockVersion("scripts/update-verifier/Cargo.lock", "cassette-update-verifier");
+
+  assert.match(read("src-tauri/src/lib.rs"), new RegExp(`Cassette/${expectedVersion.replaceAll(".", "\\.")}`));
+  assert.match(read("src/routes/+page.svelte"), new RegExp(expectedVersion.replaceAll(".", "\\.")));
+  assert.match(read(`docs/RELEASE-NOTES-${expectedVersion}.md`), new RegExp(expectedVersion.replaceAll(".", "\\.")));
 
   for (const path of [
     "scripts/build-release.mjs",
@@ -178,15 +182,16 @@ function assertReleaseWorkflowPolicy(ci, release, feed, generator) {
   assert.match(signedLinuxJob, /GSTREAMER_PLUGINS_DIR: \$\{\{ runner\.temp \}\}\/cassette-gstreamer-plugins/);
   assert.match(signedLinuxJob, /test ! -e "\$plugins_target\/libgstneonhttpsrc\.so"/);
   assert.match(signedLinuxJob, /test "\$\(git rev-parse HEAD\)" = "\$GITHUB_SHA"/);
-  assert.match(release, /- "v0\.1\.0-beta\.3"/);
+  assert.match(release, /- "v0\.1\.0-beta\.4"/);
+  assert.match(release, /docs\/RELEASING-beta\.4\.md/);
   assert.match(release, /test "\$GITHUB_REF_NAME" = "v\$project_version"/);
   assert.ok(!release.includes("v0.1.0-beta.1"));
   assert.ok(!release.includes("v0.1.0-beta.2"));
   for (const path of [
-    "release-assets/linux/deb/Cassette_0.1.0-beta.3_amd64.deb",
-    "release-assets/linux/rpm/Cassette-0.1.0-beta.3-1.x86_64.rpm",
-    "release-assets/linux/appimage/Cassette_0.1.0-beta.3_amd64.AppImage",
-    "release-assets/linux/appimage/Cassette_0.1.0-beta.3_amd64.AppImage.sig",
+    "release-assets/linux/deb/Cassette_0.1.0-beta.4_amd64.deb",
+    "release-assets/linux/rpm/Cassette-0.1.0-beta.4-1.x86_64.rpm",
+    "release-assets/linux/appimage/Cassette_0.1.0-beta.4_amd64.AppImage",
+    "release-assets/linux/appimage/Cassette_0.1.0-beta.4_amd64.AppImage.sig",
   ]) {
     assert.match(release, new RegExp(path.replaceAll(".", "\\.")));
   }
@@ -208,18 +213,18 @@ function assertReleaseWorkflowPolicy(ci, release, feed, generator) {
   assert.ok(!release.includes("release:windows"));
   assert.match(feed, /types: \[published\]/);
   assert.match(feed, /github.event.release.prerelease == true/);
-  assert.match(feed, /github\.event\.release\.tag_name == 'v0\.1\.0-beta\.3'/);
+  assert.match(feed, /github\.event\.release\.tag_name == 'v0\.1\.0-beta\.4'/);
   assert.ok(!feed.includes("v0.1.0-beta.1"));
   assert.ok(!feed.includes("v0.1.0-beta.2"));
-  assert.match(feed, /Cassette_0\.1\.0-beta\.3_amd64\.AppImage\.sig/);
+  assert.match(feed, /Cassette_0\.1\.0-beta\.4_amd64\.AppImage\.sig/);
   assert.match(feed, /APPIMAGE_FILE:/);
-  assert.match(generator, /version !== "0\.1\.0-beta\.3"/);
+  assert.match(generator, /version !== "0\.1\.0-beta\.4"/);
   assert.match(generator, /verifyUpdate\(snapshot.image, snapshot.signature/);
   assert.match(generator, /readFileSync\(snapshot.signature/);
   assert.ok(!feed.includes("contents: write"));
 }
 
-test("feed generation rejects prior releases and mismatched beta.3 tags before reading assets", () => {
+test("feed generation rejects prior releases and mismatched beta.4 tags before reading assets", () => {
   const base = {
     RELEASE_PUBLISHED_AT: "2026-09-15T00:00:00Z",
     RELEASE_NOTES_FILE: "unused-notes",
@@ -236,7 +241,7 @@ test("feed generation rejects prior releases and mismatched beta.3 tags before r
     /Release tag\/version mismatch/,
   );
   assert.throws(
-    () => generateUpdateFeed({ ...base, RELEASE_VERSION: "0.1.0-beta.3", RELEASE_TAG: "v0.1.0-beta.2" }),
+    () => generateUpdateFeed({ ...base, RELEASE_VERSION: "0.1.0-beta.4", RELEASE_TAG: "v0.1.0-beta.2" }),
     /Release tag\/version mismatch/,
   );
 });
@@ -302,9 +307,9 @@ gh() {
   case "$1 $2" in
     "api --paginate")
       if [[ "$MOCK_SCENARIO" == duplicate || ( "$MOCK_SCENARIO" == late_duplicate && "$(< "$MOCK_LOG")" == *"api -X POST"* ) ]]; then
-        printf '[[{"id":123,"tag_name":"v0.1.0-beta.3"},{"id":124,"tag_name":"v0.1.0-beta.3"}]]\n'
+        printf '[[{"id":123,"tag_name":"v0.1.0-beta.4"},{"id":124,"tag_name":"v0.1.0-beta.4"}]]\n'
       elif [[ "$MOCK_SCENARIO" == existing ]]; then
-        printf '[[{"id":123,"tag_name":"v0.1.0-beta.3"}]]\n'
+        printf '[[{"id":123,"tag_name":"v0.1.0-beta.4"}]]\n'
       else
         # A newly created draft remains invisible to both list requests.
         printf '[[]]\n'
@@ -314,10 +319,10 @@ gh() {
       [[ "$3" == POST && "$4" == "repos/$GH_REPO/releases" ]]
       [[ " $* " == *" -f tag_name=$GITHUB_REF_NAME "* && " $* " == *" -f target_commitish=$GITHUB_SHA "* ]]
       [[ " $* " == *" -F draft=true "* && " $* " == *" -F prerelease=true "* ]]
-      printf '{"id":123,"tag_name":"v0.1.0-beta.3"}\n'
+      printf '{"id":123,"tag_name":"v0.1.0-beta.4"}\n'
       ;;
     "api repos/$GH_REPO/git/ref/tags/$GITHUB_REF_NAME")
-      printf 'refs/tags/v0.1.0-beta.3\n'
+      printf 'refs/tags/v0.1.0-beta.4\n'
       ;;
     "api repos/$GH_REPO/commits/$GITHUB_REF_NAME")
       if [[ "$MOCK_SCENARIO" == wrong_target ]]; then
@@ -328,9 +333,9 @@ gh() {
       ;;
     "api repos/$GH_REPO/releases/123")
       if [[ "$MOCK_SCENARIO" == existing_asset ]]; then
-        assets='[{"name":"Cassette_0.1.0-beta.3_amd64.deb"}]'
+        assets='[{"name":"Cassette_0.1.0-beta.4_amd64.deb"}]'
       elif [[ "$MOCK_ASSETS_UPLOADED" == 1 ]]; then
-        assets='[{"name":"Cassette_0.1.0-beta.3_amd64.deb"},{"name":"Cassette-0.1.0-beta.3-1.x86_64.rpm"},{"name":"Cassette_0.1.0-beta.3_amd64.AppImage"},{"name":"Cassette_0.1.0-beta.3_amd64.AppImage.sig"}]'
+        assets='[{"name":"Cassette_0.1.0-beta.4_amd64.deb"},{"name":"Cassette-0.1.0-beta.4-1.x86_64.rpm"},{"name":"Cassette_0.1.0-beta.4_amd64.AppImage"},{"name":"Cassette_0.1.0-beta.4_amd64.AppImage.sig"}]'
       else
         assets='[]'
       fi
@@ -339,7 +344,7 @@ gh() {
       else
         draft=true
       fi
-      printf '{"id":123,"tag_name":"v0.1.0-beta.3","draft":%s,"prerelease":true,"published_at":null,"assets":%s}\n' "$draft" "$assets"
+      printf '{"id":123,"tag_name":"v0.1.0-beta.4","draft":%s,"prerelease":true,"published_at":null,"assets":%s}\n' "$draft" "$assets"
       ;;
     "release upload")
       [[ " $* " != *" --clobber "* ]]
@@ -363,9 +368,9 @@ for (const [name, ending] of [["LF", "\n"], ["CRLF", "\r\n"]]) {
       ...process.env,
       GH_REPO: "atilla-m/cassette",
       GH_TOKEN: "mock-only",
-      GITHUB_REF_NAME: "v0.1.0-beta.3",
+      GITHUB_REF_NAME: "v0.1.0-beta.4",
       GITHUB_SHA: "0123456789abcdef0123456789abcdef01234567",
-      RELEASE_VERSION: "0.1.0-beta.3",
+      RELEASE_VERSION: "0.1.0-beta.4",
       // The spawned Git Bash already runs in directory, so use a relative path.
       MOCK_LOG: "gh-calls",
     };
@@ -394,10 +399,10 @@ for (const [name, ending] of [["LF", "\n"], ["CRLF", "\r\n"]]) {
         if (expectedUpload) {
           const upload = calls.split("\n").find((line) => line.startsWith("release upload "));
           assert.deepEqual(upload.split(" ").slice(3), [
-            "release-assets/linux/deb/Cassette_0.1.0-beta.3_amd64.deb",
-            "release-assets/linux/rpm/Cassette-0.1.0-beta.3-1.x86_64.rpm",
-            "release-assets/linux/appimage/Cassette_0.1.0-beta.3_amd64.AppImage",
-            "release-assets/linux/appimage/Cassette_0.1.0-beta.3_amd64.AppImage.sig",
+            "release-assets/linux/deb/Cassette_0.1.0-beta.4_amd64.deb",
+            "release-assets/linux/rpm/Cassette-0.1.0-beta.4-1.x86_64.rpm",
+            "release-assets/linux/appimage/Cassette_0.1.0-beta.4_amd64.AppImage",
+            "release-assets/linux/appimage/Cassette_0.1.0-beta.4_amd64.AppImage.sig",
           ]);
         }
         if (scenario === "delayed") {
@@ -413,11 +418,11 @@ for (const [name, ending] of [["LF", "\n"], ["CRLF", "\r\n"]]) {
 
 test("feed snapshot cannot publish a signature changed after verification", () => {
   const directory = mkdtempSync(join(tmpdir(), "cassette-feed-snapshot-test-"));
-  const image = join(directory, "Cassette_0.1.0-beta.3_amd64.AppImage");
+  const image = join(directory, "Cassette_0.1.0-beta.4_amd64.AppImage");
   const signature = `${image}.sig`;
   writeFileSync(image, "original AppImage bytes");
   writeFileSync(signature, "signature bytes accepted by the verifier");
-  const snapshot = snapshotUpdatePair(image, signature, "0.1.0-beta.3");
+  const snapshot = snapshotUpdatePair(image, signature, "0.1.0-beta.4");
   try {
     const cryptographicallyVerifiedBytes = readFileSync(snapshot.signature, "utf8");
     writeFileSync(signature, "signature bytes swapped after verification");

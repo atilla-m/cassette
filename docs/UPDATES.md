@@ -2,7 +2,7 @@
 
 ## Current status
 
-The production public key and beta Pages address are committed and unchanged. The published beta.2 release completed signed-artifact, tamper-rejection, genuine FUSE-mounted AppImage, clean Ubuntu 24.04 DEB/AppImage, clean Fedora 44 RPM, six-format playback, and isolated beta.1.e2e → beta.2 updater/data-preservation qualification. The production feed continues to serve beta.2 until beta.3 is intentionally published. Beta.3 is unreleased and must repeat signed-candidate, packaged-feature, beta.2 database-migration, and publication checks; ordinary CI is not that qualification.
+The production public key and beta Pages address are committed and unchanged. The published beta.2 and beta.3 releases have their own retained qualification evidence. The beta.4 Linux workflow and exact feed selectors are prepared; follow the [active beta.4 checklist](RELEASING-beta.4.md) for fresh artifact and publication gates. Ordinary CI is not packaged-release qualification. The historical beta.2 and beta.3 runbooks below remain evidence of those versions, not instructions to modify their releases.
 
 The immutable beta.1 evidence remains historical: annotated tag `v0.1.0-beta.1` (tag object `f2f7dc0c1af47a370d5df6f7a0e61bb6bd8ed087`) targets commit `e239ead18d0b73032498038532b2768ecce25a3e`; signed workflow run `34475557727` produced artifact `10151906575` (`169926732` archive bytes, SHA-256 `460c5dac018a2f65c8d474d1fb149c89018ccd485d8ee4a10f6b98bee767bc0b`), recovered into unpublished draft release `386309067`. The verified files were AppImage `42c2004528577f3a18fcf395ebd159d048b0dde54e2c03963d6fab765cf88ed2`, signature `d4a78da58e755b11b18dbd11747f9c7bc5e18b0487886d827282eb4cd5c991b7`, DEB `308bfa20ee83038e70a0a2fe7d8a1245b43971187126e73b4158613fa11bdb80`, and RPM `6ef405d17c9653b04aa226bfaa3941130d9ecf3e7a13a742e98cf13559be481d`. These values document the superseded candidate; they are not selectors for the current release.
 
@@ -48,7 +48,7 @@ Add the complete private-key **file contents**, not its path, to the GitHub Acti
 
 `https://atilla-m.github.io/cassette/updates/beta/latest.json`
 
-The configured public-key source file has SHA-256 `a99b821c856fb4db7b3d1dfa70df38a77835d199ce4c34aa065e157e31430513` (Minisign key ID `DFF061EB2AC19D0B`). The publication workflow builds `pages-site/updates/beta/latest.json` and uploads `pages-site` as the GitHub Pages artifact root, so that file maps to the configured project-site URL above. The endpoint currently serves the published beta.2 feed; beta.3 preparation must not replace it.
+The configured public-key source file has SHA-256 `a99b821c856fb4db7b3d1dfa70df38a77835d199ce4c34aa065e157e31430513` (Minisign key ID `DFF061EB2AC19D0B`). The publication workflow builds `pages-site/updates/beta/latest.json` and uploads `pages-site` as the GitHub Pages artifact root, so that file maps to the configured project-site URL above. Beta.4 preparation must not replace the feed; only publishing its verified prerelease may do so.
 
 Do not point beta installations at GitHub's generic `/releases/latest` endpoint because prereleases may be excluded. Do not use a mutable release tag in an artifact URL. The tag-only release preflight rejects a missing or placeholder-like public key and rejects any other endpoint list.
 
@@ -58,9 +58,9 @@ The committed `src-tauri/tauri.updater.conf.json` overlay enables `bundle.create
 
 ## Draft release and beta feed flow
 
-1. The exact `v0.1.0-beta.3` tag starts `.github/workflows/release.yml`; ordinary pushes and pull requests cannot create a release.
+1. The exact `v0.1.0-beta.4` tag starts `.github/workflows/release.yml`; ordinary pushes and pull requests cannot create a release.
 2. The workflow validates the tag, versions, license metadata, real public-key configuration, and exact feed URL.
-3. One Linux job builds DEB, RPM, AppImage, and `Cassette_0.1.0-beta.3_amd64.AppImage.sig`. Existing package verification, artifact-safety scans, signature-envelope safety checks, public-key cryptographic verification, and the Wayland-client exclusion gate must pass for the exact AppImage/signature pair.
+3. One Linux job builds DEB, RPM, AppImage, and `Cassette_0.1.0-beta.4_amd64.AppImage.sig`. Existing package verification, artifact-safety scans, signature-envelope safety checks, public-key cryptographic verification, and the Wayland-client exclusion gate must pass for the exact AppImage/signature pair.
 4. Only those four exact current-version files are admitted to a draft prerelease. NSIS is not built or uploaded by this workflow. The workflow never publishes the draft.
 5. A maintainer reviews and tests the downloaded draft artifacts, replaces the draft notes with final non-empty release notes, and intentionally publishes the prerelease.
 6. Only the GitHub `release.published` event can start `.github/workflows/publish-update-feed.yml`. That workflow rejects drafts, non-prereleases, another tag, and any unexpected asset set.
@@ -74,7 +74,7 @@ In GitHub repository settings, manually configure **Pages → Build and deployme
 
 Updates replace application binaries only. Cassette's Linux data remains under `$XDG_DATA_HOME/io.github.atilla.cassette` (normally `~/.local/share/io.github.atilla.cassette`) and includes `library.sqlite3`, playlists, favorites, statistics, settings, and caches. Neither an update nor package uninstall should automatically erase that directory. Back up user data before any destructive manual removal.
 
-## Beta.3 signed-candidate and migration qualification
+## Historical beta.3 signed-candidate and migration qualification
 
 Use the genuine published beta.2 AppImage as the old production client and the unchanged genuine signed beta.3 draft AppImage as the update target. Keep local HTTPS update qualification, real FUSE mounting, clean-system package/playback testing, and post-publication Pages/feed verification as separate evidence. Do not repurpose the historical beta.1.e2e fixture for this release.
 
@@ -632,7 +632,7 @@ The installed Tauri CLI and the [official CLI reference](https://v2.tauri.app/re
 
 ## Advancing the beta channel
 
-The beta.3 project versions and exact tag/version/asset assertions are prepared in `release.yml`, `publish-update-feed.yml`, `build-release.mjs`, `generate-update-feed.mjs`, the artifact scanner, policy tests, and documentation. Retain the configured beta endpoint and stable artifact naming convention, keep tag URLs immutable, and land this publication workflow on the default branch before publishing the prerelease. The beta.3-only condition deliberately ignores the beta.1 draft, published beta.2 release, and every other release. Never move either historical tag, replace their assets, or edit the public feed by committing generated metadata to source.
+The beta.4 project versions and exact tag/version/asset assertions are prepared in `release.yml`, `publish-update-feed.yml`, `build-release.mjs`, `generate-update-feed.mjs`, the artifact scanner, policy tests, and documentation. Retain the configured beta endpoint and stable artifact naming convention, keep tag URLs immutable, and land this publication workflow on the default branch before publishing the prerelease. The beta.4-only condition ignores all older releases. Never move historical tags, replace their assets, or edit the public feed by committing generated metadata to source.
 
 ## Key rotation, loss, and compromise
 
