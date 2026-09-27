@@ -1506,11 +1506,14 @@ fn record_track_play(
     event_id: String,
     library: State<'_, Mutex<LibraryDatabase>>,
 ) -> Result<Track, String> {
+    // Transfers can hold the library lock while verifying a large library.
+    // Date the qualifying play on receipt, not after waiting for that lock.
+    let played_at = unix_timestamp();
     let mut library = library
         .lock()
         .map_err(|_| "Library cache is unavailable.".to_owned())?;
 
-    library.record_play(&id, &event_id)
+    library.record_play_at(&id, &event_id, played_at)
 }
 
 #[tauri::command]
@@ -4489,9 +4492,18 @@ impl LibraryDatabase {
         Ok(())
     }
 
+    #[cfg(test)]
     fn record_play(&mut self, id: &str, event_id: &str) -> Result<Track, String> {
+        self.record_play_at(id, event_id, unix_timestamp())
+    }
+
+    fn record_play_at(
+        &mut self,
+        id: &str,
+        event_id: &str,
+        played_at: i64,
+    ) -> Result<Track, String> {
         validate_play_event_id(event_id)?;
-        let played_at = unix_timestamp();
         self.cache_history_reference(id);
         let transaction = self
             .connection
@@ -4506,9 +4518,9 @@ impl LibraryDatabase {
                     played_at_utc,
                     recorded_at_utc,
                     source
-                ) VALUES (?1, ?2, ?3, ?3, 'qualified_play')
+                ) VALUES (?1, ?2, ?3, ?4, 'qualified_play')
                 ",
-                params![event_id, id, played_at],
+                params![event_id, id, played_at, unix_timestamp()],
             )
             .map_err(|error| format!("Could not record playback event: {error}"))?;
 
@@ -4538,7 +4550,7 @@ impl LibraryDatabase {
                 "
                 UPDATE tracks
                 SET play_count = play_count + 1,
-                    last_played_at = ?2
+                    last_played_at = MAX(COALESCE(last_played_at, 0), ?2)
                 WHERE id = ?1
                 ",
                 params![id, played_at],
@@ -10041,6 +10053,40 @@ mod play_history_tests {
             .expect_err("missing track must roll back event");
         assert!(missing_error.contains("not in the library cache"));
         assert_eq!(event_count(&database), 1);
+    }
+
+    #[test]
+    fn qualifying_play_time_survives_delayed_and_reordered_database_writes() {
+        let library = TestLibrary::new("received-time");
+        let mut database = library.open();
+        let mut tracks = vec![test_track("/synthetic-music/dated.flac")];
+        seed_tracks(&mut database, &mut tracks);
+        database
+            .record_play_at(&tracks[0].id, "newer-received-play", 200)
+            .unwrap();
+        let delayed = database
+            .record_play_at(&tracks[0].id, "older-delayed-play", 100)
+            .unwrap();
+        assert_eq!(delayed.play_count, 2);
+        assert_eq!(delayed.last_played_at, Some(200));
+        let (played, recorded): (i64, i64) = database.connection.query_row(
+            "SELECT played_at_utc, recorded_at_utc FROM track_play_events WHERE event_id = 'older-delayed-play'",
+            [], |row| Ok((row.get(0)?, row.get(1)?)),
+        ).unwrap();
+        assert_eq!(played, 100);
+        assert!(recorded > played);
+        database
+            .record_play_at(&tracks[0].id, "older-delayed-play", 999)
+            .unwrap();
+        assert_eq!(event_count(&database), 2);
+        assert_eq!(
+            database
+                .track_by_id(&tracks[0].id)
+                .unwrap()
+                .unwrap()
+                .last_played_at,
+            Some(200)
+        );
     }
 
     #[test]

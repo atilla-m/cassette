@@ -7370,7 +7370,7 @@
                 Earlier all-time plays without recorded dates cannot be placed in this period.
               {/if}
               Detailed tracking start dates for this profile and imported sources:
-              {statsSnapshot.coverageSources.map((source) => source.detailedTrackingStartedAtUtc ? new Date(source.detailedTrackingStartedAtUtc * 1000).toLocaleDateString() : "unknown").join(", ")}.
+              {statsSnapshot.coverageSources.map((source) => source.detailedTrackingStartedAtUtc !== null ? new Date(source.detailedTrackingStartedAtUtc * 1000).toLocaleDateString() : "unknown").join(", ")}.
               An older known last-played date does not establish complete earlier coverage.
               {#if statsSnapshot.pendingTracks.length > 0}
                 {statsSnapshot.pendingTracks.length} retained track references are not in this library. Their plays remain in statistics using the backup’s labels; playback is unavailable until associated.
