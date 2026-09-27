@@ -32,7 +32,9 @@ use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
 
+mod listening_stats;
 mod mpris;
+mod portable_history;
 mod updates;
 
 use mpris::{MprisState, MprisTrack};
@@ -1498,7 +1500,7 @@ fn toggle_track_favorite(
     library.toggle_favorite(&id)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn record_track_play(
     id: String,
     event_id: String,
@@ -3582,6 +3584,7 @@ impl LibraryDatabase {
         }
 
         self.migrate_detailed_play_history()?;
+        self.migrate_portable_history()?;
 
         Ok(())
     }
@@ -4112,6 +4115,7 @@ impl LibraryDatabase {
         tracks: &mut [Track],
         scanned_at: i64,
     ) -> Result<(), String> {
+        let removed_history = self.removed_history_references(tracks)?;
         let transaction = self
             .connection
             .transaction()
@@ -4120,6 +4124,8 @@ impl LibraryDatabase {
             .map_err(|error| format!("Could not read favorite tracks: {error}"))?;
         let playback_history = playback_history_by_id(&transaction)
             .map_err(|error| format!("Could not read playback history: {error}"))?;
+
+        portable_history::archive_removed_history(&transaction, &removed_history)?;
 
         transaction
             .execute("DELETE FROM tracks", [])
@@ -4193,6 +4199,8 @@ impl LibraryDatabase {
                     .map_err(|error| format!("Could not cache scanned track: {error}"))?;
             }
         }
+
+        portable_history::restore_readded_history(&transaction, tracks)?;
 
         upsert_meta(
             &transaction,
@@ -4484,6 +4492,7 @@ impl LibraryDatabase {
     fn record_play(&mut self, id: &str, event_id: &str) -> Result<Track, String> {
         validate_play_event_id(event_id)?;
         let played_at = unix_timestamp();
+        self.cache_history_reference(id);
         let transaction = self
             .connection
             .transaction()
@@ -7050,11 +7059,11 @@ fn file_content_fingerprint(path: &Path) -> Result<FileContentFingerprint, Strin
     })
 }
 
-fn hash_file_region(
+fn hash_file_region<H: Hasher>(
     file: &mut fs::File,
     start: u64,
     length: u64,
-    hasher: &mut DefaultHasher,
+    hasher: &mut H,
 ) -> Result<(), String> {
     file.seek(SeekFrom::Start(start))
         .map_err(|error| format!("Could not seek while verifying audio: {error}"))?;
@@ -7070,15 +7079,33 @@ fn hash_file_region(
     Ok(())
 }
 
-fn audio_payload_fingerprint(path: &Path) -> Result<FileContentFingerprint, String> {
-    let file_type = read_tagged_file(path)?.file_type();
+fn audio_payload_fingerprint_with_hasher<H: Hasher>(
+    path: &Path,
+    hasher: &mut H,
+    portable: bool,
+) -> Result<u64, String> {
+    let tagged_file = read_tagged_file(path)?;
+    let file_type = tagged_file.file_type();
+    if portable {
+        let domain: &[u8] = match file_type {
+            FileType::Flac => b"flac\0",
+            FileType::Mpeg => b"mp3\0",
+            FileType::Wav => b"wav\0",
+            FileType::Mp4 => b"mp4\0",
+            FileType::Vorbis => b"vorbis\0",
+            FileType::Opus => b"opus\0",
+            _ => return Err("This audio format has no portable identity path.".to_owned()),
+        };
+        hasher.write(domain);
+        hasher.write_u32(tagged_file.properties().sample_rate().unwrap_or(0));
+        hasher.write_u8(tagged_file.properties().channels().unwrap_or(0));
+    }
     let mut file = fs::File::open(path)
         .map_err(|error| format!("Could not inspect audio payload: {error}"))?;
     let length = file
         .metadata()
         .map_err(|error| format!("Could not inspect audio size: {error}"))?
         .len();
-    let mut hasher = DefaultHasher::new();
     let mut audio_size = 0_u64;
 
     match file_type {
@@ -7105,10 +7132,12 @@ fn audio_payload_fingerprint(path: &Path) -> Result<FileContentFingerprint, Stri
                 if offset > length {
                     return Err("FLAC metadata exceeds the file size.".to_owned());
                 }
-                if block_type != 1 && block_type != 4 {
+                if (portable && block_type == 0)
+                    || (!portable && block_type != 1 && block_type != 4)
+                {
                     hasher.write_u8(block_type);
                     hasher.write_u64(block_size);
-                    hash_file_region(&mut file, block_start, block_size, &mut hasher)?;
+                    hash_file_region(&mut file, block_start, block_size, hasher)?;
                 }
                 if header[0] & 0x80 != 0 {
                     break;
@@ -7117,7 +7146,7 @@ fn audio_payload_fingerprint(path: &Path) -> Result<FileContentFingerprint, Stri
                     .map_err(|error| format!("Could not skip FLAC metadata: {error}"))?;
             }
             audio_size = length - offset;
-            hash_file_region(&mut file, offset, audio_size, &mut hasher)?;
+            hash_file_region(&mut file, offset, audio_size, hasher)?;
         }
         FileType::Mpeg => {
             let mut offset = 0_u64;
@@ -7138,8 +7167,35 @@ fn audio_payload_fingerprint(path: &Path) -> Result<FileContentFingerprint, Stri
             if offset > length {
                 return Err("MP3 ID3 tag exceeds the file size.".to_owned());
             }
-            audio_size = length - offset;
-            hash_file_region(&mut file, offset, audio_size, &mut hasher)?;
+            let mut audio_end = length;
+            if portable && length >= 128 {
+                file.seek(SeekFrom::Start(length - 128))
+                    .map_err(|error| error.to_string())?;
+                let mut signature = [0_u8; 3];
+                file.read_exact(&mut signature)
+                    .map_err(|error| error.to_string())?;
+                if &signature == b"TAG" {
+                    audio_end -= 128;
+                }
+            }
+            if portable && audio_end >= 32 {
+                file.seek(SeekFrom::Start(audio_end - 32))
+                    .map_err(|error| error.to_string())?;
+                let mut footer = [0_u8; 32];
+                file.read_exact(&mut footer)
+                    .map_err(|error| error.to_string())?;
+                if &footer[..8] == b"APETAGEX" {
+                    let tag_size = u32::from_le_bytes(footer[12..16].try_into().unwrap()) as u64;
+                    if tag_size > audio_end - offset {
+                        return Err("Invalid trailing MP3 APE tag.".to_owned());
+                    }
+                    audio_end -= tag_size;
+                }
+            }
+            audio_size = audio_end
+                .checked_sub(offset)
+                .ok_or_else(|| "Invalid MP3 payload size.".to_owned())?;
+            hash_file_region(&mut file, offset, audio_size, hasher)?;
         }
         FileType::Wav => {
             let mut header = [0_u8; 12];
@@ -7163,9 +7219,11 @@ fn audio_payload_fingerprint(path: &Path) -> Result<FileContentFingerprint, Stri
                 if next > length {
                     return Err("WAV chunk exceeds the file size.".to_owned());
                 }
-                if &chunk[..4] != b"ID3 " && &chunk[..4] != b"id3 " {
+                if (portable && (&chunk[..4] == b"data" || &chunk[..4] == b"fmt "))
+                    || (!portable && &chunk[..4] != b"ID3 " && &chunk[..4] != b"id3 ")
+                {
                     hasher.write(&chunk);
-                    hash_file_region(&mut file, offset + 8, padded, &mut hasher)?;
+                    hash_file_region(&mut file, offset + 8, padded, hasher)?;
                     audio_size += 8 + padded;
                 }
                 offset = next;
@@ -7202,7 +7260,7 @@ fn audio_payload_fingerprint(path: &Path) -> Result<FileContentFingerprint, Stri
                 if &header[4..8] == b"mdat" {
                     let payload_size = box_size - header_size;
                     hasher.write_u64(payload_size);
-                    hash_file_region(&mut file, offset + header_size, payload_size, &mut hasher)?;
+                    hash_file_region(&mut file, offset + header_size, payload_size, hasher)?;
                     audio_size += payload_size;
                 }
                 offset = next;
@@ -7228,12 +7286,12 @@ fn audio_payload_fingerprint(path: &Path) -> Result<FileContentFingerprint, Stri
                     let mut segment = vec![0_u8; segment_size as usize];
                     file.read_exact(&mut segment)
                         .map_err(|error| format!("Could not read Ogg packet: {error}"))?;
-                    if packet_index >= skipped_packets {
+                    if packet_index >= skipped_packets || (portable && packet_index != 1) {
                         hasher.write(&segment);
                         audio_size += segment.len() as u64;
                     }
                     if segment_size < 255 {
-                        if packet_index >= skipped_packets {
+                        if packet_index >= skipped_packets || (portable && packet_index != 1) {
                             hasher.write_u8(0xff);
                         }
                         packet_index += 1;
@@ -7247,8 +7305,14 @@ fn audio_payload_fingerprint(path: &Path) -> Result<FileContentFingerprint, Stri
         _ => return Err("This audio format has no verified payload preservation path.".to_owned()),
     }
 
+    Ok(audio_size)
+}
+
+fn audio_payload_fingerprint(path: &Path) -> Result<FileContentFingerprint, String> {
+    let mut hasher = DefaultHasher::new();
+    let size = audio_payload_fingerprint_with_hasher(path, &mut hasher, false)?;
     Ok(FileContentFingerprint {
-        size: audio_size,
+        size,
         hash: hasher.finish(),
     })
 }
@@ -10915,7 +10979,7 @@ mod tag_editor_tests {
 
     const SYNTHETIC_FLAC_BASE64: &str = "ZkxhQwAAACICQAJAAACTAACTAfQA8AAAAZCbGfA0kXS+fHG2JaA4ABUGhAAALg0AAABMYXZmNjIuMTIuMTAyAQAAABUAAABlbmNvZGVyPUxhdmY2Mi4xMi4xMDL/+HQIAAGPJEIAAAVr5rw0wAQAEMDh7cLIGEyZSywkJIZO9MkkkhQupZhhMmbeSYEkOaRJSSEhJQmJZzDCYS3TkhJIZ/oUJIQwmUs5kJCSeR0mQwOHtwsgYTJlLLCQkhk70ySSSFC6lmGEyZt5JgSQ5pElJISElCYlnMMJhLdOSEkhn+hQkhDCZSzmQkJJ5HSAo/4=";
 
-    fn synthetic_format_bytes(extension: &str) -> Vec<u8> {
+    pub(super) fn synthetic_format_bytes(extension: &str) -> Vec<u8> {
         use base64::Engine;
         let encoded = match extension {
             "flac" => SYNTHETIC_FLAC_BASE64,
@@ -10930,7 +10994,7 @@ mod tag_editor_tests {
             .expect("decode embedded synthetic audio")
     }
 
-    fn synthetic_pcm_wav() -> Vec<u8> {
+    pub(super) fn synthetic_pcm_wav() -> Vec<u8> {
         let pcm = vec![0_u8; 1600];
         let mut wav = Vec::new();
         wav.extend_from_slice(b"RIFF");
@@ -12287,6 +12351,11 @@ pub fn run() {
             update_album_tags,
             toggle_track_favorite,
             record_track_play,
+            listening_stats::get_listening_stats,
+            portable_history::export_listening_history,
+            portable_history::preview_listening_history_import,
+            portable_history::import_listening_history,
+            portable_history::associate_listening_history_track,
             set_album_genres,
             set_artist_genres,
             create_playlist,
