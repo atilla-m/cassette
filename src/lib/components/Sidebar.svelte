@@ -11,14 +11,6 @@
 </script>
 
 <aside class="sidebar" aria-label="Primary navigation">
-  <div class="brand">
-    <div class="brand-mark" aria-hidden="true">C</div>
-    <div>
-      <p class="eyebrow">Local Library</p>
-      <h1>Cassette</h1>
-    </div>
-  </div>
-
   <nav>
     {#each items as item}
       <button
@@ -40,42 +32,8 @@
     min-width: 244px;
     border-right: 1px solid rgba(255, 255, 255, 0.08);
     background: var(--bg-soft);
-    padding: 24px 16px;
-  }
-
-  .brand {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    margin-bottom: 32px;
-    padding: 0 8px;
-  }
-
-  .brand-mark {
-    display: grid;
-    width: 42px;
-    height: 42px;
-    place-items: center;
-    border-radius: 8px;
-    background: var(--accent);
-    color: var(--accent-contrast);
-    font-weight: 800;
-  }
-
-  .eyebrow {
-    margin: 0 0 2px;
-    color: var(--text-soft);
-    font-size: 0.72rem;
-    font-weight: 700;
-    letter-spacing: 0;
-    text-transform: uppercase;
-  }
-
-  h1 {
-    margin: 0;
-    color: var(--text);
-    font-size: 1.35rem;
-    line-height: 1.1;
+    /* Reserve the same space for the persistent workspace history header. */
+    padding: 98px 16px 24px;
   }
 
   nav {
@@ -128,11 +86,7 @@
       min-width: 0;
       border-right: 0;
       border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-      padding: 16px;
-    }
-
-    .brand {
-      margin-bottom: 16px;
+      padding: 74px 16px 16px;
     }
 
     nav {

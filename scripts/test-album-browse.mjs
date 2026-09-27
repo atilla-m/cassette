@@ -21,6 +21,18 @@ test("album sorting is display-only, deterministic, and includes zero plays", ()
   assert.deepEqual(ids("leastPlayed"), ["b", "a", "c"]);
   assert.deepEqual(ids("title", "desc"), ["c", "b", "a"]);
   assert.deepEqual(ids("artist"), ["a", "c", "b"]);
+  const acrossAlbums = [
+    { ...original[0], album: "Zulu" },
+    { ...original[1], album: "Alpha" },
+    { ...original[2], album: "Alpha" },
+  ];
+  assert.deepEqual(sortAlbumDisplayTracks(acrossAlbums, "album", "asc").map(({ id }) => id), ["a", "c", "b"]);
+  assert.deepEqual(sortAlbumDisplayTracks(acrossAlbums, "album", "desc").map(({ id }) => id), ["b", "a", "c"]);
+  const withAlbumArtistFallback = [
+    { ...original[0], artist: null, albumArtist: "Zulu" },
+    { ...original[1], artist: null, albumArtist: "Alpha" },
+  ];
+  assert.deepEqual(sortAlbumDisplayTracks(withAlbumArtistFallback, "artist", "asc").map(({ id }) => id), ["c", "b"]);
   assert.deepEqual(ids("duration"), ["c", "b", "a"]);
   assert.deepEqual(original.map(({ id }) => id), ["b", "c", "a"]);
 

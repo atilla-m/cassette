@@ -93,6 +93,7 @@
   import LibrarySection from "$lib/components/LibrarySection.svelte";
   import NowPlayingBar from "$lib/components/NowPlayingBar.svelte";
   import Sidebar from "$lib/components/Sidebar.svelte";
+  import TrackSortMenu from "$lib/components/TrackSortMenu.svelte";
   import TrackList from "$lib/components/TrackList.svelte";
   import { buildAlbums, buildArtists, buildGenres } from "$lib/data/libraryViews";
   import { statsRangeForPeriod, type StatsPeriod } from "$lib/utils/statsPeriod";
@@ -393,6 +394,23 @@
     { value: "recentlyPlayed", label: "Recently played" },
     { value: "playCount", label: "Most played" },
   ];
+  const albumTrackSortOptions: { value: AlbumTrackSortKey; label: string }[] = [
+    { value: "trackNumber", label: "Track number" },
+    { value: "title", label: "Title" },
+    { value: "artist", label: "Artist" },
+    { value: "duration", label: "Duration" },
+    { value: "mostPlayed", label: "Most played" },
+    { value: "leastPlayed", label: "Least played" },
+  ];
+  const groupedTrackSortOptions: { value: AlbumTrackSortKey; label: string }[] = [
+    { value: "title", label: "Title" },
+    { value: "album", label: "Album" },
+    { value: "artist", label: "Artist" },
+    { value: "trackNumber", label: "Track number" },
+    { value: "duration", label: "Duration" },
+    { value: "mostPlayed", label: "Most played" },
+    { value: "leastPlayed", label: "Least played" },
+  ];
   const videoTypeOptions: Array<{ value: VideoType; label: string }> = [
     { value: "music_video", label: "Music Video / PV" },
     { value: "live_show", label: "Live Show" },
@@ -583,6 +601,12 @@
   let albumSortDirection = $state<SortDirection>("asc");
   let albumTrackSort = $state<AlbumTrackSortKey>("trackNumber");
   let albumTrackSortDirection = $state<SortDirection>("asc");
+  let artistTrackSort = $state<AlbumTrackSortKey>("title");
+  let artistTrackSortDirection = $state<SortDirection>("asc");
+  let genreTrackSort = $state<AlbumTrackSortKey>("title");
+  let genreTrackSortDirection = $state<SortDirection>("asc");
+  let artistTrackVisibleLimit = $state(STATS_PAGE_SIZE);
+  let genreTrackVisibleLimit = $state(STATS_PAGE_SIZE);
   let artistSort = $state<ArtistSortKey>("name");
   let artistSortDirection = $state<SortDirection>("asc");
   let genreSort = $state<GenreSortKey>("name");
@@ -774,11 +798,13 @@
   let selectedAlbumDurationLabel = $derived(albumTotalDurationLabel(selectedAlbumTracks));
   let selectedAlbumFormatSummary = $derived(albumFormatSummary(selectedAlbumTracks));
   let selectedArtistTracks = $derived(selectedArtist ? tracksForArtist(selectedArtist) : []);
+  let selectedArtistDisplayTracks = $derived(sortAlbumDisplayTracks(selectedArtistTracks, artistTrackSort, artistTrackSortDirection));
   let selectedArtistAlbums = $derived(
     selectedArtist ? sortedAlbums.filter((album) => album.artist === selectedArtist.name) : [],
   );
   let selectedArtistSearchAlbums = $derived(searchFilterAlbums(selectedArtistAlbums, normalizedSearchQuery));
   let selectedGenreTracks = $derived(selectedGenre ? tracksForGenre(selectedGenre) : []);
+  let selectedGenreDisplayTracks = $derived(sortAlbumDisplayTracks(selectedGenreTracks, genreTrackSort, genreTrackSortDirection));
   let selectedGenreAlbums = $derived(selectedGenre ? albumsForTracks(selectedGenreTracks, sortedAlbums) : []);
   let selectedGenreArtists = $derived(selectedGenre ? buildArtists(selectedGenreTracks) : []);
   let selectedGenreSearchAlbums = $derived(searchFilterGenreAlbums(selectedGenreAlbums, normalizedSearchQuery));
@@ -3846,38 +3872,11 @@
     event.stopPropagation();
     const button = event.currentTarget as HTMLElement;
     const bounds = button.getBoundingClientRect();
-    const sortOptions: { key: AlbumTrackSortKey; label: string }[] = [
-      { key: "trackNumber", label: "Track number" },
-      { key: "title", label: "Title" },
-      { key: "artist", label: "Artist" },
-      { key: "duration", label: "Duration" },
-      { key: "mostPlayed", label: "Most played" },
-      { key: "leastPlayed", label: "Least played" },
-    ];
-
     openContextMenu(Math.max(8, bounds.right - 210), bounds.bottom + 6, [
       {
         label: "Edit album tags…",
         disabled: selectedAlbumTracks.length === 0,
         action: () => openAlbumTagEditor(),
-      },
-      {
-        label: "Sort songs",
-        items: [
-          ...sortOptions.map(({ key, label }) => ({
-            label,
-            checked: albumTrackSort === key,
-            radio: true,
-            action: () => { albumTrackSort = key; },
-          })),
-          {
-            label: "Descending order",
-            checked: albumTrackSortDirection === "desc",
-            toggle: true,
-            disabled: albumTrackSort === "mostPlayed" || albumTrackSort === "leastPlayed",
-            action: () => { albumTrackSortDirection = nextSortDirection(albumTrackSortDirection); },
-          },
-        ],
       },
     ]);
   }
@@ -4026,6 +4025,7 @@
       ? "Albums"
       : label;
 
+    if (targetView === "Songs" && activeView !== "Songs") resetSongsBrowser();
     void saveActiveVideoProgress(true);
     activeView = targetView;
     selectedAlbumId = null;
@@ -4066,12 +4066,20 @@
     return JSON.stringify(left) === JSON.stringify(right);
   }
 
+  function resetSongsBrowser() {
+    songSort = "title";
+    songSortDirection = "asc";
+    songFormatFilter = "All";
+    searchQuery = "";
+  }
+
   function navigateViewHistory(direction: -1 | 1) {
     const nextHistory = stepView(viewHistory, direction);
     if (nextHistory === viewHistory) return;
 
     viewHistory = nextHistory;
     const location = nextHistory.entries[nextHistory.index];
+    if (location.view === "Songs" && activeView !== "Songs") resetSongsBrowser();
     void saveActiveVideoProgress(true);
     activeView = location.view;
     selectedAlbumId = location.albumId;
@@ -4091,10 +4099,6 @@
     clearGenreEditState();
     searchQuery = "";
     mainElement?.scrollTo({ top: 0 });
-  }
-
-  function handleNowPlayingSelect() {
-    handleLyricsSelect();
   }
 
   function handleLyricsSelect() {
@@ -4330,6 +4334,7 @@
   }
 
   function selectArtistName(artistName: string, origin: ArtistNavigationOrigin = { view: "Artists" }) {
+    artistTrackVisibleLimit = STATS_PAGE_SIZE;
     searchQuery = "";
     activeView = "Artists";
     selectedArtistName = artistName;
@@ -4349,6 +4354,7 @@
   }
 
   function handleGenreSelect(genre: Genre) {
+    genreTrackVisibleLimit = STATS_PAGE_SIZE;
     searchQuery = "";
     activeView = "Genres";
     selectedGenreName = genre.name;
@@ -6929,6 +6935,13 @@
 
 <div class="app-shell">
   <div class:lyrics-mode={activeView === "Now Playing"} class="workspace">
+    <div class="workspace-navigation">
+      <span class="brand-mark" aria-label="Cassette">C</span>
+      <div class="view-history-controls" role="group" aria-label="View history">
+        <button type="button" aria-label="Back to previous view" title="Back" disabled={!canNavigateBack} onclick={() => navigateViewHistory(-1)}>‹</button>
+        <button type="button" aria-label="Forward to next view" title="Forward" disabled={!canNavigateForward} onclick={() => navigateViewHistory(1)}>›</button>
+      </div>
+    </div>
     {#if activeView !== "Now Playing"}
       <Sidebar items={visibleNavItems} active={activeView} onNavigate={handleNavigate} />
     {/if}
@@ -6946,12 +6959,6 @@
       bind:this={mainElement}
       tabindex="-1"
     >
-      {#if activeView !== "Now Playing"}
-        <div class="view-history-controls" role="group" aria-label="View history">
-          <button type="button" aria-label="Back to previous view" title="Back" disabled={!canNavigateBack} onclick={() => navigateViewHistory(-1)}>‹</button>
-          <button type="button" aria-label="Forward to next view" title="Forward" disabled={!canNavigateForward} onclick={() => navigateViewHistory(1)}>›</button>
-        </div>
-      {/if}
       {#if activeView !== "Now Playing" && !isAlbumDetailView && !isArtistDetailView && !isGenreDetailView && !isPlaylistDetailView}
         <header class="home-header">
           <div>
@@ -7017,10 +7024,7 @@
         <section class="lyrics-view" aria-labelledby="lyrics-view-title">
           {#if currentTrack}
             <header class="lyrics-view-top">
-              <div class="view-history-controls lyrics-history-controls" role="group" aria-label="View history">
-                <button type="button" aria-label="Back to previous view" title="Back" disabled={!canNavigateBack} onclick={() => navigateViewHistory(-1)}>‹</button>
-                <button type="button" aria-label="Forward to next view" title="Forward" disabled={!canNavigateForward} onclick={() => navigateViewHistory(1)}>›</button>
-              </div>
+              <div class="lyrics-header-spacer" aria-hidden="true"></div>
               <div class="lyrics-title-block">
                 <h2 id="lyrics-view-title">Lyrics</h2>
               </div>
@@ -7268,10 +7272,7 @@
             {/if}
           {:else}
             <header class="lyrics-view-top">
-              <div class="view-history-controls lyrics-history-controls" role="group" aria-label="View history">
-                <button type="button" aria-label="Back to previous view" title="Back" disabled={!canNavigateBack} onclick={() => navigateViewHistory(-1)}>‹</button>
-                <button type="button" aria-label="Forward to next view" title="Forward" disabled={!canNavigateForward} onclick={() => navigateViewHistory(1)}>›</button>
-              </div>
+              <div class="lyrics-header-spacer" aria-hidden="true"></div>
               <div class="lyrics-title-block">
                 <h2 id="lyrics-view-title">Lyrics</h2>
               </div>
@@ -7782,6 +7783,15 @@
             {/if}
 
             <LibrarySection title="Album Songs" viewAllLabel="">
+              {#snippet headerActions()}
+                <TrackSortMenu
+                  value={albumTrackSort}
+                  direction={albumTrackSortDirection}
+                  options={albumTrackSortOptions}
+                  onSortChange={(value) => albumTrackSort = value}
+                  onDirectionChange={(direction) => albumTrackSortDirection = direction}
+                />
+              {/snippet}
               {#if selectedAlbumTracks.length === 0}
                 <div class="group-empty">
                   <h3>No songs found for this album</h3>
@@ -8001,6 +8011,35 @@
                 </div>
               {/if}
             </LibrarySection>
+            <LibrarySection title="Songs" viewAllLabel={`${selectedArtistTracks.length} total`}>
+              {#snippet headerActions()}
+                <TrackSortMenu
+                  value={artistTrackSort}
+                  direction={artistTrackSortDirection}
+                  options={groupedTrackSortOptions}
+                  onSortChange={(value) => artistTrackSort = value}
+                  onDirectionChange={(direction) => artistTrackSortDirection = direction}
+                />
+              {/snippet}
+              {#if selectedArtistTracks.length === 0}
+                <div class="group-empty"><h3>No songs found for this artist</h3></div>
+              {:else}
+                <TrackList
+                  tracks={selectedArtistDisplayTracks.slice(0, artistTrackVisibleLimit)}
+                  isScanning={false}
+                  variant="library"
+                  selectedTrackId={currentTrack?.id}
+                  onTrackSelect={(track) => void handleTrackSelect(track, selectedArtistDisplayTracks)}
+                  onTrackContextMenu={(track, _queue, x, y) => openTrackContextMenu(track, selectedArtistDisplayTracks, x, y)}
+                  onArtistSelect={handleTrackArtistSelect}
+                  onAlbumSelect={handleTrackAlbumSelect}
+                  onToggleFavorite={handleToggleFavorite}
+                />
+                {#if artistTrackVisibleLimit < selectedArtistDisplayTracks.length}
+                  <button class="detail-songs-load-more" type="button" onclick={() => artistTrackVisibleLimit = nextStatsLimit(artistTrackVisibleLimit, selectedArtistDisplayTracks.length)}>Show more songs</button>
+                {/if}
+              {/if}
+            </LibrarySection>
           </section>
         {:else}
           <LibrarySection title="All Artists" viewAllLabel={`${visibleArtists.length} total`}>
@@ -8149,6 +8188,36 @@
                     </button>
                   {/each}
                 </div>
+              {/if}
+            </LibrarySection>
+
+            <LibrarySection title="Songs" viewAllLabel={`${selectedGenreTracks.length} total`}>
+              {#snippet headerActions()}
+                <TrackSortMenu
+                  value={genreTrackSort}
+                  direction={genreTrackSortDirection}
+                  options={groupedTrackSortOptions}
+                  onSortChange={(value) => genreTrackSort = value}
+                  onDirectionChange={(direction) => genreTrackSortDirection = direction}
+                />
+              {/snippet}
+              {#if selectedGenreTracks.length === 0}
+                <div class="group-empty"><h3>No songs found for this genre</h3></div>
+              {:else}
+                <TrackList
+                  tracks={selectedGenreDisplayTracks.slice(0, genreTrackVisibleLimit)}
+                  isScanning={false}
+                  variant="library"
+                  selectedTrackId={currentTrack?.id}
+                  onTrackSelect={(track) => void handleTrackSelect(track, selectedGenreDisplayTracks)}
+                  onTrackContextMenu={(track, _queue, x, y) => openTrackContextMenu(track, selectedGenreDisplayTracks, x, y)}
+                  onArtistSelect={handleTrackArtistSelect}
+                  onAlbumSelect={handleTrackAlbumSelect}
+                  onToggleFavorite={handleToggleFavorite}
+                />
+                {#if genreTrackVisibleLimit < selectedGenreDisplayTracks.length}
+                  <button class="detail-songs-load-more" type="button" onclick={() => genreTrackVisibleLimit = nextStatsLimit(genreTrackVisibleLimit, selectedGenreDisplayTracks.length)}>Show more songs</button>
+                {/if}
               {/if}
             </LibrarySection>
 
@@ -10491,7 +10560,8 @@
       onToggleQueue={handleToggleQueue}
       onToggleShuffle={handleToggleShuffle}
       onToggleRepeat={handleToggleRepeat}
-      onOpenNowPlaying={handleNowPlayingSelect}
+      onArtistSelect={handleTrackArtistSelect}
+      onAlbumSelect={handleTrackAlbumSelect}
       onOpenLyrics={handleLyricsSelect}
     />
   {/if}
@@ -10660,6 +10730,7 @@
   }
 
   .workspace {
+    position: relative;
     display: flex;
     min-height: 0;
     overflow: hidden;
@@ -10667,6 +10738,28 @@
 
   .workspace.lyrics-mode {
     display: block;
+  }
+
+  .workspace-navigation {
+    position: absolute;
+    top: 24px;
+    left: 24px;
+    z-index: 2;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    height: 42px;
+  }
+
+  .brand-mark {
+    display: grid;
+    width: 42px;
+    height: 42px;
+    place-items: center;
+    border-radius: 8px;
+    background: var(--accent);
+    color: var(--accent-contrast);
+    font-weight: 800;
   }
 
   .home {
@@ -11837,7 +11930,7 @@
 
   .lyrics-view-top {
     display: grid;
-    grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-columns: 180px minmax(0, 1fr) auto;
     align-items: start;
     gap: 18px;
   }
@@ -12573,7 +12666,6 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    margin-bottom: 16px;
   }
 
   .view-history-controls button {
@@ -12602,9 +12694,23 @@
     opacity: 0.5;
   }
 
-  .lyrics-history-controls {
-    margin: 0;
-    justify-self: start;
+  .detail-songs-load-more {
+    min-height: 38px;
+    border: 1px solid var(--border-strong);
+    border-radius: 8px;
+    background: var(--panel-strong);
+    color: var(--text);
+    cursor: pointer;
+    font: inherit;
+    font-size: 0.84rem;
+    font-weight: 750;
+  }
+
+  .detail-songs-load-more:hover,
+  .detail-songs-load-more:focus-visible {
+    border-color: var(--accent-strong);
+    background: var(--panel-hover);
+    outline: none;
   }
 
   .playlist-detail-back {
@@ -16455,6 +16561,10 @@
       flex-direction: column;
     }
 
+    .workspace-navigation {
+      top: 16px;
+    }
+
     .home {
       --content-bottom-padding: 58px;
       padding: 22px 16px var(--content-bottom-padding);
@@ -16491,7 +16601,7 @@
     }
 
     .home.lyrics-mode {
-      padding: 22px 16px var(--content-bottom-padding);
+      padding: 82px 16px var(--content-bottom-padding);
     }
 
     .home-header {
@@ -16564,6 +16674,10 @@
 
     .lyrics-view-top {
       gap: 12px;
+    }
+
+    .lyrics-header-spacer {
+      display: none;
     }
 
     .lyrics-options-button {

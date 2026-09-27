@@ -1,6 +1,6 @@
 import type { Track } from "$lib/types/library";
 
-export type AlbumTrackSortKey = "trackNumber" | "title" | "artist" | "duration" | "mostPlayed" | "leastPlayed";
+export type AlbumTrackSortKey = "trackNumber" | "title" | "album" | "artist" | "duration" | "mostPlayed" | "leastPlayed";
 export type AlbumTrackSortDirection = "asc" | "desc";
 
 function compareText(left: string, right: string) {
@@ -41,7 +41,11 @@ export function sortAlbumDisplayTracks(tracks: Track[], key: AlbumTrackSortKey, 
       return comparison || trackOrder(left, right);
     }
     if (key === "title") comparison = compareText(left.title, right.title);
-    if (key === "artist") comparison = compareText(left.artist ?? "", right.artist ?? "");
+    if (key === "album") {
+      comparison = compareText(left.album ?? "", right.album ?? "")
+        || compareText(left.albumArtist ?? left.artist ?? "", right.albumArtist ?? right.artist ?? "");
+    }
+    if (key === "artist") comparison = compareText(left.artist ?? left.albumArtist ?? "", right.artist ?? right.albumArtist ?? "");
     if (key === "duration") {
       return directedOptionalNumber(left.durationSeconds, right.durationSeconds, direction) || trackOrder(left, right);
     }

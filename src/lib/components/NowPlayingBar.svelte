@@ -27,7 +27,8 @@
     onToggleQueue?: () => void;
     onToggleShuffle?: () => void;
     onToggleRepeat?: () => void;
-    onOpenNowPlaying?: () => void;
+    onArtistSelect?: (track: Track) => void;
+    onAlbumSelect?: (track: Track) => void;
     onOpenLyrics?: () => void;
   };
 
@@ -53,7 +54,8 @@
     onToggleQueue,
     onToggleShuffle,
     onToggleRepeat,
-    onOpenNowPlaying,
+    onArtistSelect,
+    onAlbumSelect,
     onOpenLyrics,
   }: Props = $props();
 
@@ -100,11 +102,7 @@
   });
 
   function displayArtist(track: Track | null) {
-    return track?.artist ?? "Unknown Artist";
-  }
-
-  function displayAlbum(track: Track | null) {
-    return track?.album ? ` · ${track.album}` : "";
+    return track?.artist ?? track?.albumArtist ?? "Unknown Artist";
   }
 
   function formatDuration(seconds: number | null | undefined) {
@@ -310,17 +308,37 @@
 <footer class:compact class="player" aria-label="Now playing">
   <div class="track">
     {#if !compact}
-      <button class="track-open" type="button" aria-label="Open current track" disabled={!track} onclick={onOpenNowPlaying}>
-        <span class="cover" aria-hidden="true">
-          {#if coverArtSrc}
-            <img src={coverArtSrc} alt="" onload={showLoadedImage} onerror={hideBrokenImage} />
+      <span class="cover" aria-hidden="true">
+        {#if coverArtSrc}
+          <img src={coverArtSrc} alt="" onload={showLoadedImage} onerror={hideBrokenImage} />
+        {/if}
+      </span>
+      <div class="track-copy">
+        <span class="track-title">{track?.title ?? "No track selected"}</span>
+        <div class="track-meta">
+          {#if track}
+            <button
+              class="track-link"
+              type="button"
+              title={displayArtist(track)}
+              aria-label={`Go to artist: ${displayArtist(track)}`}
+              onclick={() => { if (track) onArtistSelect?.(track); }}
+            >{displayArtist(track)}</button>
+            {#if track.album}
+              <span aria-hidden="true">·</span>
+              <button
+                class="track-link"
+                type="button"
+                title={track.album}
+                aria-label={`Go to album: ${track.album}`}
+                onclick={() => { if (track) onAlbumSelect?.(track); }}
+              >{track.album}</button>
+            {/if}
+          {:else}
+            <span>{displayArtist(track)}</span>
           {/if}
-        </span>
-        <span class="track-copy">
-          <span>{track?.title ?? "No track selected"}</span>
-          <small>{displayArtist(track)}{displayAlbum(track)}</small>
-        </span>
-      </button>
+        </div>
+      </div>
     {/if}
     <button
       class:active={track?.isFavorite}
@@ -461,31 +479,6 @@
     width: 34px;
   }
 
-  .track-open {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    min-width: 0;
-    width: 100%;
-    height: auto;
-    border: 0;
-    background: transparent;
-    color: inherit;
-    font: inherit;
-    padding: 0;
-    text-align: left;
-  }
-
-  .track-open:hover .track-copy > span,
-  .track-open:focus-visible .track-copy > span {
-    color: var(--text);
-  }
-
-  .track-open:focus-visible {
-    outline: 2px solid var(--focus-ring);
-    outline-offset: 4px;
-  }
-
   .cover {
     position: relative;
     width: 54px;
@@ -509,29 +502,67 @@
   }
 
   .track-copy {
+    flex: 1;
     min-width: 0;
   }
 
-  .track-copy > span,
-  .track-copy small {
+  .track-title {
     display: block;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
 
-  .track-copy > span {
+  .track-title {
     margin: 0 0 4px;
     color: var(--text);
     font-weight: 750;
   }
 
-  .track-copy small,
+  .track-meta,
   .progress-area span,
   .volume span {
     color: var(--text-soft);
     font-size: 0.84rem;
     font-weight: 650;
+  }
+
+  .track-meta {
+    display: flex;
+    align-items: baseline;
+    gap: 4px;
+    min-width: 0;
+  }
+
+  button.track-link {
+    display: block;
+    flex: 0 1 auto;
+    min-width: 0;
+    width: auto;
+    height: auto;
+    overflow: hidden;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    padding: 0;
+    text-align: left;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    cursor: pointer;
+  }
+
+  button.track-link:hover,
+  button.track-link:focus-visible {
+    color: var(--text);
+    text-decoration: underline;
+    text-underline-offset: 3px;
+  }
+
+  button.track-link:focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 2px;
   }
 
   .transport {
@@ -634,21 +665,6 @@
   button:disabled {
     color: var(--text-dim);
     background: var(--panel-soft);
-  }
-
-  button.track-open {
-    display: flex;
-    width: 100%;
-    height: auto;
-    justify-content: flex-start;
-    border: 0;
-    background: transparent;
-    padding: 0;
-  }
-
-  button.track-open:disabled {
-    color: inherit;
-    background: transparent;
   }
 
   button.play {
