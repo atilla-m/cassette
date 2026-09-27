@@ -60,6 +60,8 @@ Detailed play-history tracking begins when this database is first opened by a bu
 
 Play events are stored in UTC. Future calendar statistics should convert the user's requested local period boundaries to UTC and query a half-open interval (`start <= played_at_utc < end`). This keeps daylight-saving and timezone handling at the reporting boundary instead of permanently assigning a local date to an event. Undated legacy plays remain part of all-time totals only.
 
+Development on `feature/detailed-stats` adds local-calendar Stats periods, a daily chart, and portable JSON history export/import. These are not part of the published beta.4 packages. See [listening-history accuracy and restore behavior](docs/LISTENING-HISTORY.md) for matching, legacy-total conflict handling, and isolated manual testing.
+
 Application binaries and user data are separate. A signed AppImage replacement, DEB/RPM update, or uninstall must not remove or replace the library database, settings, playlists, favorites, cached artwork, or other application data.
 
 Remove the installed package with the matching package manager:

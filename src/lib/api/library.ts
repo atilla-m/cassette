@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
-import { open } from "@tauri-apps/plugin-dialog";
+import { open, save } from "@tauri-apps/plugin-dialog";
+import type { ListeningHistoryExport, ListeningImportPreview, ListeningImportResult, ListeningStats } from "$lib/types/listening";
 import type {
   AutoLyricsResult,
   AlbumTagEditorData,
@@ -154,6 +155,49 @@ export async function toggleTrackFavorite(id: string): Promise<boolean> {
 
 export async function recordTrackPlay(id: string, eventId: string): Promise<Track> {
   return invoke<Track>("record_track_play", { id, eventId });
+}
+
+export async function getListeningStats(
+  startUtc: number | null,
+  endUtc: number | null,
+  dayBoundariesUtc: number[],
+): Promise<ListeningStats> {
+  return invoke<ListeningStats>("get_listening_stats", { startUtc, endUtc, dayBoundariesUtc });
+}
+
+export async function chooseHistoryExportPath(): Promise<string | null> {
+  const selected = await save({
+    title: "Export listening history",
+    defaultPath: "cassette-listening-history.json",
+    filters: [{ name: "JSON backup", extensions: ["json"] }],
+  });
+  return typeof selected === "string" ? selected : null;
+}
+
+export async function chooseHistoryImportPath(): Promise<string | null> {
+  const selected = await open({
+    title: "Import listening history",
+    multiple: false,
+    directory: false,
+    filters: [{ name: "JSON backup", extensions: ["json"] }],
+  });
+  return typeof selected === "string" ? selected : null;
+}
+
+export async function exportListeningHistory(path: string): Promise<ListeningHistoryExport> {
+  return invoke<ListeningHistoryExport>("export_listening_history", { path });
+}
+
+export async function previewListeningHistoryImport(path: string): Promise<ListeningImportPreview> {
+  return invoke<ListeningImportPreview>("preview_listening_history_import", { path });
+}
+
+export async function importListeningHistory(path: string, approvalToken: string): Promise<ListeningImportResult> {
+  return invoke<ListeningImportResult>("import_listening_history", { path, approvalToken });
+}
+
+export async function associateListeningHistoryTrack(pendingTrackId: string, targetTrackId: string): Promise<void> {
+  return invoke<void>("associate_listening_history_track", { pendingTrackId, targetTrackId });
 }
 
 export async function getTrackTagEditorData(trackId: string): Promise<TrackTagEditorData> {

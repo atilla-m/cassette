@@ -8,6 +8,7 @@
     variant?: "default" | "library";
     showOrder?: boolean;
     selectedTrackId?: string | null;
+    unavailableTrackIds?: Set<string>;
     onTrackSelect?: (track: Track, queue: Track[]) => void;
     onTrackContextMenu?: (track: Track, queue: Track[], x: number, y: number) => void;
     onArtistSelect?: (track: Track) => void;
@@ -26,6 +27,7 @@
     variant = "default",
     showOrder = false,
     selectedTrackId = null,
+    unavailableTrackIds = new Set<string>(),
     onTrackSelect,
     onTrackContextMenu,
     onArtistSelect,
@@ -50,12 +52,14 @@
   }
 
   function selectTrack(track: Track) {
+    if (unavailableTrackIds.has(track.id)) return;
     onTrackSelect?.(track, tracks);
   }
 
   function openTrackContextMenu(event: MouseEvent, track: Track) {
     event.preventDefault();
     event.stopPropagation();
+    if (unavailableTrackIds.has(track.id)) return;
     onTrackContextMenu?.(track, tracks, event.clientX, event.clientY);
   }
 
@@ -151,8 +155,9 @@
         class:withRemove={Boolean(onRemoveTrack)}
         class="track-row"
         role="button"
-        tabindex="0"
-        title={track.filePath}
+        aria-disabled={unavailableTrackIds.has(track.id)}
+        tabindex={unavailableTrackIds.has(track.id) ? -1 : 0}
+        title={unavailableTrackIds.has(track.id) ? "Retained history: add and associate this music to enable playback" : track.filePath}
         onclick={() => selectTrack(track)}
         oncontextmenu={(event) => openTrackContextMenu(event, track)}
         onkeydown={(event) => handleRowKeydown(event, track)}
@@ -174,11 +179,11 @@
         </div>
         <div class="track-title">
           <span class="track-name">{track.title}</span>
-          <button class="track-link" type="button" onclick={(event) => selectArtist(event, track)}>
+          <button class="track-link" type="button" disabled={unavailableTrackIds.has(track.id)} onclick={(event) => selectArtist(event, track)}>
             {displayArtist(track)}
           </button>
         </div>
-        <button class="track-link album-link" type="button" onclick={(event) => selectAlbum(event, track)}>
+        <button class="track-link album-link" type="button" disabled={unavailableTrackIds.has(track.id)} onclick={(event) => selectAlbum(event, track)}>
           {displayAlbum(track)}
         </button>
         {#if isLibraryVariant}
@@ -193,6 +198,7 @@
           class:active={track.isFavorite}
           class="favorite-button"
           type="button"
+          disabled={unavailableTrackIds.has(track.id)}
           aria-label={track.isFavorite ? "Remove from liked songs" : "Add to liked songs"}
           onclick={(event) => toggleFavorite(event, track)}
         >

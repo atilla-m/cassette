@@ -22,6 +22,13 @@
     lookupCdCover,
     movePlaylistTrack,
     recordTrackPlay,
+    getListeningStats,
+    chooseHistoryExportPath,
+    chooseHistoryImportPath,
+    exportListeningHistory,
+    previewListeningHistoryImport,
+    importListeningHistory,
+    associateListeningHistoryTrack,
     readTrackLyrics,
     removeCachedTrackLyrics,
     removeTrackFromPlaylist,
@@ -88,6 +95,9 @@
   import Sidebar from "$lib/components/Sidebar.svelte";
   import TrackList from "$lib/components/TrackList.svelte";
   import { buildAlbums, buildArtists, buildGenres } from "$lib/data/libraryViews";
+  import { statsRangeForPeriod, type StatsPeriod } from "$lib/utils/statsPeriod";
+  import { resolveStatsPlayback } from "$lib/utils/listeningStats";
+  import type { ListeningStats, ListeningImportPreview } from "$lib/types/listening";
   import { albums as mockAlbums, artists as mockArtists, genres as mockGenres, navItems } from "$lib/data/mockLibrary";
   import { ENABLE_EXPERIMENTAL_VIDEOS } from "$lib/featureFlags";
   import type {
@@ -589,6 +599,26 @@
     genres: STATS_PAGE_SIZE,
     recent: STATS_PAGE_SIZE,
   });
+  let statsPeriod = $state<StatsPeriod>("all");
+  let statsCustomFrom = $state("");
+  let statsCustomTo = $state("");
+  let statsSelectedMonth = $state("");
+  let statsSelectedYear = $state("");
+  let statsClock = $state(Date.now());
+  let statsRevision = $state(0);
+  let statsSnapshot = $state<ListeningStats | null>(null);
+  let statsLoading = $state(false);
+  let statsError = $state<string | null>(null);
+  let historyImportPath = $state<string | null>(null);
+  let historyImportPreview = $state<ListeningImportPreview | null>(null);
+  let historyBusy = $state(false);
+  let historyMessage = $state<string | null>(null);
+  let historyError = $state<string | null>(null);
+  let historyAssociationTargets = $state<Record<string, string>>({});
+  let historyPreviewLimit = $state(STATS_PAGE_SIZE);
+  let statsChartOffset = $state(0);
+  let statsSelectedDay = $state<string | null>(null);
+  let statsSelectedDayLabel = $state<string | null>(null);
   let albumGenreDraft = $state("");
   let artistGenreDraft = $state("");
   let isSavingGenreAssignment = $state(false);
@@ -666,18 +696,39 @@
   let sortedAlbums = $derived(sortAlbums(displayAlbums, albumSort, albumSortDirection));
   let sortedArtists = $derived(sortArtists(displayArtists, artistSort, artistSortDirection));
   let sortedGenres = $derived(sortGenres(displayGenres, genreSort, genreSortDirection));
-  let allStatsTopTracks = $derived(mostPlayed(tracks));
-  let allStatsRecentlyPlayedTracks = $derived(recentlyPlayed(tracks));
-  let allStatsTopArtists = $derived(buildTopArtistStats(tracks, displayArtists));
-  let allStatsTopAlbums = $derived(buildTopAlbumStats(tracks, displayAlbums));
-  let allStatsTopGenres = $derived(buildTopGenreStats(tracks, displayGenres));
+  let statsRange = $derived(statsRangeForPeriod(statsPeriod, new Date(statsClock), statsCustomFrom, statsCustomTo, statsSelectedMonth, statsSelectedYear));
+  let statsTrackCounts = $derived(new Map(statsSnapshot?.trackCounts.map((item) => [item.trackId, item]) ?? []));
+  let statsPendingTracks = $derived<Track[]>((statsSnapshot?.pendingTracks ?? []).map((item) => ({
+    id: item.trackId, filePath: "", fileName: "Retained listening history (not in library)", extension: "history",
+    title: item.title, artist: item.artist, album: item.album, albumArtist: item.albumArtist, genres: item.genres,
+    trackNumber: null, discNumber: null, year: null, durationSeconds: null, modifiedTime: null,
+    fileSize: null, scannedAt: null, coverArtPath: null, lyricsPath: null, lyricsKind: null, isFavorite: false,
+    playCount: statsTrackCounts.get(item.trackId)?.plays ?? 0,
+    lastPlayedAt: statsTrackCounts.get(item.trackId)?.lastPlayedAt ?? null,
+  })));
+  let statsUnavailableIds = $derived(new Set(statsPendingTracks.map((track) => track.id)));
+  let periodTracks = $derived([...tracks.map((track) => {
+    if (statsPeriod === "all") return track;
+    const count = statsTrackCounts.get(track.id);
+    return { ...track, playCount: count?.plays ?? 0, lastPlayedAt: count?.lastPlayedAt ?? null };
+  }), ...statsPendingTracks]);
+  let allStatsTopTracks = $derived(mostPlayed(periodTracks));
+  let allStatsRecentlyPlayedTracks = $derived(recentlyPlayed(periodTracks));
+  let allStatsTopArtists = $derived(buildTopArtistStats(periodTracks, buildArtists(periodTracks)));
+  let allStatsTopAlbums = $derived(buildTopAlbumStats(periodTracks, buildAlbums(periodTracks)));
+  let allStatsTopGenres = $derived(buildTopGenreStats(periodTracks, buildGenres(periodTracks)));
   let statsTopTracks = $derived(visibleStatsItems(allStatsTopTracks, statsSectionExpanded("tracks"), statsVisibleLimits.tracks, STATS_PREVIEW_LIMITS.tracks));
   let statsRecentlyPlayedTracks = $derived(visibleStatsItems(allStatsRecentlyPlayedTracks, statsSectionExpanded("recent"), statsVisibleLimits.recent, STATS_PREVIEW_LIMITS.recent));
   let statsTopArtists = $derived(visibleStatsItems(allStatsTopArtists, statsSectionExpanded("artists"), statsVisibleLimits.artists, STATS_PREVIEW_LIMITS.artists));
   let statsTopAlbums = $derived(visibleStatsItems(allStatsTopAlbums, statsSectionExpanded("albums"), statsVisibleLimits.albums, STATS_PREVIEW_LIMITS.albums));
   let statsTopGenres = $derived(visibleStatsItems(allStatsTopGenres, statsSectionExpanded("genres"), statsVisibleLimits.genres, STATS_PREVIEW_LIMITS.genres));
-  let statsTotalPlays = $derived(tracks.reduce((total, track) => total + track.playCount, 0));
-  let statsRecentlyPlayedCount = $derived(tracks.filter((track) => track.lastPlayedAt !== null).length);
+  let statsTotalPlays = $derived(statsSnapshot?.totalPlays ?? (statsPeriod === "all" ? tracks.reduce((total, track) => total + track.playCount, 0) : 0));
+  let statsDistinctTracks = $derived(periodTracks.filter((track) => track.playCount > 0).length);
+  let statsDistinctArtists = $derived(new Set(periodTracks.filter((track) => track.playCount > 0)
+    .map((track) => track.artist ?? track.albumArtist ?? "Unknown Artist")).size);
+  let statsMaxDailyPlays = $derived(Math.max(1, ...(statsSnapshot?.dailyPlays ?? [])));
+  let statsChartHasPlays = $derived((statsSnapshot?.dailyPlays ?? []).some((count) => count > 0));
+  let statsChartDates = $derived(statsRange?.chartDates.slice(statsChartOffset, statsChartOffset + 90) ?? []);
   let songFormatOptions = $derived<DropdownOption[]>(availableFormats.map((format) => ({ value: format, label: format })));
   let normalizedSearchQuery = $derived(normalizeSearch(searchQuery));
   let libraryTracksById = $derived(new Map(tracks.map((track) => [track.id, track])));
@@ -825,6 +876,47 @@
   let hadSearchQuery = false;
   let lyricsRequestId = 0;
   let tagEditorRequestId = 0;
+  let statsRequestId = 0;
+  let statsLastRangeKey: string | null = null;
+
+  $effect(() => {
+    void statsPeriod;
+    void statsCustomFrom;
+    void statsCustomTo;
+    void statsSelectedMonth;
+    void statsSelectedYear;
+    statsChartOffset = 0;
+    statsSelectedDay = null;
+    statsSelectedDayLabel = null;
+  });
+
+  $effect(() => {
+    const requestId = ++statsRequestId;
+    const range = statsRange;
+    const revision = statsRevision;
+    const ready = hasLoadedCache;
+    if (activeView !== "Stats" || !ready || !range) {
+      statsSnapshot = null;
+      statsLoading = false;
+      return;
+    }
+    void revision;
+    const rangeKey = `${range.startUtc}:${range.endUtc}:${range.dayBoundariesUtc[0]}:${range.dayBoundariesUtc.at(-1)}`;
+    if (rangeKey !== statsLastRangeKey) statsSnapshot = null;
+    statsLastRangeKey = rangeKey;
+    statsLoading = true;
+    statsError = null;
+    void getListeningStats(range.startUtc, range.endUtc, range.dayBoundariesUtc)
+      .then((result) => {
+        if (requestId === statsRequestId) statsSnapshot = result;
+      })
+      .catch((error) => {
+        if (requestId === statsRequestId) statsError = error instanceof Error ? error.message : String(error);
+      })
+      .finally(() => {
+        if (requestId === statsRequestId) statsLoading = false;
+      });
+  });
 
   $effect(() => {
     const hasSearchQuery = normalizedSearchQuery.length > 0;
@@ -972,6 +1064,12 @@
   });
 
   onMount(() => {
+    const refreshStatsCalendar = () => {
+      const now = Date.now();
+      if (new Date(now).toDateString() !== new Date(statsClock).toDateString()) statsClock = now;
+    };
+    const statsCalendarIntervalId = window.setInterval(refreshStatsCalendar, 60_000);
+    window.addEventListener("focus", refreshStatsCalendar);
     autoFindLyricsEnabled = window.localStorage.getItem(AUTO_LYRICS_SETTING_KEY) !== "off";
     trackNotificationsEnabled = window.localStorage.getItem(TRACK_NOTIFICATIONS_SETTING_KEY) === "on";
     showAlbumPlayCounts = window.localStorage.getItem(ALBUM_PLAY_COUNTS_SETTING_KEY) !== "off";
@@ -1160,6 +1258,8 @@
     window.addEventListener("keydown", handleKeydown, true);
 
     return () => {
+      window.clearInterval(statsCalendarIntervalId);
+      window.removeEventListener("focus", refreshStatsCalendar);
       window.clearInterval(statusIntervalId);
       window.clearInterval(progressIntervalId);
       if (videoProgressIntervalId !== null) {
@@ -1194,6 +1294,7 @@
       lastScannedAt = cache.lastScannedAt;
       scanCount = cache.tracks.length;
       hasLoadedCache = true;
+      statsRevision += 1;
     } catch (error) {
       scanError = error instanceof Error ? error.message : String(error);
       hasLoadedCache = true;
@@ -4810,6 +4911,8 @@
 
     try {
       applyUpdatedTrack(await recordTrackPlay(currentTrack.id, playbackSessionEventId));
+      statsClock = Date.now();
+      statsRevision += 1;
     } catch (error) {
       countedPlaybackTrackId = null;
       playbackError = error instanceof Error ? error.message : String(error);
@@ -6249,6 +6352,94 @@
     return rankRecentlyPlayedTracks(libraryTracks);
   }
 
+  function handleStatsTrackSelect(track: Track, queue: Track[]) {
+    const selection = resolveStatsPlayback(track.id, queue, libraryTracksById);
+    if (selection) void handleTrackSelect(selection.track, selection.queue);
+  }
+
+  function openStatsTrackContextMenu(track: Track, queue: Track[], x: number, y: number) {
+    const selection = resolveStatsPlayback(track.id, queue, libraryTracksById);
+    if (selection) openTrackContextMenu(selection.track, selection.queue, x, y);
+  }
+
+  async function handleExportListeningHistory() {
+    if (historyBusy) return;
+    historyBusy = true;
+    historyError = null;
+    historyMessage = null;
+    try {
+      const path = await chooseHistoryExportPath();
+      if (!path) return;
+      const result = await exportListeningHistory(path);
+      historyMessage = `Exported ${result.eventCount} dated events and ${result.undatedPlays} undated legacy plays for ${result.trackCount} tracks. Existing backup files are never overwritten.`;
+    } catch (error) {
+      historyError = error instanceof Error ? error.message : String(error);
+    } finally {
+      historyBusy = false;
+    }
+  }
+
+  async function handlePreviewListeningHistory() {
+    if (historyBusy) return;
+    historyBusy = true;
+    historyError = null;
+    historyMessage = null;
+    try {
+      const path = await chooseHistoryImportPath();
+      if (!path) return;
+      historyImportPreview = null;
+      historyPreviewLimit = STATS_PAGE_SIZE;
+      historyAssociationTargets = {};
+      historyImportPath = path;
+      historyImportPreview = await previewListeningHistoryImport(path);
+    } catch (error) {
+      historyError = error instanceof Error ? error.message : String(error);
+    } finally {
+      historyBusy = false;
+    }
+  }
+
+  async function handleApplyListeningHistory() {
+    if (!historyImportPath || !historyImportPreview || historyImportPreview.conflicts.length > 0 || historyBusy) return;
+    historyBusy = true;
+    historyError = null;
+    historyMessage = null;
+    try {
+      const result = await importListeningHistory(historyImportPath, historyImportPreview.approvalToken);
+      historyImportPreview = null;
+      historyMessage = `Imported ${result.importedEvents} new events and ${result.importedUndatedPlays} undated plays. ${result.pendingTracks} track references remain pending; reopen this backup after adding music or associate an ambiguous match below.`;
+      await loadLibraryCache();
+      statsRevision += 1;
+      try {
+        historyImportPreview = await previewListeningHistoryImport(historyImportPath);
+      } catch (error) {
+        historyError = `History was imported, but the updated preview could not be loaded: ${error instanceof Error ? error.message : String(error)}`;
+      }
+    } catch (error) {
+      historyError = error instanceof Error ? error.message : String(error);
+    } finally {
+      historyBusy = false;
+    }
+  }
+
+  async function handleAssociateListeningHistory(pendingTrackId: string) {
+    const targetTrackId = historyAssociationTargets[pendingTrackId];
+    if (!targetTrackId || historyBusy) return;
+    historyBusy = true;
+    historyError = null;
+    try {
+      await associateListeningHistoryTrack(pendingTrackId, targetTrackId);
+      await loadLibraryCache();
+      statsRevision += 1;
+      historyMessage = "Pending history associated with the selected audio-identical track.";
+      if (historyImportPath) historyImportPreview = await previewListeningHistoryImport(historyImportPath);
+    } catch (error) {
+      historyError = error instanceof Error ? error.message : String(error);
+    } finally {
+      historyBusy = false;
+    }
+  }
+
   function mostPlayed(libraryTracks: Track[]) {
     return rankMostPlayedTracks(libraryTracks);
   }
@@ -6281,7 +6472,7 @@
       return "View all";
     }
 
-    return section === "recent" ? "Most recent" : "All time";
+    return section === "recent" ? "Most recent" : statsPeriod === "all" ? "All time" : "Selected period";
   }
 
   function hasMoreStats(section: StatsSectionId, total: number) {
@@ -7098,6 +7289,40 @@
         </section>
       {:else if activeView === "Stats"}
         <section class="stats-page" aria-label="Listening and library statistics">
+          <div class="stats-period-toolbar">
+            <label for="stats-period">Listening period</label>
+            <select id="stats-period" bind:value={statsPeriod} onchange={() => { statsClock = Date.now(); }}>
+              <option value="all">All time</option>
+              <option value="today">Today</option>
+              <option value="week">This week</option>
+              <option value="month">This month</option>
+              <option value="previousMonth">Previous month</option>
+              <option value="year">This year</option>
+              <option value="previousYear">Previous year</option>
+              <option value="custom">Custom date range</option>
+            </select>
+            {#if statsPeriod === "previousMonth"}
+              <label for="stats-month">Choose month (blank = previous month)</label>
+              <input id="stats-month" type="month" bind:value={statsSelectedMonth} />
+            {:else if statsPeriod === "previousYear"}
+              <label for="stats-year">Choose year (blank = previous year)</label>
+              <input id="stats-year" type="text" inputmode="numeric" maxlength="4" placeholder={String(new Date(statsClock).getFullYear() - 1)} bind:value={statsSelectedYear} />
+            {/if}
+            {#if statsPeriod === "custom"}
+              <label for="stats-from">From</label>
+              <input id="stats-from" type="date" bind:value={statsCustomFrom} />
+              <label for="stats-to">Through</label>
+              <input id="stats-to" type="date" bind:value={statsCustomTo} />
+            {/if}
+          </div>
+          <p class="stats-coverage-note">Weeks start Monday. Calendar periods use this device’s local timezone; play events are stored in UTC. Rankings use current artist, album and genre tags, not historical metadata snapshots.</p>
+          {#if !statsRange}
+            <p class="stats-status" role="alert">Choose valid dates with “From” on or before “Through” (up to 100 years).</p>
+          {:else if statsError}
+            <p class="stats-status" role="alert">{statsError}</p>
+          {:else if statsLoading}
+            <p class="stats-status" aria-live="polite">Loading listening statistics…</p>
+          {/if}
           <div class="stats-overview-grid" aria-label="Library and listening overview">
             <div class="stats-overview-card">
               <span>Total tracks</span>
@@ -7120,18 +7345,113 @@
               <strong>{statsTotalPlays}</strong>
             </div>
             <div class="stats-overview-card">
-              <span>Liked songs</span>
-              <strong>{favoriteTracks.length}</strong>
+              <span>Distinct tracks played</span>
+              <strong>{statsDistinctTracks}</strong>
             </div>
             <div class="stats-overview-card">
-              <span>Recently played</span>
-              <strong>{statsRecentlyPlayedCount}</strong>
+              <span>Distinct artists played</span>
+              <strong>{statsDistinctArtists}</strong>
+            </div>
+            <div class="stats-overview-card">
+              <span>Liked songs</span>
+              <strong>{favoriteTracks.length}</strong>
             </div>
             <div class="stats-overview-card muted">
               <span>Listening time</span>
               <strong>Coming later</strong>
             </div>
           </div>
+
+          {#if statsSnapshot}
+            <p class="stats-coverage-note">
+              {#if statsPeriod === "all"}
+                All-time totals include {statsSnapshot.undatedLegacyPlays} undated legacy plays. The chart shows only the most recent 30 local calendar days of dated events.
+              {:else}
+                Earlier all-time plays without recorded dates cannot be placed in this period.
+              {/if}
+              Detailed tracking start dates for this profile and imported sources:
+              {statsSnapshot.coverageSources.map((source) => source.detailedTrackingStartedAtUtc ? new Date(source.detailedTrackingStartedAtUtc * 1000).toLocaleDateString() : "unknown").join(", ")}.
+              An older known last-played date does not establish complete earlier coverage.
+              {#if statsSnapshot.pendingTracks.length > 0}
+                {statsSnapshot.pendingTracks.length} retained track references are not in this library. Their plays remain in statistics using the backup’s labels; playback is unavailable until associated.
+              {/if}
+            </p>
+          {/if}
+
+          <section class="stats-chart-panel" aria-labelledby="daily-plays-title">
+            <h2 id="daily-plays-title">Daily plays</h2>
+            {#if statsSnapshot && statsRange && statsChartHasPlays}
+              <div class="stats-chart-scroll" role="region" aria-label="Daily play counts; use Tab to inspect dates">
+                <div class="stats-chart-bars">
+                  {#each statsChartDates as day, index (day)}
+                    <button type="button" class="stats-chart-day" aria-pressed={statsSelectedDay === day} aria-label={`${day}: ${statsSnapshot.dailyPlays[index + statsChartOffset] ?? 0} plays`} title={`${day}: ${statsSnapshot.dailyPlays[index + statsChartOffset] ?? 0} plays`} onclick={() => {
+                      statsSelectedDay = day;
+                      statsSelectedDayLabel = `${day}: ${statsSnapshot?.dailyPlays[index + statsChartOffset] ?? 0} plays`;
+                    }}>
+                      <span class="stats-chart-value">{statsSnapshot.dailyPlays[index + statsChartOffset] ?? 0}</span>
+                      <span class="stats-chart-bar" style={`height: ${Math.max(3, ((statsSnapshot.dailyPlays[index + statsChartOffset] ?? 0) / statsMaxDailyPlays) * 96)}px`}></span>
+                      <span class="stats-chart-date">{day.slice(5)}</span>
+                    </button>
+                  {/each}
+                </div>
+              </div>
+              {#if statsSelectedDayLabel}<p class="stats-coverage-note" aria-live="polite">{statsSelectedDayLabel}</p>{/if}
+              {#if statsRange.chartDates.length > 90}
+                <div class="stats-pagination">
+                  <button type="button" disabled={statsChartOffset === 0} onclick={() => { statsChartOffset = Math.max(0, statsChartOffset - 90); }}>Earlier days</button>
+                  <span>{statsChartDates[0]} – {statsChartDates.at(-1)}</span>
+                  <button type="button" disabled={statsChartOffset + 90 >= statsRange.chartDates.length} onclick={() => { statsChartOffset += 90; }}>Later days</button>
+                </div>
+              {/if}
+            {:else if statsSnapshot}
+              <p class="stats-coverage-note">No dated plays in this chart period.</p>
+            {/if}
+          </section>
+
+          <section class="stats-transfer-panel" aria-labelledby="history-transfer-title">
+            <h2 id="history-transfer-title">Portable listening history</h2>
+            <p>Export always includes your full history, regardless of the period selected above. Backups contain no audio files or explicit music-folder paths. Original event IDs are retained. Import previews matches, duplicates and conflicts before changing data.</p>
+            <div class="stats-transfer-actions">
+              <button type="button" disabled={historyBusy} onclick={() => void handleExportListeningHistory()}>Export listening history</button>
+              <button type="button" disabled={historyBusy} onclick={() => void handlePreviewListeningHistory()}>Import listening history…</button>
+            </div>
+            {#if historyBusy}<p role="status" class="stats-status">Preparing listening history… Verifying audio identities can take a while for a large library.</p>{/if}
+            {#if historyError}<p role="alert" class="stats-status">{historyError}</p>{/if}
+            {#if historyMessage}<p role="status" class="stats-status">{historyMessage}</p>{/if}
+            {#if historyImportPreview}
+              <div class="stats-import-preview">
+                <h3>Import preview</h3>
+                <p>{historyImportPreview.matchedTracks} matched · {historyImportPreview.unmatchedTracks} unmatched · {historyImportPreview.ambiguousTracks} ambiguous tracks</p>
+                <p>{historyImportPreview.newEvents} new · {historyImportPreview.duplicateEvents} duplicate dated events · {historyImportPreview.undatedPlays} source undated plays</p>
+                {#if historyImportPreview.conflicts.length > 0}
+                  <ul>{#each historyImportPreview.conflicts as conflict}<li>{conflict}</li>{/each}</ul>
+                {/if}
+                <div class="stats-import-tracks">
+                  {#each historyImportPreview.tracks.slice(0, historyPreviewLimit) as item (item.referenceId)}
+                    <div class="stats-import-track">
+                      <strong>{item.title}</strong><span>{item.artist ?? "Unknown Artist"} · {item.status} · {item.newEvents} new / {item.duplicateEvents} duplicate events</span>
+                      {#if item.conflict}<small>{item.conflict}</small>{/if}
+                      {#if item.status === "ambiguous" && item.candidates.length > 0}
+                        <label for={`associate-${item.referenceId}`}>Associate audio-identical track</label>
+                        <select id={`associate-${item.referenceId}`} value={historyAssociationTargets[item.pendingTrackId] ?? ""} onchange={(event) => { historyAssociationTargets[item.pendingTrackId] = event.currentTarget.value; }}>
+                          <option value="">Choose a track</option>
+                          {#each item.candidates as candidate}<option value={candidate}>{tracks.find((track) => track.id === candidate)?.title ?? candidate}</option>{/each}
+                        </select>
+                        <button type="button" disabled={historyBusy || !item.retained || !historyAssociationTargets[item.pendingTrackId]} onclick={() => void handleAssociateListeningHistory(item.pendingTrackId)}>Associate retained history</button>
+                        {#if !item.retained}<small>Import first to retain this history, then choose an audio-identical track.</small>{/if}
+                      {/if}
+                    </div>
+                  {/each}
+                </div>
+                {#if historyPreviewLimit < historyImportPreview.tracks.length}
+                  <button type="button" onclick={() => { historyPreviewLimit = nextStatsLimit(historyPreviewLimit, historyImportPreview?.tracks.length ?? 0); }}>Show 50 more track references</button>
+                {/if}
+                <p>Showing {Math.min(historyPreviewLimit, historyImportPreview.tracks.length)} of {historyImportPreview.tracks.length} track references. All references are included when importing.</p>
+                <button type="button" disabled={historyBusy || historyImportPreview.conflicts.length > 0} onclick={() => void handleApplyListeningHistory()}>Import new history</button>
+                <button type="button" disabled={historyBusy} onclick={() => { historyImportPreview = null; historyImportPath = null; }}>Cancel preview</button>
+              </div>
+            {/if}
+          </section>
 
           <LibrarySection
             title="Top Tracks"
@@ -7146,10 +7466,11 @@
             {:else}
               <TrackList
                 tracks={statsTopTracks}
+                unavailableTrackIds={statsUnavailableIds}
                 isScanning={false}
                 selectedTrackId={currentTrack?.id}
-                onTrackSelect={handleTrackSelect}
-                onTrackContextMenu={openTrackContextMenu}
+                onTrackSelect={handleStatsTrackSelect}
+                onTrackContextMenu={openStatsTrackContextMenu}
                 onArtistSelect={handleTrackArtistSelect}
                 onAlbumSelect={handleTrackAlbumSelect}
                 onToggleFavorite={handleToggleFavorite}
@@ -7179,7 +7500,7 @@
               {:else}
                 <div class="stats-rank-list">
                   {#each statsTopArtists as stat, index}
-                    <button class="stats-rank-card" type="button" onclick={() => selectArtistName(stat.name)}>
+                    <button class="stats-rank-card" type="button" disabled={!displayArtists.some((artist) => artist.name === stat.name)} onclick={() => selectArtistName(stat.name)}>
                       <span class="stats-rank-number">{index + 1}</span>
                       <span class="artist-avatar stats-avatar" style={`--item-color: ${stat.color}`} aria-hidden="true">
                         {stat.name.slice(0, 1)}
@@ -7215,7 +7536,7 @@
               {:else}
                 <div class="stats-rank-list">
                   {#each statsTopAlbums as stat, index}
-                    <button class="stats-rank-card" type="button" onclick={() => handleAlbumSelect(stat.album)}>
+                    <button class="stats-rank-card" type="button" disabled={!displayAlbums.some((album) => album.id === stat.album.id)} onclick={() => handleAlbumSelect(stat.album)}>
                       <span class="stats-rank-number">{index + 1}</span>
                       <span class="album-art stats-cover" style={`--item-color: ${stat.album.color}`} aria-hidden="true">
                         {#if stat.album.coverArtPath}
@@ -7260,7 +7581,7 @@
               {:else}
                 <div class="stats-rank-list">
                   {#each statsTopGenres as stat, index}
-                    <button class="stats-rank-card" type="button" onclick={() => handleGenreSelect(stat.genre)}>
+                    <button class="stats-rank-card" type="button" disabled={!displayGenres.some((genre) => genre.name === stat.genre.name)} onclick={() => handleGenreSelect(stat.genre)}>
                       <span class="stats-rank-number">{index + 1}</span>
                       <span class="genre-pill stats-genre-mark" style={`--item-color: ${stat.genre.color}`} aria-hidden="true">
                         {stat.genre.name.slice(0, 1)}
@@ -7300,11 +7621,12 @@
                       class="stats-recent-card"
                       type="button"
                       title={track.filePath}
-                      onclick={() => void handleTrackSelect(track, statsRecentlyPlayedTracks)}
+                      disabled={statsUnavailableIds.has(track.id)}
+                      onclick={() => handleStatsTrackSelect(track, statsRecentlyPlayedTracks)}
                       oncontextmenu={(event) => {
                         event.preventDefault();
                         event.stopPropagation();
-                        openTrackContextMenu(track, statsRecentlyPlayedTracks, event.clientX, event.clientY);
+                        openStatsTrackContextMenu(track, statsRecentlyPlayedTracks, event.clientX, event.clientY);
                       }}
                     >
                       <span class="mini-cover stats-mini-cover" aria-hidden="true">
@@ -13759,6 +14081,136 @@
     gap: 22px;
     max-width: 1120px;
   }
+
+  .stats-period-toolbar,
+  .stats-transfer-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .stats-period-toolbar label {
+    color: var(--text-soft);
+    font-size: 0.78rem;
+    font-weight: 800;
+  }
+
+  .stats-period-toolbar select,
+  .stats-period-toolbar input,
+  .stats-transfer-panel select {
+    min-height: 38px;
+    border: 1px solid var(--border-strong);
+    border-radius: 8px;
+    background: var(--panel-soft);
+    color: var(--text);
+    font: inherit;
+    padding: 6px 10px;
+  }
+
+  .stats-period-toolbar :is(select, input):focus-visible,
+  .stats-transfer-panel :is(select, button):focus-visible,
+  .stats-chart-day:focus-visible,
+  .stats-chart-scroll:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  .stats-coverage-note,
+  .stats-transfer-panel p,
+  .stats-status {
+    margin: 0;
+    color: var(--text-soft);
+    line-height: 1.5;
+  }
+
+  .stats-chart-panel,
+  .stats-transfer-panel {
+    min-width: 0;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--panel-soft);
+    padding: 16px;
+  }
+
+  .stats-chart-panel h2,
+  .stats-transfer-panel h2 {
+    margin: 0 0 12px;
+    font-size: 1rem;
+  }
+
+  .stats-chart-scroll {
+    overflow-x: auto;
+    padding: 8px 2px 4px;
+  }
+
+  .stats-chart-bars {
+    display: flex;
+    align-items: end;
+    gap: 5px;
+    min-height: 128px;
+    width: max-content;
+  }
+
+  .stats-chart-day {
+    display: grid;
+    align-items: end;
+    justify-items: center;
+    gap: 4px;
+    width: 44px;
+    color: var(--text-soft);
+    font-size: 0.68rem;
+    background: transparent;
+    border: 0;
+    padding: 0;
+    cursor: pointer;
+  }
+
+  .stats-chart-value { font-weight: 800; }
+  .stats-chart-date { white-space: nowrap; }
+  .stats-chart-bar {
+    display: block;
+    width: 26px;
+    border-radius: 4px 4px 0 0;
+    background: var(--accent);
+  }
+
+  .stats-transfer-panel,
+  .stats-import-preview,
+  .stats-import-tracks,
+  .stats-import-track {
+    display: grid;
+    gap: 10px;
+  }
+
+  .stats-transfer-actions button,
+  .stats-import-preview button {
+    min-height: 38px;
+    border: 1px solid var(--border-strong);
+    border-radius: 8px;
+    background: var(--panel-strong);
+    color: var(--text);
+    cursor: pointer;
+    font: inherit;
+    font-weight: 750;
+    padding: 7px 12px;
+  }
+
+  .stats-import-preview {
+    border-top: 1px solid var(--border);
+    padding-top: 12px;
+  }
+
+  .stats-import-preview h3 { margin: 0; }
+  .stats-import-tracks { max-height: 280px; overflow-y: auto; }
+  .stats-import-track {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px;
+  }
+  .stats-import-track span,
+  .stats-import-track small,
+  .stats-import-track label { color: var(--text-soft); }
 
   .stats-overview-grid {
     display: grid;
