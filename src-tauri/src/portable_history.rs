@@ -1093,7 +1093,15 @@ fn preview_backup(
                         .to_owned(),
                 );
             }
-            if incoming_baseline == 0 && new_events > 0 && total > dated {
+            let retained_events: i64 = database
+                .connection
+                .query_row(
+                    "SELECT COUNT(*) FROM track_play_events WHERE track_id = ?1",
+                    [&pending],
+                    |row| row.get(0),
+                )
+                .map_err(|error| error.to_string())?;
+            if incoming_baseline == 0 && (new_events > 0 || retained_events > 0) && total > dated {
                 // A dated-only backup has no baseline lineage with which to
                 // prove that its events aren't already included in these totals.
                 conflict = Some("Incoming dated events may overlap existing undated plays; no shared legacy provenance establishes a safe reconciliation.".to_owned());
@@ -1349,7 +1357,7 @@ fn promote_pending(
     if pending_events + pending_baselines == 0 {
         return Ok(());
     }
-    if pending_baselines > 0 {
+    if pending_events + pending_baselines > 0 {
         let target_undated: i64 = transaction.query_row(
             "SELECT play_count - (SELECT COUNT(*) FROM track_play_events WHERE track_id = ?1) FROM tracks WHERE id = ?1",
             [target], |row| row.get(0),
@@ -1828,6 +1836,35 @@ pub(super) mod tests {
         destination.export_backup().unwrap();
         assert!(import_backup(&mut destination, &backup).is_err());
         assert_eq!(total(&destination, &copy.id), 7);
+
+        // Retaining events while music is unavailable must not bypass the same
+        // overlap guard when the track becomes available or is associated later.
+        let retained_fixture = Fixture::new();
+        let mut retained = retained_fixture.database();
+        import_backup(&mut retained, &backup).unwrap();
+        let readded = retained_fixture.track("readded.wav", 31);
+        retained_fixture.seed(&mut retained, &[readded.clone()]);
+        retained
+            .connection
+            .execute(
+                "UPDATE tracks SET play_count = 7 WHERE id = ?1",
+                [&readded.id],
+            )
+            .unwrap();
+        let preview = preview_backup(&retained, &backup).unwrap();
+        assert_eq!(preview.duplicate_events, 1);
+        assert!(!preview.conflicts.is_empty());
+        assert!(import_backup(&mut retained, &backup).is_err());
+        let transaction = retained.connection.transaction().unwrap();
+        assert!(promote_pending(
+            &transaction,
+            &pending_id(&backup.source_id, &backup.tracks[0].reference.reference_id),
+            &readded.id
+        )
+        .is_err());
+        drop(transaction);
+        assert_eq!(total(&retained, &readded.id), 7);
+        assert_eq!(retained.export_backup().unwrap().0.tracks.len(), 2);
     }
 
     #[test]
