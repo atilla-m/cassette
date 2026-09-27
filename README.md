@@ -40,7 +40,7 @@ Install a downloaded RPM on Fedora:
 sudo dnf install ./Cassette*.rpm
 ```
 
-Install a downloaded DEB on Ubuntu or Debian:
+Install a downloaded DEB on the tested Ubuntu 24.04 package path:
 
 ```sh
 sudo apt install ./Cassette*.deb
