@@ -1796,9 +1796,16 @@ pub(super) mod tests {
             .unwrap();
         database
             .connection
-            .execute(
-                "DELETE FROM library_meta WHERE key = 'detailed_play_history_started_at_utc'",
-                [],
+            .execute_batch(
+                // Restore a genuinely pre-ledger fixture. Retaining portable
+                // coverage from the first open while deleting only the detailed
+                // start marker invents inconsistent provenance whenever the
+                // second migration crosses a wall-clock second.
+                "DROP TABLE track_play_events;
+                 DROP TABLE history_coverage;
+                 DELETE FROM library_meta WHERE key IN (
+                     'detailed_play_history_started_at_utc', 'portable_history_source_id'
+                 );",
             )
             .unwrap();
         database.migrate().unwrap();
@@ -1810,12 +1817,24 @@ pub(super) mod tests {
             .unwrap();
         assert!(original.starts_with("legacy-last-played:"));
         let (backup, _) = database.export_backup().unwrap();
+        validate_backup(&backup).unwrap();
+        assert_eq!(
+            backup.coverage_sources[0].detailed_tracking_started_at_utc,
+            backup.detailed_tracking_started_at_utc
+        );
         assert_eq!(backup.tracks[0].events[0].event_id, original);
         assert_eq!(backup.tracks[0].baselines[0].undated_plays, 7);
         import_backup(&mut database, &backup).unwrap();
         assert_eq!(total(&database, &track.id), 8);
         database.migrate().unwrap();
         assert_eq!(total(&database, &track.id), 8);
+        let (after_restart, _) = database.export_backup().unwrap();
+        validate_backup(&after_restart).unwrap();
+        assert_eq!(
+            after_restart.detailed_tracking_started_at_utc,
+            backup.detailed_tracking_started_at_utc
+        );
+        assert_eq!(after_restart.tracks[0].events[0].event_id, original);
     }
 
     #[test]
