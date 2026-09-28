@@ -163,7 +163,7 @@
         onkeydown={(event) => handleRowKeydown(event, track)}
       >
         {#if showOrder}
-          <span class="track-order">{String(index + 1).padStart(2, "0")}</span>
+          <span class="track-order" aria-label={`List position ${index + 1}`}>{String(index + 1).padStart(2, "0")}</span>
         {/if}
         <div class="mini-cover" aria-hidden="true">
           <span>{track.extension.toUpperCase()}</span>

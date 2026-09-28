@@ -128,3 +128,22 @@ test("Songs search, sort and format survive navigation away and back", () => {
   assert.ok(!page.source.includes("resetSongsBrowser"));
   assert.ok(!/songSort = "title";[\s\S]*songSortDirection = "asc";[\s\S]*songFormatFilter = "All";[\s\S]*searchQuery = ""/.test(page.source.slice(page.source.indexOf("function handleNavigate"), page.source.indexOf("function handleLyricsSelect"))));
 });
+
+test("Songs list positions follow the displayed order and have a persistent visibility setting", () => {
+  const page = template("../src/routes/+page.svelte");
+  const songLists = page.elements.filter(({ node }) => node.name === "TrackList"
+    && expression(page.source, node, "tracks") === "visibleSongTracks");
+  assert.equal(songLists.length, 2); // Scanning and loaded states use the same setting.
+  assert.ok(songLists.every(({ node }) => expression(page.source, node, "showOrder") === "showSongListNumbers"));
+  assert.match(page.source, /let showSongListNumbers = \$state\(true\)/);
+  assert.match(page.source, /showSongListNumbers = window\.localStorage\.getItem\(SONG_LIST_NUMBERS_SETTING_KEY\) !== "off"/);
+  assert.match(page.source, /window\.localStorage\.setItem\(SONG_LIST_NUMBERS_SETTING_KEY, showSongListNumbers \? "on" : "off"\)/);
+  assert.ok(page.elements.some(({ node }) => node.name === "input"
+    && expression(page.source, node, "checked") === "showSongListNumbers"
+    && expression(page.source, node, "onchange") === "handleSongListNumbersSettingChange"));
+
+  const list = template("../src/lib/components/TrackList.svelte");
+  assert.match(list.source, /\{#each tracks as track, index \(track\.id\)\}/);
+  assert.match(list.source, /List position \$\{index \+ 1\}/);
+  assert.match(list.source, /String\(index \+ 1\)\.padStart\(2, "0"\)/);
+});

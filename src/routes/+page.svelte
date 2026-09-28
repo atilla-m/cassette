@@ -337,6 +337,7 @@
   const ARTIST_PLAY_COUNTS_SETTING_KEY = "cassette:show-artist-play-counts";
   const GENRE_PLAY_COUNTS_SETTING_KEY = "cassette:show-genre-play-counts";
   const ALBUM_TRACK_PLAY_COUNTS_SETTING_KEY = "cassette:show-album-track-play-counts";
+  const SONG_LIST_NUMBERS_SETTING_KEY = "cassette:show-song-list-numbers";
   const ALBUM_TAG_FIELDS: Array<{ key: keyof AlbumTagEditorDraft; label: string; help?: string; inputMode?: "numeric" }> = [
     { key: "album", label: "Album title" },
     {
@@ -619,6 +620,7 @@
   let showArtistPlayCounts = $state(true);
   let showGenrePlayCounts = $state(true);
   let showAlbumTrackPlayCounts = $state(true);
+  let showSongListNumbers = $state(true);
   let expandedStatsSections = $state<StatsSectionId[]>([]);
   let statsVisibleLimits = $state<Record<StatsSectionId, number>>({
     tracks: STATS_PAGE_SIZE,
@@ -1109,6 +1111,7 @@
     showArtistPlayCounts = window.localStorage.getItem(ARTIST_PLAY_COUNTS_SETTING_KEY) !== "off";
     showGenrePlayCounts = window.localStorage.getItem(GENRE_PLAY_COUNTS_SETTING_KEY) !== "off";
     showAlbumTrackPlayCounts = window.localStorage.getItem(ALBUM_TRACK_PLAY_COUNTS_SETTING_KEY) !== "off";
+    showSongListNumbers = window.localStorage.getItem(SONG_LIST_NUMBERS_SETTING_KEY) !== "off";
     try {
       const updaterStorage = loadUpdaterStorage(window.localStorage);
       automaticUpdateChecksEnabled = updaterStorage.automaticChecksEnabled;
@@ -1585,6 +1588,12 @@
       showAlbumTrackPlayCounts = enabled;
       window.localStorage.setItem(ALBUM_TRACK_PLAY_COUNTS_SETTING_KEY, enabled ? "on" : "off");
     }
+  }
+
+  function handleSongListNumbersSettingChange(event: Event) {
+    if (!(event.currentTarget instanceof HTMLInputElement)) return;
+    showSongListNumbers = event.currentTarget.checked;
+    window.localStorage.setItem(SONG_LIST_NUMBERS_SETTING_KEY, showSongListNumbers ? "on" : "off");
   }
 
   function handleAutomaticUpdateSettingChange(event: Event) {
@@ -8348,6 +8357,7 @@
               tracks={visibleSongTracks}
               {isScanning}
               variant="library"
+              showOrder={showSongListNumbers}
               selectedTrackId={currentTrack?.id}
               onTrackSelect={handleTrackSelect}
               onTrackContextMenu={openTrackContextMenu}
@@ -8378,6 +8388,7 @@
               tracks={visibleSongTracks}
               {isScanning}
               variant="library"
+              showOrder={showSongListNumbers}
               selectedTrackId={currentTrack?.id}
               onTrackSelect={handleTrackSelect}
               onTrackContextMenu={openTrackContextMenu}
@@ -9827,6 +9838,12 @@
               </div>
 
               <div class="settings-control-list">
+                <label class="settings-toggle-row">
+                  <span>Songs list numbers</span>
+                  <input type="checkbox" checked={showSongListNumbers} onchange={handleSongListNumbersSettingChange} />
+                  <strong>{showSongListNumbers ? "Shown" : "Hidden"}</strong>
+                  <small>Show positions in the current Songs sort and filters. Choose Most played to see listening rank.</small>
+                </label>
                 <div>
                   <span>Album track numbers</span>
                   <strong>Enabled</strong>
