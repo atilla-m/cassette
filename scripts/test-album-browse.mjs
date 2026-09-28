@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { sortAlbumDisplayTracks } from "../src/lib/utils/albumTrackSort.ts";
+import { sortAlbumDisplayTracks, topPlayedTracks } from "../src/lib/utils/albumTrackSort.ts";
 import { stepView, visitView } from "../src/lib/utils/viewHistory.ts";
 
 const track = (id, discNumber, trackNumber, title, artist, playCount, durationSeconds) => ({
@@ -39,6 +39,18 @@ test("album sorting is display-only, deterministic, and includes zero plays", ()
   const withMissingNumber = [...original, track("missing", null, null, "No number", "One", 0, null)];
   assert.equal(sortAlbumDisplayTracks(withMissingNumber, "trackNumber", "desc").at(-1).id, "missing");
   assert.equal(sortAlbumDisplayTracks(withMissingNumber, "duration", "desc").at(-1).id, "missing");
+});
+
+test("artist and genre previews cap at ten most-played songs with deterministic zero-play ties", () => {
+  const ranked = Array.from({ length: 13 }, (_, index) =>
+    track(`rank-${index + 1}`, 1, index + 1, `Song ${index + 1}`, "Artist", 12 - index, 10));
+  assert.deepEqual(topPlayedTracks([...ranked].reverse()).map(({ id }) => id),
+    ranked.slice(0, 10).map(({ id }) => id));
+  assert.equal(topPlayedTracks(ranked, ranked.length).length, 13);
+
+  const unplayed = ranked.map((entry) => ({ ...entry, playCount: 0 }));
+  assert.deepEqual(topPlayedTracks([...unplayed].reverse()).map(({ id }) => id),
+    unplayed.slice(0, 10).map(({ id }) => id));
 });
 
 test("view history moves backward and forward and branches after a new visit", () => {

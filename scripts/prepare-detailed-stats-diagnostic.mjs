@@ -1,4 +1,4 @@
-import { chmodSync, copyFileSync, existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, copyFileSync, existsSync, mkdirSync, openSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -6,6 +6,10 @@ import { fileURLToPath } from "node:url";
 // This prepares disposable runtime data, never an installed application or release.
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const root = process.argv[2];
+const browseGroup = process.argv[3] === "--browse-group";
+if (process.argv[3] && !browseGroup) {
+  throw new Error("Optional third argument must be --browse-group.");
+}
 if (!root || !isAbsolute(root) || resolve(root) === "/" || existsSync(root)) {
   throw new Error("Choose a new, absolute diagnostic directory. Existing destinations are never overwritten.");
 }
@@ -95,10 +99,10 @@ for (const profile of ["source", "destination"]) {
     const fileName = `${profile === "source" ? "track" : "moved"}-${pad(index)}.wav`;
     const path = join(media, fileName);
     const title = `Synthetic Listening Track ${pad(index)} — 音`;
-    const artist = `Synthetic Artist ${pad((index - 1) % 64 + 1)}`;
+    const artist = browseGroup && index <= 15 ? "Diagnostic Group Artist" : `Synthetic Artist ${pad((index - 1) % 64 + 1)}`;
     const album = `Synthetic Album ${pad((index - 1) % 80 + 1)}`;
     const albumArtist = "Cassette Synthetic Ensemble";
-    const genre = `Synthetic Genre ${pad((index - 1) % 60 + 1)}`;
+    const genre = browseGroup && index <= 15 ? "Diagnostic Group Genre" : `Synthetic Genre ${pad((index - 1) % 60 + 1)}`;
     writeFileSync(path, wav(index, { TIT2: title, TPE1: artist, TALB: album, TPE2: albumArtist, TCON: genre, TRCK: String(index), TDRC: "2026" }), { flag: "wx" });
     const lyrics = path.replace(/\.wav$/, ".lrc");
     writeFileSync(lyrics, "[00:00.00]Disposable listening-statistics fixture\n[00:06.00]This play should increment exactly once\n", { flag: "wx" });
@@ -118,12 +122,24 @@ for (const profile of ["source", "destination"]) {
     if (index <= 3) statements.push(`INSERT INTO playlist_tracks VALUES ('diagnostic-playlist', ${quote(path)}, ${index - 1}, ${epoch(now)});`);
   }
   statements.push(`INSERT INTO playlists VALUES ('diagnostic-playlist', 'Disposable diagnostic playlist', ${epoch(now)}, ${epoch(now)});`, "COMMIT;");
-  const result = spawnSync("sqlite3", [join(data, "library.sqlite3")], { input: statements.join("\n"), encoding: "utf8" });
+  const seedSqlPath = join(data, "seed.sql");
+  writeFileSync(seedSqlPath, statements.join("\n"), { flag: "wx" });
+  const seedFd = openSync(seedSqlPath, "r");
+  let result;
+  try {
+    result = spawnSync("sqlite3", [join(data, "library.sqlite3")], {
+      stdio: [seedFd, "pipe", "pipe"], encoding: "utf8", timeout: 30_000,
+    });
+  } finally {
+    closeSync(seedFd);
+    unlinkSync(seedSqlPath);
+  }
   if (result.status !== 0) throw new Error(result.stderr || "Could not seed isolated database.");
 }
 writeFileSync(join(root, "EXPECTED.json"), JSON.stringify({
   generatedAt: now.toISOString(), timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-  tracks: 120, artists: 64, albums: 80, genres: 60,
+  tracks: 120, artists: browseGroup ? 65 : 64, albums: 80, genres: browseGroup ? 61 : 60,
+  browseGroup,
   source: { allTime: datedEvents + undatedPlays, datedEvents, undatedPlays, today: 100, yesterday: 60, previousMonth: 120, previousYear: 24 },
   destinationBeforeImport: { allTime: 0 }, dates: dated,
 }, null, 2) + "\n", { flag: "wx" });
@@ -145,9 +161,10 @@ Run ./launch.sh source (or omit source), then close it and run ./launch.sh desti
 Both use persistent isolated XDG data. No music import is necessary: 120 generated WAVs and LRCs are already in each library.
 The destination uses different folder paths and filenames but exactly the same encoded audio.
 
-Initial source All time: ${datedEvents + undatedPlays} plays, 120 tracks, 64 artists; Today: 100 plays.
+Initial source All time: ${datedEvents + undatedPlays} plays, 120 tracks, ${browseGroup ? 65 : 64} artists; Today: 100 plays.
 Initial destination: zero plays. EXPECTED.json records all dates and totals.
 Playing a full 12-second tone adds one play under the existing qualification rule.
+${browseGroup ? "Artist 'Diagnostic Group Artist' and genre 'Diagnostic Group Genre' each have 15 tracks for checking the top-ten preview and full-list navigation.\n" : ""}
 
 1. Source → Stats: periods, chart, exact values, View all/load more. Export while Today is selected to a NEW filename here (for example history.json).
 2. Close Source. Launch Destination, import that file, cancel the preview first: zero plays remain.

@@ -25,8 +25,8 @@ function directedOptionalNumber(left: number | null, right: number | null, direc
   return direction === "desc" ? right - left : left - right;
 }
 
-// Display-only ordering. Playback and queue actions keep using the album's
-// original track-number order, and this never writes tags.
+// Pure display ordering: never mutates the input or writes tags. Album-level
+// playback actions keep using their original track-number order.
 export function sortAlbumDisplayTracks(tracks: Track[], key: AlbumTrackSortKey, direction: AlbumTrackSortDirection) {
   return [...tracks].sort((left, right) => {
     if (key === "mostPlayed" || key === "leastPlayed") {
@@ -52,4 +52,8 @@ export function sortAlbumDisplayTracks(tracks: Track[], key: AlbumTrackSortKey, 
 
     return (direction === "desc" ? -comparison : comparison) || trackOrder(left, right);
   });
+}
+
+export function topPlayedTracks(tracks: Track[], limit = 10) {
+  return sortAlbumDisplayTracks(tracks, "mostPlayed", "asc").slice(0, Math.max(0, limit));
 }

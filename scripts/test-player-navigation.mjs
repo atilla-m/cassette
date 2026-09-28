@@ -102,18 +102,29 @@ test("detail sort choices remain open for direction changes and close only on ex
   assert.ok(menu.elements.some(({ node }) => textAttribute(node, "aria-label") === "Close sort menu"));
 });
 
-test("artist and genre details render incremental sorted songs and Songs-page controls reset on re-entry", () => {
+test("artist and genre details show top-ten previews and navigate to incremental sortable full lists", () => {
   const page = template("../src/routes/+page.svelte");
-  const songsSections = page.elements.filter(({ node }) => node.name === "LibrarySection" && textAttribute(node, "title") === "Songs"
-    && /selected(Artist|Genre)Tracks\.length/.test(expression(page.source, node, "viewAllLabel") ?? ""));
+  const songsSections = page.elements.filter(({ node }) => node.name === "LibrarySection"
+    && /detailSongsView === "(artist|genre)" \? "All Songs" : "Most Played Songs"/.test(expression(page.source, node, "title") ?? ""));
   assert.equal(songsSections.length, 2);
   const detailLists = page.elements.filter(({ node }) => node.name === "TrackList" &&
-    ["selectedArtistDisplayTracks.slice(0, artistTrackVisibleLimit)", "selectedGenreDisplayTracks.slice(0, genreTrackVisibleLimit)"].includes(expression(page.source, node, "tracks")));
+    /detailSongsView === "(artist|genre)" \? selected(Artist|Genre)DisplayTracks\.slice\(0, .*VisibleLimit\) : selected(Artist|Genre)TopTracks/.test(expression(page.source, node, "tracks") ?? ""));
   assert.equal(detailLists.length, 2);
   assert.ok(detailLists.every(({ ancestors }) => songsSections.some(({ node }) => ancestors.includes(node))));
-  assert.match(page.source, /if \(targetView === "Songs" && activeView !== "Songs"\) resetSongsBrowser\(\)/);
-  assert.match(page.source, /if \(location\.view === "Songs" && activeView !== "Songs"\) resetSongsBrowser\(\)/);
-  for (const reset of ['songSort = "title"', 'songSortDirection = "asc"', 'songFormatFilter = "All"', 'searchQuery = ""']) {
-    assert.ok(page.source.includes(reset));
-  }
+  assert.ok(songsSections.every(({ node }) => /openGroupSongs/.test(expression(page.source, node, "onViewAll") ?? "")));
+  assert.match(page.source, /selectedArtistTopTracks = \$derived\(selectedArtistRankedTracks\.slice\(0, 10\)\)/);
+  assert.match(page.source, /selectedGenreTopTracks = \$derived\(selectedGenreRankedTracks\.slice\(0, 10\)\)/);
+  assert.match(page.source, /detailSongsView: \(activeView === "Artists"/);
+  assert.match(page.source, /detailSongsView = location\.detailSongsView/);
+});
+
+test("Songs search, sort and format survive navigation away and back", () => {
+  const page = template("../src/routes/+page.svelte");
+  assert.ok(page.elements.some(({ node }) => node.name === "input" && node.attributes?.some((candidate) =>
+    candidate.type === "BindDirective" && candidate.name === "value"
+      && page.source.slice(candidate.expression.start, candidate.expression.end) === "songsSearchQuery")));
+  assert.match(page.source, /normalizeSearch\(activeView === "Songs" \? songsSearchQuery : searchQuery\)/);
+  assert.match(page.source, /if \(activeView === "Songs"\) songsSearchQuery = ""/);
+  assert.ok(!page.source.includes("resetSongsBrowser"));
+  assert.ok(!/songSort = "title";[\s\S]*songSortDirection = "asc";[\s\S]*songFormatFilter = "All";[\s\S]*searchQuery = ""/.test(page.source.slice(page.source.indexOf("function handleNavigate"), page.source.indexOf("function handleLyricsSelect"))));
 });

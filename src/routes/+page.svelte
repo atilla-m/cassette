@@ -153,7 +153,7 @@
     startsSyncedLyricBreak,
     type SyncedLyricCue,
   } from "$lib/utils/syncedLyrics";
-  import { sortAlbumDisplayTracks, type AlbumTrackSortKey } from "$lib/utils/albumTrackSort";
+  import { sortAlbumDisplayTracks, topPlayedTracks, type AlbumTrackSortKey } from "$lib/utils/albumTrackSort";
   import { stepView, visitView, type ViewHistory } from "$lib/utils/viewHistory";
   import {
     STATS_PAGE_SIZE,
@@ -216,6 +216,7 @@
     artistName: string | null;
     artistOrigin: ArtistNavigationOrigin;
     genreName: string | null;
+    detailSongsView: "artist" | "genre" | null;
     playlistId: string | null;
     likedSongs: boolean;
     mixBuilder: boolean;
@@ -571,10 +572,12 @@
   let selectedArtistName = $state<string | null>(null);
   let artistNavigationOrigin = $state<ArtistNavigationOrigin>({ view: "Artists" });
   let selectedGenreName = $state<string | null>(null);
+  let detailSongsView = $state<"artist" | "genre" | null>(null);
   let viewHistory = $state<ViewHistory<ViewLocation>>({
     entries: [{
       view: "Albums", albumId: null, albumOrigin: { view: "Albums" },
       artistName: null, artistOrigin: { view: "Artists" }, genreName: null,
+      detailSongsView: null,
       playlistId: null, likedSongs: false, mixBuilder: false, libraryHealth: false, videoId: null,
     }],
     index: 0,
@@ -589,6 +592,7 @@
   let selectedPlaylistId = $state<string | null>(null);
   let isShortcutHelpOpen = $state(false);
   let searchQuery = $state("");
+  let songsSearchQuery = $state("");
   let playlistPendingDelete = $state<Playlist | null>(null);
   let isDeletingPlaylist = $state(false);
   let playlistNameDraft = $state("");
@@ -601,9 +605,9 @@
   let albumSortDirection = $state<SortDirection>("asc");
   let albumTrackSort = $state<AlbumTrackSortKey>("trackNumber");
   let albumTrackSortDirection = $state<SortDirection>("asc");
-  let artistTrackSort = $state<AlbumTrackSortKey>("title");
+  let artistTrackSort = $state<AlbumTrackSortKey>("mostPlayed");
   let artistTrackSortDirection = $state<SortDirection>("asc");
-  let genreTrackSort = $state<AlbumTrackSortKey>("title");
+  let genreTrackSort = $state<AlbumTrackSortKey>("mostPlayed");
   let genreTrackSortDirection = $state<SortDirection>("asc");
   let artistTrackVisibleLimit = $state(STATS_PAGE_SIZE);
   let genreTrackVisibleLimit = $state(STATS_PAGE_SIZE);
@@ -754,7 +758,7 @@
   let statsChartHasPlays = $derived((statsSnapshot?.dailyPlays ?? []).some((count) => count > 0));
   let statsChartDates = $derived(statsRange?.chartDates.slice(statsChartOffset, statsChartOffset + 90) ?? []);
   let songFormatOptions = $derived<DropdownOption[]>(availableFormats.map((format) => ({ value: format, label: format })));
-  let normalizedSearchQuery = $derived(normalizeSearch(searchQuery));
+  let normalizedSearchQuery = $derived(normalizeSearch(activeView === "Songs" ? songsSearchQuery : searchQuery));
   let libraryTracksById = $derived(new Map(tracks.map((track) => [track.id, track])));
   let selectedAlbum = $derived(displayAlbums.find((album) => album.id === selectedAlbumId) ?? null);
   let selectedArtist = $derived(displayArtists.find((artist) => artist.name === selectedArtistName) ?? null);
@@ -799,12 +803,16 @@
   let selectedAlbumFormatSummary = $derived(albumFormatSummary(selectedAlbumTracks));
   let selectedArtistTracks = $derived(selectedArtist ? tracksForArtist(selectedArtist) : []);
   let selectedArtistDisplayTracks = $derived(sortAlbumDisplayTracks(selectedArtistTracks, artistTrackSort, artistTrackSortDirection));
+  let selectedArtistRankedTracks = $derived(topPlayedTracks(selectedArtistTracks, selectedArtistTracks.length));
+  let selectedArtistTopTracks = $derived(selectedArtistRankedTracks.slice(0, 10));
   let selectedArtistAlbums = $derived(
     selectedArtist ? sortedAlbums.filter((album) => album.artist === selectedArtist.name) : [],
   );
   let selectedArtistSearchAlbums = $derived(searchFilterAlbums(selectedArtistAlbums, normalizedSearchQuery));
   let selectedGenreTracks = $derived(selectedGenre ? tracksForGenre(selectedGenre) : []);
   let selectedGenreDisplayTracks = $derived(sortAlbumDisplayTracks(selectedGenreTracks, genreTrackSort, genreTrackSortDirection));
+  let selectedGenreRankedTracks = $derived(topPlayedTracks(selectedGenreTracks, selectedGenreTracks.length));
+  let selectedGenreTopTracks = $derived(selectedGenreRankedTracks.slice(0, 10));
   let selectedGenreAlbums = $derived(selectedGenre ? albumsForTracks(selectedGenreTracks, sortedAlbums) : []);
   let selectedGenreArtists = $derived(selectedGenre ? buildArtists(selectedGenreTracks) : []);
   let selectedGenreSearchAlbums = $derived(searchFilterGenreAlbums(selectedGenreAlbums, normalizedSearchQuery));
@@ -4025,7 +4033,6 @@
       ? "Albums"
       : label;
 
-    if (targetView === "Songs" && activeView !== "Songs") resetSongsBrowser();
     void saveActiveVideoProgress(true);
     activeView = targetView;
     selectedAlbumId = null;
@@ -4033,6 +4040,7 @@
     selectedArtistName = null;
     artistNavigationOrigin = { view: "Artists" };
     selectedGenreName = null;
+    detailSongsView = null;
     clearGenreEditState();
     isLikedSongsOpen = false;
     isMixBuilderOpen = false;
@@ -4054,6 +4062,7 @@
       artistName: selectedArtistName,
       artistOrigin: artistNavigationOrigin,
       genreName: selectedGenreName,
+      detailSongsView: (activeView === "Artists" && selectedArtistName) || (activeView === "Genres" && selectedGenreName) ? detailSongsView : null,
       playlistId: selectedPlaylistId,
       likedSongs: isLikedSongsOpen,
       mixBuilder: isMixBuilderOpen,
@@ -4066,20 +4075,12 @@
     return JSON.stringify(left) === JSON.stringify(right);
   }
 
-  function resetSongsBrowser() {
-    songSort = "title";
-    songSortDirection = "asc";
-    songFormatFilter = "All";
-    searchQuery = "";
-  }
-
   function navigateViewHistory(direction: -1 | 1) {
     const nextHistory = stepView(viewHistory, direction);
     if (nextHistory === viewHistory) return;
 
     viewHistory = nextHistory;
     const location = nextHistory.entries[nextHistory.index];
-    if (location.view === "Songs" && activeView !== "Songs") resetSongsBrowser();
     void saveActiveVideoProgress(true);
     activeView = location.view;
     selectedAlbumId = location.albumId;
@@ -4087,6 +4088,7 @@
     selectedArtistName = location.artistName;
     artistNavigationOrigin = location.artistOrigin;
     selectedGenreName = location.genreName;
+    detailSongsView = location.detailSongsView;
     selectedPlaylistId = location.playlistId;
     isLikedSongsOpen = location.likedSongs;
     isMixBuilderOpen = location.mixBuilder;
@@ -4302,6 +4304,7 @@
     albumNavigationOrigin = origin;
     selectedArtistName = null;
     selectedGenreName = null;
+    detailSongsView = null;
     clearGenreEditState();
     albumGenreDraft = genreDraftForTracks(tracks.filter((track) => albumIdForTrack(track) === albumId));
     isLikedSongsOpen = false;
@@ -4338,6 +4341,7 @@
     searchQuery = "";
     activeView = "Artists";
     selectedArtistName = artistName;
+    detailSongsView = null;
     artistNavigationOrigin = origin;
     selectedAlbumId = null;
     albumNavigationOrigin = { view: "Albums" };
@@ -4358,6 +4362,7 @@
     searchQuery = "";
     activeView = "Genres";
     selectedGenreName = genre.name;
+    detailSongsView = null;
     selectedAlbumId = null;
     albumNavigationOrigin = { view: "Albums" };
     selectedArtistName = null;
@@ -4369,6 +4374,13 @@
     isPlaylistEditMode = false;
     isLibraryHealthOpen = false;
     selectedPlaylistId = null;
+    mainElement?.scrollTo({ top: 0 });
+  }
+
+  function openGroupSongs(view: "artist" | "genre") {
+    detailSongsView = view;
+    if (view === "artist") artistTrackVisibleLimit = STATS_PAGE_SIZE;
+    else genreTrackVisibleLimit = STATS_PAGE_SIZE;
     mainElement?.scrollTo({ top: 0 });
   }
 
@@ -4745,7 +4757,8 @@
   }
 
   function clearSearch() {
-    searchQuery = "";
+    if (activeView === "Songs") songsSearchQuery = "";
+    else searchQuery = "";
   }
 
   function handleSearchKeydown(event: KeyboardEvent) {
@@ -6990,14 +7003,24 @@
 
       {#if isSearchAvailable() && !isAlbumDetailView && !isArtistDetailView && !isGenreDetailView && !isPlaylistDetailView}
         <div class="search-bar">
-          <input
-            type="search"
-            bind:value={searchQuery}
-            placeholder={searchPlaceholder()}
-            aria-label={searchPlaceholder()}
-            onkeydown={handleSearchKeydown}
-          />
-          {#if searchQuery}
+          {#if activeView === "Songs"}
+            <input
+              type="search"
+              bind:value={songsSearchQuery}
+              placeholder={searchPlaceholder()}
+              aria-label={searchPlaceholder()}
+              onkeydown={handleSearchKeydown}
+            />
+          {:else}
+            <input
+              type="search"
+              bind:value={searchQuery}
+              placeholder={searchPlaceholder()}
+              aria-label={searchPlaceholder()}
+              onkeydown={handleSearchKeydown}
+            />
+          {/if}
+          {#if normalizedSearchQuery}
             <button type="button" aria-label="Clear search" onclick={clearSearch}>Clear</button>
           {/if}
         </div>
@@ -7929,7 +7952,14 @@
         {/if}
       {:else if activeView === "Artists"}
         {#if selectedArtist}
-          <section class="detail-view" aria-labelledby="artist-detail-title">
+          <section class="detail-view" aria-labelledby={detailSongsView === "artist" ? "artist-songs-title" : "artist-detail-title"}>
+            {#if detailSongsView === "artist"}
+              <div class="group-songs-intro">
+                <p class="eyebrow">Artist songs</p>
+                <h3 id="artist-songs-title">All songs by {selectedArtist.name}</h3>
+                <p>{songCountLabel(selectedArtistTracks.length)} · Sort the list without changing the current queue.</p>
+              </div>
+            {:else}
             <div class="artist-detail-header" style={`--item-color: ${selectedArtist.color}`}>
               <div class="artist-avatar detail-avatar" style={`--item-color: ${selectedArtist.color}`} aria-hidden="true">
                 {selectedArtist.name.slice(0, 1)}
@@ -8011,31 +8041,38 @@
                 </div>
               {/if}
             </LibrarySection>
-            <LibrarySection title="Songs" viewAllLabel={`${selectedArtistTracks.length} total`}>
+            {/if}
+            <LibrarySection
+              title={detailSongsView === "artist" ? "All Songs" : "Most Played Songs"}
+              viewAllLabel={detailSongsView === "artist" ? `${selectedArtistTracks.length} total` : "View all"}
+              onViewAll={detailSongsView === "artist" ? undefined : () => openGroupSongs("artist")}
+            >
               {#snippet headerActions()}
-                <TrackSortMenu
-                  value={artistTrackSort}
-                  direction={artistTrackSortDirection}
-                  options={groupedTrackSortOptions}
-                  onSortChange={(value) => artistTrackSort = value}
-                  onDirectionChange={(direction) => artistTrackSortDirection = direction}
-                />
+                {#if detailSongsView === "artist"}
+                  <TrackSortMenu
+                    value={artistTrackSort}
+                    direction={artistTrackSortDirection}
+                    options={groupedTrackSortOptions}
+                    onSortChange={(value) => artistTrackSort = value}
+                    onDirectionChange={(direction) => artistTrackSortDirection = direction}
+                  />
+                {/if}
               {/snippet}
               {#if selectedArtistTracks.length === 0}
                 <div class="group-empty"><h3>No songs found for this artist</h3></div>
               {:else}
                 <TrackList
-                  tracks={selectedArtistDisplayTracks.slice(0, artistTrackVisibleLimit)}
+                  tracks={detailSongsView === "artist" ? selectedArtistDisplayTracks.slice(0, artistTrackVisibleLimit) : selectedArtistTopTracks}
                   isScanning={false}
                   variant="library"
                   selectedTrackId={currentTrack?.id}
-                  onTrackSelect={(track) => void handleTrackSelect(track, selectedArtistDisplayTracks)}
-                  onTrackContextMenu={(track, _queue, x, y) => openTrackContextMenu(track, selectedArtistDisplayTracks, x, y)}
+                  onTrackSelect={(track) => void handleTrackSelect(track, detailSongsView === "artist" ? selectedArtistDisplayTracks : selectedArtistRankedTracks)}
+                  onTrackContextMenu={(track, _queue, x, y) => openTrackContextMenu(track, detailSongsView === "artist" ? selectedArtistDisplayTracks : selectedArtistRankedTracks, x, y)}
                   onArtistSelect={handleTrackArtistSelect}
                   onAlbumSelect={handleTrackAlbumSelect}
                   onToggleFavorite={handleToggleFavorite}
                 />
-                {#if artistTrackVisibleLimit < selectedArtistDisplayTracks.length}
+                {#if detailSongsView === "artist" && artistTrackVisibleLimit < selectedArtistDisplayTracks.length}
                   <button class="detail-songs-load-more" type="button" onclick={() => artistTrackVisibleLimit = nextStatsLimit(artistTrackVisibleLimit, selectedArtistDisplayTracks.length)}>Show more songs</button>
                 {/if}
               {/if}
@@ -8089,7 +8126,14 @@
         {/if}
       {:else if activeView === "Genres"}
         {#if selectedGenre}
-          <section class="detail-view" aria-labelledby="genre-detail-title">
+          <section class="detail-view" aria-labelledby={detailSongsView === "genre" ? "genre-songs-title" : "genre-detail-title"}>
+            {#if detailSongsView === "genre"}
+              <div class="group-songs-intro">
+                <p class="eyebrow">Genre songs</p>
+                <h3 id="genre-songs-title">All {selectedGenre.name} songs</h3>
+                <p>{songCountLabel(selectedGenreTracks.length)} · Sort the list without changing the current queue.</p>
+              </div>
+            {:else}
             <div class="genre-detail-header" style={`--item-color: ${selectedGenre.color}`}>
               <div class="genre-mark detail-avatar" style={`--item-color: ${selectedGenre.color}`} aria-hidden="true">
                 {selectedGenre.name.slice(0, 1)}
@@ -8190,32 +8234,38 @@
                 </div>
               {/if}
             </LibrarySection>
-
-            <LibrarySection title="Songs" viewAllLabel={`${selectedGenreTracks.length} total`}>
+            {/if}
+            <LibrarySection
+              title={detailSongsView === "genre" ? "All Songs" : "Most Played Songs"}
+              viewAllLabel={detailSongsView === "genre" ? `${selectedGenreTracks.length} total` : "View all"}
+              onViewAll={detailSongsView === "genre" ? undefined : () => openGroupSongs("genre")}
+            >
               {#snippet headerActions()}
-                <TrackSortMenu
-                  value={genreTrackSort}
-                  direction={genreTrackSortDirection}
-                  options={groupedTrackSortOptions}
-                  onSortChange={(value) => genreTrackSort = value}
-                  onDirectionChange={(direction) => genreTrackSortDirection = direction}
-                />
+                {#if detailSongsView === "genre"}
+                  <TrackSortMenu
+                    value={genreTrackSort}
+                    direction={genreTrackSortDirection}
+                    options={groupedTrackSortOptions}
+                    onSortChange={(value) => genreTrackSort = value}
+                    onDirectionChange={(direction) => genreTrackSortDirection = direction}
+                  />
+                {/if}
               {/snippet}
               {#if selectedGenreTracks.length === 0}
                 <div class="group-empty"><h3>No songs found for this genre</h3></div>
               {:else}
                 <TrackList
-                  tracks={selectedGenreDisplayTracks.slice(0, genreTrackVisibleLimit)}
+                  tracks={detailSongsView === "genre" ? selectedGenreDisplayTracks.slice(0, genreTrackVisibleLimit) : selectedGenreTopTracks}
                   isScanning={false}
                   variant="library"
                   selectedTrackId={currentTrack?.id}
-                  onTrackSelect={(track) => void handleTrackSelect(track, selectedGenreDisplayTracks)}
-                  onTrackContextMenu={(track, _queue, x, y) => openTrackContextMenu(track, selectedGenreDisplayTracks, x, y)}
+                  onTrackSelect={(track) => void handleTrackSelect(track, detailSongsView === "genre" ? selectedGenreDisplayTracks : selectedGenreRankedTracks)}
+                  onTrackContextMenu={(track, _queue, x, y) => openTrackContextMenu(track, detailSongsView === "genre" ? selectedGenreDisplayTracks : selectedGenreRankedTracks, x, y)}
                   onArtistSelect={handleTrackArtistSelect}
                   onAlbumSelect={handleTrackAlbumSelect}
                   onToggleFavorite={handleToggleFavorite}
                 />
-                {#if genreTrackVisibleLimit < selectedGenreDisplayTracks.length}
+                {#if detailSongsView === "genre" && genreTrackVisibleLimit < selectedGenreDisplayTracks.length}
                   <button class="detail-songs-load-more" type="button" onclick={() => genreTrackVisibleLimit = nextStatsLimit(genreTrackVisibleLimit, selectedGenreDisplayTracks.length)}>Show more songs</button>
                 {/if}
               {/if}
@@ -11918,6 +11968,23 @@
   .detail-view {
     display: grid;
     gap: 22px;
+  }
+
+  .group-songs-intro {
+    padding: 8px 0 0;
+  }
+
+  .group-songs-intro h3 {
+    margin: 6px 0 8px;
+    color: var(--text);
+    font-size: clamp(1.7rem, 3vw, 2.5rem);
+    line-height: 1.15;
+  }
+
+  .group-songs-intro > p:last-child {
+    margin: 0;
+    color: var(--text-soft);
+    font-size: 0.9rem;
   }
 
   .lyrics-view {
