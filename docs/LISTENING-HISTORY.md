@@ -30,7 +30,9 @@ Imports are limited to 256 MiB and two million events; custom chart ranges to 10
 
 Build the native executable with `npm run tauri -- build --no-bundle`, then run `node scripts/prepare-detailed-stats-diagnostic.mjs /absolute/new/test-directory`. The script refuses an existing destination, copies the diagnostic binary, generates 120 disposable WAV/LRC fixtures and seeds two independent profiles at different music paths. It never reads your library. The generated `launch.sh` accepts `source` (default) or `destination` and pins all four XDG directories. `EXPECTED.json` records initial totals and dates; the profiles remain persistent for restart checks.
 
-Manual checks remain pending until reported by the tester:
+Recorded qualification: the user confirmed the navigation recheck passed. An isolated synthetic export was inspected and contained 120 track references and 484 all-time plays: 304 dated events plus 180 undated legacy plays. The nine focused native export/import tests pass, including moved paths, repeat and older imports, unresolved matches, invalid backups, and transactional failure. Physical-device transfer and restoration of a real library have not been manually tested.
+
+Remaining manual checks; do not mark them passed without a report:
 
 1. Source: inspect periods, daily values/empty states, complete lists, keyboard controls and refresh after a qualifying play.
 2. Export while Today is selected; confirm the preview/restoration still includes the full history.

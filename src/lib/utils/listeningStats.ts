@@ -4,7 +4,8 @@ export function statsDayValueLabel(day: string | null, chartDates: string[], dai
   if (!day) return null;
   const index = chartDates.indexOf(day);
   if (index < 0 || dailyPlays[index] === undefined) return null;
-  return `${day}: ${dailyPlays[index]} plays`;
+  const count = dailyPlays[index];
+  return `${day}: ${count} ${count === 1 ? "play" : "plays"}`;
 }
 
 // Period rows contain display-only counts. Playback and context actions must use

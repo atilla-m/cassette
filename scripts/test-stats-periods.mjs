@@ -68,7 +68,7 @@ test("selected chart-day values refresh with the snapshot, including zero and ch
   const day = "2026-03-08";
   const dates = [day, "2026-03-09"];
   assert.equal(statsDayValueLabel(day, dates, [0, 2]), `${day}: 0 plays`);
-  assert.equal(statsDayValueLabel(day, dates, [1, 2]), `${day}: 1 plays`);
+  assert.equal(statsDayValueLabel(day, dates, [1, 2]), `${day}: 1 play`);
   assert.equal(statsDayValueLabel(day, ["2026-04-01"], [3]), null);
   assert.equal(statsDayValueLabel(null, dates, [1, 2]), null);
   assert.equal(statsDayValueLabel(day, dates, []), null);

@@ -7416,7 +7416,7 @@
               <div class="stats-chart-scroll" role="region" aria-label="Daily play counts; use Tab to inspect dates">
                 <div class="stats-chart-bars">
                   {#each statsChartDates as day, index (day)}
-                    <button type="button" class="stats-chart-day" aria-pressed={statsSelectedDay === day} aria-label={`${day}: ${statsSnapshot.dailyPlays[index + statsChartOffset] ?? 0} plays`} title={`${day}: ${statsSnapshot.dailyPlays[index + statsChartOffset] ?? 0} plays`} onclick={() => {
+                    <button type="button" class="stats-chart-day" aria-pressed={statsSelectedDay === day} aria-label={`${day}: ${playsLabel(statsSnapshot.dailyPlays[index + statsChartOffset] ?? 0)}`} title={`${day}: ${playsLabel(statsSnapshot.dailyPlays[index + statsChartOffset] ?? 0)}`} onclick={() => {
                       statsSelectedDay = day;
                     }}>
                       <span class="stats-chart-value">{statsSnapshot.dailyPlays[index + statsChartOffset] ?? 0}</span>
