@@ -4,7 +4,7 @@ Cassette is a private, local-first desktop music library and player for Linux. I
 
 ## Beta status
 
-Cassette 0.1.0-beta.5 is being prepared for Linux x86_64 and is **not released yet**. The published [beta.4 release](https://github.com/atilla-m/cassette/releases/tag/v0.1.0-beta.4) remains the download for now. Ubuntu 24.04 and Fedora 44 were tested for prior Linux betas; a beta.5 signed candidate needs its own package qualification. Windows distribution is deferred pending its separate manual check.
+Cassette 0.1.0-beta.5.1 is being prepared for Linux x86_64 and is **not released yet**. The published [beta.4 release](https://github.com/atilla-m/cassette/releases/tag/v0.1.0-beta.4) remains the download for now. The signed beta.5 candidate remains an unpublished draft; beta.5.1 includes a final Stats layout change and needs its own package qualification. Windows distribution is deferred pending its separate manual check.
 
 For the published beta.4, choose the file matching your installation method:
 
@@ -12,17 +12,17 @@ For the published beta.4, choose the file matching your installation method:
 - `Cassette_0.1.0-beta.4_amd64.deb` is for the Ubuntu 24.04 package path.
 - `Cassette-0.1.0-beta.4-1.x86_64.rpm` is for the Fedora 44 package path.
 
-The unreleased beta.5 source adds local-calendar Stats periods, a daily play chart, complete period-filtered rankings, and portable listening-history export/import with a preview. It also adds artist/genre top-song lists and sortable full lists, persistent Songs search/sort, optional numbered Songs positions, player-bar artist/album links, and corrected Lyrics click behavior. See [beta.5 release notes](docs/RELEASE-NOTES-0.1.0-beta.5.md) for details and limitations. Lyrics editing is deferred. Cassette Teal remains the default user-selectable theme, alongside Glacier and Obsidian.
+The unreleased beta.5.1 source adds local-calendar Stats periods, a daily play chart, dedicated period-filtered ranking pages, and portable listening-history export/import in Settings. It also adds artist/genre top-song lists and sortable full lists, persistent Songs search/sort, optional numbered Songs positions, player-bar artist/album links, and corrected Lyrics click behavior. See [beta.5.1 release notes](docs/RELEASE-NOTES-0.1.0-beta.5.1.md) for details and limitations. Lyrics editing is deferred. Cassette Teal remains the default user-selectable theme, alongside Glacier and Obsidian.
 
 Modern UI work is reserved for a future release. This beta does not include a Modern/Legacy interface switch or promise the rejected Modern design. Experimental video and DVD functionality is disabled and unsupported in this beta; hidden backend code and tools such as `lsdvd`, `ffmpeg`, `ffprobe`, and `mpv` are not part of the beta runtime contract.
 
-The Linux beta formats are DEB, RPM, and AppImage. AppImage updates are signed and require explicit user confirmation. DEB and RPM stay under the system package manager: Cassette may notify those users about a newer version and open its GitHub release page, but it will not invoke `sudo`, `apt`, `dpkg`, `dnf`, or `rpm`, and it will not convert an installation to AppImage. Download a newer DEB or RPM from Releases and install it with APT or DNF; no automatic package repository is configured. Windows NSIS work remains available in CI but is not a beta.5 release asset. MSI is excluded because WiX/MSI cannot faithfully represent the authoritative `0.1.0-beta.5` prerelease identifier.
+The Linux beta formats are DEB, RPM, and AppImage. AppImage updates are signed and require explicit user confirmation. DEB and RPM stay under the system package manager: Cassette may notify those users about a newer version and open its GitHub release page, but it will not invoke `sudo`, `apt`, `dpkg`, `dnf`, or `rpm`, and it will not convert an installation to AppImage. Download a newer DEB or RPM from Releases and install it with APT or DNF; no automatic package repository is configured. Windows NSIS work remains available in CI but is not a beta.5.1 release asset. MSI is excluded because WiX/MSI cannot faithfully represent the authoritative `0.1.0-beta.5.1` prerelease identifier.
 
 The beta uses the stock Tauri desktop icons as an accepted known limitation. DEB and RPM packages are not repository-signed, and planned Windows installers remain unsigned; package managers or desktop security tools may warn about an unrecognized publisher. Tauri updater signatures are a separate mandatory verification layer for AppImage updates.
 
 ## Linux x86_64
 
-The AppImage is the recommended download. It can run without replacing a system package. The production updater public key and beta endpoint remain configured; updates are never forced, and development builds do not contact the update feed. The prepared beta.5 feed workflow accepts only the exact beta.5 prerelease; preparing source does not change the public feed.
+The AppImage is the recommended download. It can run without replacing a system package. The production updater public key and beta endpoint remain configured; updates are never forced, and development builds do not contact the update feed. The prepared beta.5.1 feed workflow accepts only the exact beta.5.1 prerelease; preparing source does not change the public feed.
 
 A clean Ubuntu 24.04 installation required the FUSE 2 compatibility library before the AppImage could mount and run:
 
@@ -60,7 +60,7 @@ Detailed play-history tracking begins when this database is first opened by a bu
 
 Play events are stored in UTC. Stats converts requested local calendar boundaries to UTC and queries a half-open interval (`start <= played_at_utc < end`). This keeps daylight-saving and timezone handling at the reporting boundary instead of permanently assigning a local date to an event. Undated legacy plays remain part of all-time totals only.
 
-The unreleased beta.5 source includes local-calendar Stats periods, a daily chart, and portable JSON history export/import. These are not part of the published beta.4 packages. See [listening-history accuracy and restore behavior](docs/LISTENING-HISTORY.md) for matching, legacy-total conflict handling, and isolated manual testing. Physical-device transfer and real-library restoration have not been manually tested.
+The unreleased beta.5.1 source includes local-calendar Stats periods, a daily chart, and portable JSON history export/import. These are not part of the published beta.4 packages. See [listening-history accuracy and restore behavior](docs/LISTENING-HISTORY.md) for matching, legacy-total conflict handling, and isolated manual testing. Physical-device transfer and real-library restoration have not been manually tested.
 
 Application binaries and user data are separate. A signed AppImage replacement, DEB/RPM update, or uninstall must not remove or replace the library database, settings, playlists, favorites, cached artwork, or other application data.
 
@@ -79,7 +79,7 @@ rm -r -- "${XDG_DATA_HOME:-$HOME/.local/share}/io.github.atilla.cassette"
 
 ## Windows 10/11 x86_64 (deferred)
 
-Windows installer work remains on a separate feature branch and is not part of the Linux beta.5 release plan. Its remaining manual loaded-track editing check must pass before Windows distribution. No Windows installer is planned among beta.5's four Linux assets. See [docs/GSTREAMER-WINDOWS.md](docs/GSTREAMER-WINDOWS.md) for development context; it is not a Windows installation guide.
+Windows installer work remains on a separate feature branch and is not part of the Linux beta.5.1 release plan. Its remaining manual loaded-track editing check must pass before Windows distribution. No Windows installer is planned among beta.5.1's four Linux assets. See [docs/GSTREAMER-WINDOWS.md](docs/GSTREAMER-WINDOWS.md) for development context; it is not a Windows installation guide.
 
 ## Tag editors
 
@@ -108,7 +108,7 @@ The 13 ignored real-media fixture tests are intentionally excluded from normal v
 
 Report beta problems through [Cassette GitHub Issues](https://github.com/atilla-m/cassette/issues). Include the operating system, package format, Cassette version, relevant GStreamer/runtime details, reproduction steps, and sanitized logs; do not attach private library databases or personal media.
 
-The active release process is documented in [docs/RELEASING-beta.5.md](docs/RELEASING-beta.5.md), with release-path and artifact-scanner details in [docs/ARTIFACT-SAFETY.md](docs/ARTIFACT-SAFETY.md). Earlier checklists remain historical evidence.
+The active release process is documented in [docs/RELEASING-beta.5.1.md](docs/RELEASING-beta.5.1.md), with release-path and artifact-scanner details in [docs/ARTIFACT-SAFETY.md](docs/ARTIFACT-SAFETY.md). Earlier checklists remain historical evidence.
 Updater security, signing-key custody, and beta-feed publication are documented in [docs/UPDATES.md](docs/UPDATES.md).
 
 Cassette is free software licensed under the [GNU General Public License version 3 or later](LICENSE) (`GPL-3.0-or-later`). The full license is included in application bundle resources.

@@ -1,6 +1,6 @@
 # Detailed listening statistics and portable history
 
-This feature is included in the unreleased beta.5 source, not in the published beta.4 packages. Lyrics editing and Windows release work remain separate.
+This feature is included in the unreleased beta.5.1 source, not in the published beta.4 packages. The beta.5 candidate is an unpublished draft. Lyrics editing and Windows release work remain separate.
 
 ## Periods and accuracy
 
@@ -14,7 +14,7 @@ Track, album, artist and genre rankings reuse current library grouping and genre
 
 ## Export and restore
 
-Use **Stats → Export listening history** or **Import listening history…**. Export always snapshots the entire database history, regardless of the displayed period. Version 1 JSON contains original event IDs, UTC timestamps, source coverage, portable track references and provenance-labelled undated baselines. It contains no audio, credentials or explicit absolute-path fields. Existing backup files are never overwritten. Original beta.3 legacy event IDs are opaque identifiers that historically encoded a path; preserving those IDs is necessary for deduplication. Treat backups as private listening-history data.
+Use **Settings → Portable listening history → Export listening history** or **Import listening history…**. Export always snapshots the entire database history, regardless of the displayed Stats period. Version 1 JSON contains original event IDs, UTC timestamps, source coverage, portable track references and provenance-labelled undated baselines. It contains no audio, credentials or explicit absolute-path fields. Existing backup files are never overwritten. Original beta.3 legacy event IDs are opaque identifiers that historically encoded a path; preserving those IDs is necessary for deduplication. Treat backups as private listening-history data.
 
 Portable matching uses a SHA-256 identity of encoded audio payload and codec properties, excluding editable tags. A copied or renamed file can match at a different folder path; database row IDs and titles alone cannot. Supported identity readers cover FLAC, MP3, Ogg/Vorbis, Opus, WAV and M4A/AAC. This is **not an acoustic fingerprint**: transcoded or re-encoded copies generally do not match. If identical audio occurs more than once, title/artist/album/track/disc metadata can disambiguate it; otherwise the preview reports ambiguity rather than guessing.
 

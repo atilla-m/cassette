@@ -1,4 +1,6 @@
-# Cassette 0.1.0-beta.5 Linux release checklist — unreleased
+# Cassette 0.1.0-beta.5 Linux release checklist — superseded unpublished draft
+
+Historical candidate: annotated tag `v0.1.0-beta.5` targets `aee8d1dbaeb7dbf32f073c706b1715c238d871ef`; signed workflow run `36548844581` produced draft release `399001604` with the four verified Linux assets. It was never published or deployed to the production feed. Preserve its tag, draft, and assets; [beta.5.1 is the active checklist](RELEASING-beta.5.1.md).
 
 This is the active beta.5 checklist. [Beta.4's checklist](RELEASING-beta.4.md), earlier release notes, and diagnostic results are historical evidence. The planned release is Linux x86_64 only: DEB, RPM, AppImage, and AppImage signature. Leave `feature/windows-beta4`, the stock icon, existing releases, and installed data untouched. Lyrics editing and Windows distribution are deferred.
 
