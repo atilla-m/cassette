@@ -1158,7 +1158,10 @@ async fn detect_dvd() -> Result<DvdDetectResult, String> {
     }
 
     #[cfg(not(target_os = "linux"))]
-    Err("DVD detection and import are available only on Linux in Cassette 0.1.0-beta.5.1.".to_owned())
+    Err(
+        "DVD detection and import are available only on Linux in Cassette 0.1.0-beta.5.1."
+            .to_owned(),
+    )
 }
 
 #[tauri::command]
@@ -1877,7 +1880,10 @@ async fn lookup_cd_metadata() -> Result<CdMetadataLookupResult, String> {
     }
 
     #[cfg(not(target_os = "linux"))]
-    Err("Audio CD metadata lookup is available only on Linux in Cassette 0.1.0-beta.5.1.".to_owned())
+    Err(
+        "Audio CD metadata lookup is available only on Linux in Cassette 0.1.0-beta.5.1."
+            .to_owned(),
+    )
 }
 
 #[tauri::command]
