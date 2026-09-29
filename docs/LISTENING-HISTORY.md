@@ -1,6 +1,6 @@
 # Detailed listening statistics and portable history
 
-This feature is development work on `feature/detailed-stats`, not a change to the published beta.4 packages. Lyrics editing and Windows release work remain separate.
+This feature is included in the unreleased beta.5 source, not in the published beta.4 packages. Lyrics editing and Windows release work remain separate.
 
 ## Periods and accuracy
 
