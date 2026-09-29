@@ -33,9 +33,16 @@ test("active release version sources remain synchronized", () => {
   assert.match(read("src-tauri/src/lib.rs"), new RegExp(`Cassette/${expectedVersion.replaceAll(".", "\\.")}`));
   assert.match(read("src/routes/+page.svelte"), new RegExp(expectedVersion.replaceAll(".", "\\.")));
   assert.match(read(`docs/RELEASE-NOTES-${expectedVersion}.md`), new RegExp(expectedVersion.replaceAll(".", "\\.")));
-  assert.match(read("docs/RELEASING-beta.5.1.md"), /unreleased/i);
+  assert.match(read("docs/RELEASING-beta.5.1.md"), /checklist — published/i);
   const readme = read("README.md");
-  assert.match(readme, /0\.1\.0-beta\.5\.1.*not released yet/i);
+  assert.match(readme, /0\.1\.0-beta\.5\.1.*current Linux x86_64 prerelease/i);
+  for (const currentDownload of [
+    "Cassette_0.1.0-beta.5.1_amd64.AppImage",
+    "Cassette_0.1.0-beta.5.1_amd64.deb",
+    "Cassette-0.1.0-beta.5.1-1.x86_64.rpm",
+  ]) {
+    assert.ok(readme.includes(currentDownload), `published beta.5.1 download is advertised: ${currentDownload}`);
+  }
   for (const historicalDownload of [
     "Cassette_0.1.0-beta.4_amd64.AppImage",
     "Cassette_0.1.0-beta.4_amd64.deb",

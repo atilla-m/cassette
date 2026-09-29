@@ -4,15 +4,17 @@ Cassette is a private, local-first desktop music library and player for Linux. I
 
 ## Beta status
 
-Cassette 0.1.0-beta.5.1 is being prepared for Linux x86_64 and is **not released yet**. The published [beta.4 release](https://github.com/atilla-m/cassette/releases/tag/v0.1.0-beta.4) remains the download for now. The signed beta.5 candidate remains an unpublished draft; beta.5.1 includes a final Stats layout change and needs its own package qualification. Windows distribution is deferred pending its separate manual check.
+Cassette [0.1.0-beta.5.1](https://github.com/atilla-m/cassette/releases/tag/v0.1.0-beta.5.1) is the current Linux x86_64 prerelease. Windows distribution is deferred pending its separate manual check.
 
-For the published beta.4, choose the file matching your installation method:
+Choose the beta.5.1 file matching your installation method:
 
-- `Cassette_0.1.0-beta.4_amd64.AppImage` is the portable, signed AppImage and the recommended download.
-- `Cassette_0.1.0-beta.4_amd64.deb` is for the Ubuntu 24.04 package path.
-- `Cassette-0.1.0-beta.4-1.x86_64.rpm` is for the Fedora 44 package path.
+- `Cassette_0.1.0-beta.5.1_amd64.AppImage` is the portable, signed AppImage and the recommended download.
+- `Cassette_0.1.0-beta.5.1_amd64.deb` is for the Ubuntu 24.04 package path.
+- `Cassette-0.1.0-beta.5.1-1.x86_64.rpm` is for the Fedora package path.
 
-The unreleased beta.5.1 source adds local-calendar Stats periods, a daily play chart, dedicated period-filtered ranking pages, and portable listening-history export/import in Settings. It also adds artist/genre top-song lists and sortable full lists, persistent Songs search/sort, optional numbered Songs positions, player-bar artist/album links, and corrected Lyrics click behavior. See [beta.5.1 release notes](docs/RELEASE-NOTES-0.1.0-beta.5.1.md) for details and limitations. Lyrics editing is deferred. Cassette Teal remains the default user-selectable theme, alongside Glacier and Obsidian.
+The previous [beta.4 release](https://github.com/atilla-m/cassette/releases/tag/v0.1.0-beta.4) remains available with `Cassette_0.1.0-beta.4_amd64.AppImage`, `Cassette_0.1.0-beta.4_amd64.deb`, and `Cassette-0.1.0-beta.4-1.x86_64.rpm`; the beta.5 candidate remains an unpublished draft.
+
+Beta.5.1 adds local-calendar Stats periods, a daily play chart, dedicated period-filtered ranking pages, and portable listening-history export/import in Settings. It also adds artist/genre top-song lists and sortable full lists, persistent Songs search/sort, optional numbered Songs positions, player-bar artist/album links, and corrected Lyrics click behavior. See [beta.5.1 release notes](docs/RELEASE-NOTES-0.1.0-beta.5.1.md) for details and limitations. Lyrics editing is deferred. Cassette Teal remains the default user-selectable theme, alongside Glacier and Obsidian.
 
 Modern UI work is reserved for a future release. This beta does not include a Modern/Legacy interface switch or promise the rejected Modern design. Experimental video and DVD functionality is disabled and unsupported in this beta; hidden backend code and tools such as `lsdvd`, `ffmpeg`, `ffprobe`, and `mpv` are not part of the beta runtime contract.
 
@@ -22,7 +24,7 @@ The beta uses the stock Tauri desktop icons as an accepted known limitation. DEB
 
 ## Linux x86_64
 
-The AppImage is the recommended download. It can run without replacing a system package. The production updater public key and beta endpoint remain configured; updates are never forced, and development builds do not contact the update feed. The prepared beta.5.1 feed workflow accepts only the exact beta.5.1 prerelease; preparing source does not change the public feed.
+The AppImage is the recommended download. It can run without replacing a system package. The production updater public key and beta endpoint remain configured; updates are never forced, and development builds do not contact the update feed. The [production beta feed](https://atilla-m.github.io/cassette/updates/beta/latest.json) now serves the signed beta.5.1 AppImage.
 
 A clean Ubuntu 24.04 installation required the FUSE 2 compatibility library before the AppImage could mount and run:
 
@@ -60,7 +62,7 @@ Detailed play-history tracking begins when this database is first opened by a bu
 
 Play events are stored in UTC. Stats converts requested local calendar boundaries to UTC and queries a half-open interval (`start <= played_at_utc < end`). This keeps daylight-saving and timezone handling at the reporting boundary instead of permanently assigning a local date to an event. Undated legacy plays remain part of all-time totals only.
 
-The unreleased beta.5.1 source includes local-calendar Stats periods, a daily chart, and portable JSON history export/import. These are not part of the published beta.4 packages. See [listening-history accuracy and restore behavior](docs/LISTENING-HISTORY.md) for matching, legacy-total conflict handling, and isolated manual testing. Physical-device transfer and real-library restoration have not been manually tested.
+Beta.5.1 includes local-calendar Stats periods, a daily chart, and portable JSON history export/import. See [listening-history accuracy and restore behavior](docs/LISTENING-HISTORY.md) for matching, legacy-total conflict handling, and isolated manual testing. Physical-device transfer and real-library restoration have not been manually tested.
 
 Application binaries and user data are separate. A signed AppImage replacement, DEB/RPM update, or uninstall must not remove or replace the library database, settings, playlists, favorites, cached artwork, or other application data.
 
@@ -79,7 +81,7 @@ rm -r -- "${XDG_DATA_HOME:-$HOME/.local/share}/io.github.atilla.cassette"
 
 ## Windows 10/11 x86_64 (deferred)
 
-Windows installer work remains on a separate feature branch and is not part of the Linux beta.5.1 release plan. Its remaining manual loaded-track editing check must pass before Windows distribution. No Windows installer is planned among beta.5.1's four Linux assets. See [docs/GSTREAMER-WINDOWS.md](docs/GSTREAMER-WINDOWS.md) for development context; it is not a Windows installation guide.
+Windows installer work remains on a separate feature branch and is not part of the Linux beta.5.1 release. Its remaining manual loaded-track editing check must pass before Windows distribution. No Windows installer is among beta.5.1's four Linux assets. See [docs/GSTREAMER-WINDOWS.md](docs/GSTREAMER-WINDOWS.md) for development context; it is not a Windows installation guide.
 
 ## Tag editors
 
