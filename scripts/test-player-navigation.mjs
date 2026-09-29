@@ -147,3 +147,19 @@ test("Songs list positions follow the displayed order and have a persistent visi
   assert.match(list.source, /List position \$\{index \+ 1\}/);
   assert.match(list.source, /String\(index \+ 1\)\.padStart\(2, "0"\)/);
 });
+
+test("Stats rankings open dedicated history-aware pages while listening-history transfer lives in Settings", () => {
+  const page = template("../src/routes/+page.svelte");
+  const sections = ["tracks", "artists", "albums", "genres", "recent"];
+  const rankSections = page.elements.filter(({ node }) => node.name === "LibrarySection"
+    && sections.some((section) => expression(page.source, node, "onViewAll")?.includes(`openStatsSection("${section}")`)));
+  assert.equal(rankSections.length, sections.length);
+  assert.ok(rankSections.every(({ node }) => expression(page.source, node, "onViewAll")?.includes("!statsDetailSection")));
+  assert.match(page.source, /statsDetailSection: activeView === "Stats" \? statsDetailSection : null/);
+  assert.match(page.source, /statsDetailSection = location\.statsDetailSection/);
+  assert.match(page.source, /statsSectionExpanded\(section: StatsSectionId\) \{\s*return statsDetailSection === section/);
+  assert.ok(page.elements.some(({ node }) => node.name === "button" && expression(page.source, node, "onclick") === "closeStatsSection"));
+  const transfer = page.elements.filter(({ node }) => hasClass(node, "stats-transfer-panel"));
+  assert.equal(transfer.length, 1);
+  assert.ok(transfer[0].ancestors.some((node) => node.type === "IfBlock" && page.source.slice(node.test.start, node.test.end) === 'activeView === "Settings"'));
+});

@@ -211,6 +211,7 @@
     | { view: "Genres"; genreName: string };
   type ViewLocation = {
     view: string;
+    statsDetailSection: StatsSectionId | null;
     albumId: string | null;
     albumOrigin: AlbumNavigationOrigin;
     artistName: string | null;
@@ -568,6 +569,7 @@
   let playbackStartId = 0;
   let mainElement: HTMLElement | undefined = $state();
   let activeView = $state("Albums");
+  let statsDetailSection = $state<StatsSectionId | null>(null);
   let selectedAlbumId = $state<string | null>(null);
   let albumNavigationOrigin = $state<AlbumNavigationOrigin>({ view: "Albums" });
   let selectedArtistName = $state<string | null>(null);
@@ -576,7 +578,7 @@
   let detailSongsView = $state<"artist" | "genre" | null>(null);
   let viewHistory = $state<ViewHistory<ViewLocation>>({
     entries: [{
-      view: "Albums", albumId: null, albumOrigin: { view: "Albums" },
+      view: "Albums", statsDetailSection: null, albumId: null, albumOrigin: { view: "Albums" },
       artistName: null, artistOrigin: { view: "Artists" }, genreName: null,
       detailSongsView: null,
       playlistId: null, likedSongs: false, mixBuilder: false, libraryHealth: false, videoId: null,
@@ -621,7 +623,6 @@
   let showGenrePlayCounts = $state(true);
   let showAlbumTrackPlayCounts = $state(true);
   let showSongListNumbers = $state(true);
-  let expandedStatsSections = $state<StatsSectionId[]>([]);
   let statsVisibleLimits = $state<Record<StatsSectionId, number>>({
     tracks: STATS_PAGE_SIZE,
     artists: STATS_PAGE_SIZE,
@@ -752,6 +753,9 @@
   let statsTopArtists = $derived(visibleStatsItems(allStatsTopArtists, statsSectionExpanded("artists"), statsVisibleLimits.artists, STATS_PREVIEW_LIMITS.artists));
   let statsTopAlbums = $derived(visibleStatsItems(allStatsTopAlbums, statsSectionExpanded("albums"), statsVisibleLimits.albums, STATS_PREVIEW_LIMITS.albums));
   let statsTopGenres = $derived(visibleStatsItems(allStatsTopGenres, statsSectionExpanded("genres"), statsVisibleLimits.genres, STATS_PREVIEW_LIMITS.genres));
+  const STATS_SECTION_TITLES: Record<StatsSectionId, string> = {
+    tracks: "Top Tracks", artists: "Top Artists", albums: "Top Albums", genres: "Top Genres", recent: "Recently Played",
+  };
   let statsTotalPlays = $derived(statsSnapshot?.totalPlays ?? (statsPeriod === "all" ? tracks.reduce((total, track) => total + track.playCount, 0) : 0));
   let statsDistinctTracks = $derived(periodTracks.filter((track) => track.playCount > 0).length);
   let statsDistinctArtists = $derived(new Set(periodTracks.filter((track) => track.playCount > 0)
@@ -4044,6 +4048,7 @@
 
     void saveActiveVideoProgress(true);
     activeView = targetView;
+    statsDetailSection = null;
     selectedAlbumId = null;
     albumNavigationOrigin = { view: "Albums" };
     selectedArtistName = null;
@@ -4066,6 +4071,7 @@
   function currentViewLocation(): ViewLocation {
     return {
       view: activeView,
+      statsDetailSection: activeView === "Stats" ? statsDetailSection : null,
       albumId: selectedAlbumId,
       albumOrigin: albumNavigationOrigin,
       artistName: selectedArtistName,
@@ -4092,6 +4098,7 @@
     const location = nextHistory.entries[nextHistory.index];
     void saveActiveVideoProgress(true);
     activeView = location.view;
+    statsDetailSection = location.statsDetailSection;
     selectedAlbumId = location.albumId;
     albumNavigationOrigin = location.albumOrigin;
     selectedArtistName = location.artistName;
@@ -6472,18 +6479,18 @@
   }
 
   function statsSectionExpanded(section: StatsSectionId) {
-    return expandedStatsSections.includes(section);
+    return statsDetailSection === section;
   }
 
-  function toggleStatsSection(section: StatsSectionId) {
-    if (statsSectionExpanded(section)) {
-      expandedStatsSections = expandedStatsSections.filter((value) => value !== section);
-      statsVisibleLimits[section] = STATS_PAGE_SIZE;
-      return;
-    }
-
-    expandedStatsSections = [...expandedStatsSections, section];
+  function openStatsSection(section: StatsSectionId) {
+    statsDetailSection = section;
     statsVisibleLimits[section] = STATS_PAGE_SIZE;
+    mainElement?.scrollTo({ top: 0 });
+  }
+
+  function closeStatsSection() {
+    statsDetailSection = null;
+    mainElement?.scrollTo({ top: 0 });
   }
 
   function loadMoreStats(section: StatsSectionId, total: number) {
@@ -6492,7 +6499,7 @@
 
   function statsViewAllLabel(section: StatsSectionId, total: number) {
     if (statsSectionExpanded(section)) {
-      return "Show less";
+      return `${total} total`;
     }
 
     if (total > STATS_PREVIEW_LIMITS[section]) {
@@ -6500,6 +6507,16 @@
     }
 
     return section === "recent" ? "Most recent" : statsPeriod === "all" ? "All time" : "Selected period";
+  }
+
+  function statsSectionTotal(section: StatsSectionId) {
+    switch (section) {
+      case "tracks": return allStatsTopTracks.length;
+      case "artists": return allStatsTopArtists.length;
+      case "albums": return allStatsTopAlbums.length;
+      case "genres": return allStatsTopGenres.length;
+      case "recent": return allStatsRecentlyPlayedTracks.length;
+    }
   }
 
   function hasMoreStats(section: StatsSectionId, total: number) {
@@ -6856,6 +6873,10 @@
       return currentTrack ? currentTrack.title : "Current Track";
     }
 
+    if (activeView === "Stats" && statsDetailSection) {
+      return STATS_SECTION_TITLES[statsDetailSection];
+    }
+
     return activeView;
   }
 
@@ -6897,6 +6918,9 @@
     }
 
     if (activeView === "Stats") {
+      if (statsDetailSection) {
+        return `${statsViewAllLabel(statsDetailSection, statsSectionTotal(statsDetailSection))} · ${statsPeriod === "all" ? "All time" : "Selected listening period"}`;
+      }
       return `${playsLabel(statsTotalPlays)} across ${tracks.length} ${tracks.length === 1 ? "track" : "tracks"}.`;
     }
 
@@ -7321,6 +7345,11 @@
         </section>
       {:else if activeView === "Stats"}
         <section class="stats-page" aria-label="Listening and library statistics">
+          {#if statsDetailSection}
+            <button class="back-button stats-back-button" type="button" onclick={closeStatsSection}>Back to Stats</button>
+            {#if statsError}<p class="stats-status" role="alert">{statsError}</p>{/if}
+            {#if statsLoading}<p class="stats-status" aria-live="polite">Loading listening statistics…</p>{/if}
+          {:else}
           <div class="stats-period-toolbar">
             <label for="stats-period">Listening period</label>
             <select id="stats-period" bind:value={statsPeriod} onchange={() => { statsClock = Date.now(); }}>
@@ -7438,56 +7467,13 @@
               <p class="stats-coverage-note">No dated plays in this chart period.</p>
             {/if}
           </section>
+          {/if}
 
-          <section class="stats-transfer-panel" aria-labelledby="history-transfer-title">
-            <h2 id="history-transfer-title">Portable listening history</h2>
-            <p>Export always includes your full history, regardless of the period selected above. Backups contain no audio files or explicit music-folder paths. Original event IDs are retained. Import previews matches, duplicates and conflicts before changing data.</p>
-            <div class="stats-transfer-actions">
-              <button type="button" disabled={historyBusy} onclick={() => void handleExportListeningHistory()}>Export listening history</button>
-              <button type="button" disabled={historyBusy} onclick={() => void handlePreviewListeningHistory()}>Import listening history…</button>
-            </div>
-            {#if historyBusy}<p role="status" class="stats-status">Preparing listening history… Verifying audio identities can take a while for a large library.</p>{/if}
-            {#if historyError}<p role="alert" class="stats-status">{historyError}</p>{/if}
-            {#if historyMessage}<p role="status" class="stats-status">{historyMessage}</p>{/if}
-            {#if historyImportPreview}
-              <div class="stats-import-preview">
-                <h3>Import preview</h3>
-                <p>{historyImportPreview.matchedTracks} matched · {historyImportPreview.unmatchedTracks} unmatched · {historyImportPreview.ambiguousTracks} ambiguous tracks</p>
-                <p>{historyImportPreview.newEvents} new · {historyImportPreview.duplicateEvents} duplicate dated events · {historyImportPreview.undatedPlays} source undated plays</p>
-                {#if historyImportPreview.conflicts.length > 0}
-                  <ul>{#each historyImportPreview.conflicts as conflict}<li>{conflict}</li>{/each}</ul>
-                {/if}
-                <div class="stats-import-tracks">
-                  {#each historyImportPreview.tracks.slice(0, historyPreviewLimit) as item (item.referenceId)}
-                    <div class="stats-import-track">
-                      <strong>{item.title}</strong><span>{item.artist ?? "Unknown Artist"} · {item.status} · {item.newEvents} new / {item.duplicateEvents} duplicate events</span>
-                      {#if item.conflict}<small>{item.conflict}</small>{/if}
-                      {#if item.status === "ambiguous" && item.candidates.length > 0}
-                        <label for={`associate-${item.referenceId}`}>Associate audio-identical track</label>
-                        <select id={`associate-${item.referenceId}`} value={historyAssociationTargets[item.pendingTrackId] ?? ""} onchange={(event) => { historyAssociationTargets[item.pendingTrackId] = event.currentTarget.value; }}>
-                          <option value="">Choose a track</option>
-                          {#each item.candidates as candidate}<option value={candidate}>{tracks.find((track) => track.id === candidate)?.title ?? candidate}</option>{/each}
-                        </select>
-                        <button type="button" disabled={historyBusy || !item.retained || !historyAssociationTargets[item.pendingTrackId]} onclick={() => void handleAssociateListeningHistory(item.pendingTrackId)}>Associate retained history</button>
-                        {#if !item.retained}<small>Import first to retain this history, then choose an audio-identical track.</small>{/if}
-                      {/if}
-                    </div>
-                  {/each}
-                </div>
-                {#if historyPreviewLimit < historyImportPreview.tracks.length}
-                  <button type="button" onclick={() => { historyPreviewLimit = nextStatsLimit(historyPreviewLimit, historyImportPreview?.tracks.length ?? 0); }}>Show 50 more track references</button>
-                {/if}
-                <p>Showing {Math.min(historyPreviewLimit, historyImportPreview.tracks.length)} of {historyImportPreview.tracks.length} track references. All references are included when importing.</p>
-                <button type="button" disabled={historyBusy || historyImportPreview.conflicts.length > 0} onclick={() => void handleApplyListeningHistory()}>Import new history</button>
-                <button type="button" disabled={historyBusy} onclick={() => { historyImportPreview = null; historyImportPath = null; }}>Cancel preview</button>
-              </div>
-            {/if}
-          </section>
-
+          {#if !statsDetailSection || statsDetailSection === "tracks"}
           <LibrarySection
             title="Top Tracks"
             viewAllLabel={statsViewAllLabel("tracks", allStatsTopTracks.length)}
-            onViewAll={allStatsTopTracks.length > STATS_PREVIEW_LIMITS.tracks ? () => toggleStatsSection("tracks") : undefined}
+            onViewAll={!statsDetailSection && allStatsTopTracks.length > STATS_PREVIEW_LIMITS.tracks ? () => openStatsSection("tracks") : undefined}
           >
             {#if statsTopTracks.length === 0}
               <div class="group-empty">
@@ -7516,12 +7502,15 @@
               {/if}
             {/if}
           </LibrarySection>
+          {/if}
 
-          <div class="stats-section-grid">
+          {#if statsDetailSection !== "tracks"}
+          <div class="stats-section-grid" class:full-list={statsDetailSection !== null}>
+            {#if !statsDetailSection || statsDetailSection === "artists"}
             <LibrarySection
               title="Top Artists"
               viewAllLabel={statsViewAllLabel("artists", allStatsTopArtists.length)}
-              onViewAll={allStatsTopArtists.length > STATS_PREVIEW_LIMITS.artists ? () => toggleStatsSection("artists") : undefined}
+              onViewAll={!statsDetailSection && allStatsTopArtists.length > STATS_PREVIEW_LIMITS.artists ? () => openStatsSection("artists") : undefined}
             >
               {#if statsTopArtists.length === 0}
                 <div class="group-empty compact">
@@ -7553,11 +7542,13 @@
                 {/if}
               {/if}
             </LibrarySection>
+            {/if}
 
+            {#if !statsDetailSection || statsDetailSection === "albums"}
             <LibrarySection
               title="Top Albums"
               viewAllLabel={statsViewAllLabel("albums", allStatsTopAlbums.length)}
-              onViewAll={allStatsTopAlbums.length > STATS_PREVIEW_LIMITS.albums ? () => toggleStatsSection("albums") : undefined}
+              onViewAll={!statsDetailSection && allStatsTopAlbums.length > STATS_PREVIEW_LIMITS.albums ? () => openStatsSection("albums") : undefined}
             >
               {#if statsTopAlbums.length === 0}
                 <div class="group-empty compact">
@@ -7598,11 +7589,13 @@
                 {/if}
               {/if}
             </LibrarySection>
+            {/if}
 
+            {#if !statsDetailSection || statsDetailSection === "genres"}
             <LibrarySection
               title="Top Genres"
               viewAllLabel={statsViewAllLabel("genres", allStatsTopGenres.length)}
-              onViewAll={allStatsTopGenres.length > STATS_PREVIEW_LIMITS.genres ? () => toggleStatsSection("genres") : undefined}
+              onViewAll={!statsDetailSection && allStatsTopGenres.length > STATS_PREVIEW_LIMITS.genres ? () => openStatsSection("genres") : undefined}
             >
               {#if statsTopGenres.length === 0}
                 <div class="group-empty compact">
@@ -7634,11 +7627,13 @@
                 {/if}
               {/if}
             </LibrarySection>
+            {/if}
 
+            {#if !statsDetailSection || statsDetailSection === "recent"}
             <LibrarySection
               title="Recently Played"
               viewAllLabel={statsViewAllLabel("recent", allStatsRecentlyPlayedTracks.length)}
-              onViewAll={allStatsRecentlyPlayedTracks.length > STATS_PREVIEW_LIMITS.recent ? () => toggleStatsSection("recent") : undefined}
+              onViewAll={!statsDetailSection && allStatsRecentlyPlayedTracks.length > STATS_PREVIEW_LIMITS.recent ? () => openStatsSection("recent") : undefined}
             >
               {#if statsRecentlyPlayedTracks.length === 0}
                 <div class="group-empty compact">
@@ -7690,7 +7685,9 @@
                 {/if}
               {/if}
             </LibrarySection>
+            {/if}
           </div>
+          {/if}
         </section>
       {:else if activeView === "Albums"}
         {#if selectedAlbum}
@@ -9707,6 +9704,56 @@
                   <span>Coming later</span>
                 </button>
               </div>
+            </section>
+
+            <section class="settings-section stats-transfer-panel" aria-labelledby="history-transfer-title">
+              <div class="settings-section-header">
+                <div>
+                  <p class="eyebrow">Listening data</p>
+                  <h4 id="history-transfer-title">Portable listening history</h4>
+                </div>
+              </div>
+              <p>Export includes your full history, regardless of the period selected in Stats. Backups contain no audio files or explicit music-folder paths. Original event IDs are retained. Import previews matches, duplicates and conflicts before changing data.</p>
+              <div class="stats-transfer-actions">
+                <button type="button" disabled={historyBusy} onclick={() => void handleExportListeningHistory()}>Export listening history</button>
+                <button type="button" disabled={historyBusy} onclick={() => void handlePreviewListeningHistory()}>Import listening history…</button>
+              </div>
+              {#if historyBusy}<p role="status" class="stats-status">Preparing listening history… Verifying audio identities can take a while for a large library.</p>{/if}
+              {#if historyError}<p role="alert" class="stats-status">{historyError}</p>{/if}
+              {#if historyMessage}<p role="status" class="stats-status">{historyMessage}</p>{/if}
+              {#if historyImportPreview}
+                <div class="stats-import-preview">
+                  <h5>Import preview</h5>
+                  <p>{historyImportPreview.matchedTracks} matched · {historyImportPreview.unmatchedTracks} unmatched · {historyImportPreview.ambiguousTracks} ambiguous tracks</p>
+                  <p>{historyImportPreview.newEvents} new · {historyImportPreview.duplicateEvents} duplicate dated events · {historyImportPreview.undatedPlays} source undated plays</p>
+                  {#if historyImportPreview.conflicts.length > 0}
+                    <ul>{#each historyImportPreview.conflicts as conflict}<li>{conflict}</li>{/each}</ul>
+                  {/if}
+                  <div class="stats-import-tracks">
+                    {#each historyImportPreview.tracks.slice(0, historyPreviewLimit) as item (item.referenceId)}
+                      <div class="stats-import-track">
+                        <strong>{item.title}</strong><span>{item.artist ?? "Unknown Artist"} · {item.status} · {item.newEvents} new / {item.duplicateEvents} duplicate events</span>
+                        {#if item.conflict}<small>{item.conflict}</small>{/if}
+                        {#if item.status === "ambiguous" && item.candidates.length > 0}
+                          <label for={`associate-${item.referenceId}`}>Associate audio-identical track</label>
+                          <select id={`associate-${item.referenceId}`} value={historyAssociationTargets[item.pendingTrackId] ?? ""} onchange={(event) => { historyAssociationTargets[item.pendingTrackId] = event.currentTarget.value; }}>
+                            <option value="">Choose a track</option>
+                            {#each item.candidates as candidate}<option value={candidate}>{tracks.find((track) => track.id === candidate)?.title ?? candidate}</option>{/each}
+                          </select>
+                          <button type="button" disabled={historyBusy || !item.retained || !historyAssociationTargets[item.pendingTrackId]} onclick={() => void handleAssociateListeningHistory(item.pendingTrackId)}>Associate retained history</button>
+                          {#if !item.retained}<small>Import first to retain this history, then choose an audio-identical track.</small>{/if}
+                        {/if}
+                      </div>
+                    {/each}
+                  </div>
+                  {#if historyPreviewLimit < historyImportPreview.tracks.length}
+                    <button type="button" onclick={() => { historyPreviewLimit = nextStatsLimit(historyPreviewLimit, historyImportPreview?.tracks.length ?? 0); }}>Show 50 more track references</button>
+                  {/if}
+                  <p>Showing {Math.min(historyPreviewLimit, historyImportPreview.tracks.length)} of {historyImportPreview.tracks.length} track references. All references are included when importing.</p>
+                  <button type="button" disabled={historyBusy || historyImportPreview.conflicts.length > 0} onclick={() => void handleApplyListeningHistory()}>Import new history</button>
+                  <button type="button" disabled={historyBusy} onclick={() => { historyImportPreview = null; historyImportPath = null; }}>Cancel preview</button>
+                </div>
+              {/if}
             </section>
 
             <section class="settings-section" aria-labelledby="settings-playback-title">
@@ -14321,8 +14368,7 @@
     padding: 16px;
   }
 
-  .stats-chart-panel h2,
-  .stats-transfer-panel h2 {
+  .stats-chart-panel h2 {
     margin: 0 0 12px;
     font-size: 1rem;
   }
@@ -14389,7 +14435,7 @@
     padding-top: 12px;
   }
 
-  .stats-import-preview h3 { margin: 0; }
+  .stats-import-preview h5 { margin: 0; font-size: 1rem; }
   .stats-import-tracks { max-height: 280px; overflow-y: auto; }
   .stats-import-track {
     border: 1px solid var(--border);
@@ -14447,6 +14493,14 @@
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 22px;
+  }
+
+  .stats-section-grid.full-list {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .stats-back-button {
+    justify-self: start;
   }
 
   .stats-section-grid :global(.library-section) {
