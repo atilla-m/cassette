@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { Track } from "$lib/types/library";
+  import AppIcon from "$lib/components/AppIcon.svelte";
   import { localImageSource } from "$lib/utils/localImage";
   import { onDestroy } from "svelte";
 
@@ -17,7 +18,7 @@
     isQueueOpen?: boolean;
     isShuffleEnabled?: boolean;
     repeatMode?: RepeatMode;
-    compact?: boolean;
+    isLyricsView?: boolean;
     onTogglePlayback?: () => void;
     onPrevious?: () => void;
     onNext?: () => void;
@@ -44,7 +45,7 @@
     isQueueOpen = false,
     isShuffleEnabled = false,
     repeatMode = "off",
-    compact = false,
+    isLyricsView = false,
     onTogglePlayback,
     onPrevious,
     onNext,
@@ -268,18 +269,6 @@
     return queueCount > 0 ? `Queue · ${queueCount}` : "Queue";
   }
 
-  function repeatLabel() {
-    if (repeatMode === "all") {
-      return "Repeat All";
-    }
-
-    if (repeatMode === "one") {
-      return "Repeat 1";
-    }
-
-    return "Repeat";
-  }
-
   function repeatAriaLabel() {
     if (repeatMode === "all") {
       return "Repeat all is on";
@@ -305,41 +294,39 @@
   }
 </script>
 
-<footer class:compact class="player" aria-label="Now playing">
+<footer class="player" aria-label="Now playing">
   <div class="track">
-    {#if !compact}
-      <span class="cover" aria-hidden="true">
-        {#if coverArtSrc}
-          <img src={coverArtSrc} alt="" onload={showLoadedImage} onerror={hideBrokenImage} />
-        {/if}
-      </span>
-      <div class="track-copy">
-        <span class="track-title">{track?.title ?? "No track selected"}</span>
-        <div class="track-meta">
-          {#if track}
+    <span class="cover" aria-hidden="true">
+      {#if coverArtSrc}
+        <img src={coverArtSrc} alt="" onload={showLoadedImage} onerror={hideBrokenImage} />
+      {/if}
+    </span>
+    <div class="track-copy">
+      <span class="track-title" title={track?.title ?? "No track selected"}>{track?.title ?? "No track selected"}</span>
+      <div class="track-meta">
+        {#if track}
+          <button
+            class="track-link"
+            type="button"
+            title={displayArtist(track)}
+            aria-label={`Go to artist: ${displayArtist(track)}`}
+            onclick={() => { if (track) onArtistSelect?.(track); }}
+          >{displayArtist(track)}</button>
+          {#if track.album}
+            <span aria-hidden="true">·</span>
             <button
               class="track-link"
               type="button"
-              title={displayArtist(track)}
-              aria-label={`Go to artist: ${displayArtist(track)}`}
-              onclick={() => { if (track) onArtistSelect?.(track); }}
-            >{displayArtist(track)}</button>
-            {#if track.album}
-              <span aria-hidden="true">·</span>
-              <button
-                class="track-link"
-                type="button"
-                title={track.album}
-                aria-label={`Go to album: ${track.album}`}
-                onclick={() => { if (track) onAlbumSelect?.(track); }}
-              >{track.album}</button>
-            {/if}
-          {:else}
-            <span>{displayArtist(track)}</span>
+              title={track.album}
+              aria-label={`Go to album: ${track.album}`}
+              onclick={() => { if (track) onAlbumSelect?.(track); }}
+            >{track.album}</button>
           {/if}
-        </div>
+        {:else}
+          <span>{displayArtist(track)}</span>
+        {/if}
       </div>
-    {/if}
+    </div>
     <button
       class:active={track?.isFavorite}
       class="favorite"
@@ -358,31 +345,36 @@
       class="mode-button"
       type="button"
       aria-label={isShuffleEnabled ? "Shuffle is on" : "Shuffle is off"}
+      aria-pressed={isShuffleEnabled}
+      title={isShuffleEnabled ? "Shuffle on" : "Shuffle off"}
       disabled={!track}
       onclick={onToggleShuffle}
     >
-      Shuffle
+      <AppIcon name="shuffle" />
     </button>
-    <button type="button" aria-label="Previous track" disabled={!canPlayPrevious} onclick={onPrevious}>&lt;&lt;</button>
+    <button type="button" aria-label="Previous track" title="Previous track" disabled={!canPlayPrevious} onclick={onPrevious}><AppIcon name="previous" /></button>
     <button
       class="play"
       type="button"
       aria-label={isPlaying ? "Pause" : "Play"}
+      title={isPlaying ? "Pause" : "Play"}
       disabled={!track}
       onclick={onTogglePlayback}
     >
-      {isPlaying ? "||" : ">"}
+      <AppIcon name={isPlaying ? "pause" : "play"} size={20} />
     </button>
-    <button type="button" aria-label="Next track" disabled={!canPlayNext} onclick={onNext}>&gt;&gt;</button>
+    <button type="button" aria-label="Next track" title="Next track" disabled={!canPlayNext} onclick={onNext}><AppIcon name="next" /></button>
     <button
       class:active={repeatMode !== "off"}
       class="mode-button"
       type="button"
       aria-label={repeatAriaLabel()}
+      aria-pressed={repeatMode !== "off"}
+      title={repeatAriaLabel()}
       disabled={!track}
       onclick={onToggleRepeat}
     >
-      {repeatLabel()}
+      <AppIcon name={repeatMode === "one" ? "repeat-one" : "repeat"} />
     </button>
   </div>
 
@@ -409,17 +401,16 @@
   </div>
 
   <div class="volume" aria-label="Volume">
-    {#if !compact}
-      <button
-        class="lyrics-button"
-        type="button"
-        aria-label="Open lyrics"
-        disabled={!track}
-        onclick={onOpenLyrics}
-      >
-        Lyrics
-      </button>
-    {/if}
+    <button
+      class:active={isLyricsView}
+      class="lyrics-button"
+      type="button"
+      aria-label={isLyricsView ? "Close lyrics" : "Open lyrics"}
+      aria-pressed={isLyricsView}
+      title={isLyricsView ? "Close lyrics" : "Open lyrics"}
+      disabled={!track}
+      onclick={onOpenLyrics}
+    >Lyrics</button>
     <button
       class:active={isQueueOpen}
       class="queue-button"
@@ -458,25 +449,11 @@
     background: var(--panel);
   }
 
-  .player.compact {
-    grid-template-columns: auto auto minmax(260px, min(42vw, 620px)) auto;
-    justify-content: center;
-    gap: 14px;
-    min-height: 64px;
-    padding: 10px 22px;
-    border-top-color: rgba(255, 255, 255, 0.06);
-    background: color-mix(in srgb, var(--bg) 90%, transparent);
-  }
-
   .track {
     display: flex;
     align-items: center;
     gap: 12px;
     min-width: 0;
-  }
-
-  .player.compact .track {
-    width: 34px;
   }
 
   .cover {
@@ -572,10 +549,6 @@
     gap: 8px;
   }
 
-  .player.compact .transport {
-    gap: 7px;
-  }
-
   button.favorite {
     width: 34px;
     height: 34px;
@@ -584,11 +557,6 @@
     background: var(--panel-strong);
     color: var(--text-soft);
     font-size: 0.95rem;
-  }
-
-  .player.compact button.favorite {
-    width: 34px;
-    height: 34px;
   }
 
   button.favorite:hover,
@@ -615,6 +583,7 @@
 
   button.lyrics-button:hover,
   button.lyrics-button:focus-visible,
+  button.lyrics-button.active,
   button.queue-button.active,
   button.queue-button:hover,
   button.queue-button:focus-visible {
@@ -625,10 +594,7 @@
   }
 
   button.mode-button {
-    width: auto;
-    min-width: 64px;
-    padding: 0 10px;
-    white-space: nowrap;
+    width: 38px;
   }
 
   button.mode-button.active,
@@ -655,13 +621,6 @@
     cursor: default;
   }
 
-  .player.compact button {
-    height: 34px;
-    border-color: rgba(58, 68, 82, 0.76);
-    background: color-mix(in srgb, var(--panel-strong) 78%, transparent);
-    font-size: 0.74rem;
-  }
-
   button:disabled {
     color: var(--text-dim);
     background: var(--panel-soft);
@@ -673,15 +632,6 @@
     border-color: var(--accent);
     background: var(--accent);
     color: var(--accent-contrast);
-  }
-
-  .player.compact button.play {
-    width: 40px;
-    height: 40px;
-    border-color: var(--accent);
-    background: var(--accent);
-    color: var(--accent-contrast);
-    box-shadow: 0 0 24px color-mix(in srgb, var(--accent) 18%, transparent);
   }
 
   button.play:disabled {
@@ -696,29 +646,6 @@
     align-items: center;
     gap: 10px;
     min-width: 0;
-  }
-
-  .player.compact .progress-area {
-    gap: 8px;
-    width: min(40vw, 560px);
-  }
-
-  .player.compact .volume {
-    justify-content: flex-end;
-    width: min(24vw, 240px);
-  }
-
-  .player.compact .progress,
-  .player.compact .volume-bar {
-    height: 6px;
-    background:
-      linear-gradient(
-        to right,
-        var(--accent) 0%,
-        var(--accent) var(--range-fill, 0%),
-        color-mix(in srgb, var(--range-empty) 72%, transparent) var(--range-fill, 0%),
-        color-mix(in srgb, var(--range-empty) 72%, transparent) 100%
-      );
   }
 
   .progress,
@@ -771,8 +698,7 @@
   }
 
   @media (max-width: 920px) {
-    .player,
-    .player.compact {
+    .player {
       grid-template-columns: minmax(170px, 1fr) auto;
     }
 
@@ -783,8 +709,7 @@
   }
 
   @media (max-width: 560px) {
-    .player,
-    .player.compact {
+    .player {
       grid-template-columns: 1fr;
       gap: 12px;
       padding: 14px 16px;

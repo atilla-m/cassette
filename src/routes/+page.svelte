@@ -97,8 +97,9 @@
   import TrackList from "$lib/components/TrackList.svelte";
   import { buildAlbums, buildArtists, buildGenres } from "$lib/data/libraryViews";
   import { statsRangeForPeriod, type StatsPeriod } from "$lib/utils/statsPeriod";
+  import { importCompletionHeading } from "$lib/utils/importFeedback";
   import { resolveStatsPlayback, statsDayValueLabel } from "$lib/utils/listeningStats";
-  import type { ListeningStats, ListeningImportPreview } from "$lib/types/listening";
+  import type { ListeningStats, ListeningImportPreview, ListeningImportResult } from "$lib/types/listening";
   import { albums as mockAlbums, artists as mockArtists, genres as mockGenres, navItems } from "$lib/data/mockLibrary";
   import { ENABLE_EXPERIMENTAL_VIDEOS } from "$lib/featureFlags";
   import type {
@@ -173,6 +174,7 @@
 
   type SongSortKey = "title" | "artist" | "album" | "duration" | "recentlyAdded" | "recentlyPlayed" | "playCount";
   type AlbumSortKey = "title" | "artist" | "year" | "trackCount" | "mostPlayed" | "leastPlayed";
+  type SettingsSection = "appearance" | "playback" | "library" | "history" | "updates" | "about";
   type ArtistSortKey = "name" | "songCount" | "albumCount" | "mostPlayed" | "leastPlayed";
   type GenreSortKey = "name" | "songCount" | "artistCount" | "albumCount" | "mostPlayed" | "leastPlayed";
   type VideoSortKey = "title" | "artist" | "year" | "recentlyPlayed" | "duration";
@@ -396,6 +398,14 @@
     { value: "recentlyAdded", label: "Recently added" },
     { value: "recentlyPlayed", label: "Recently played" },
     { value: "playCount", label: "Most played" },
+  ];
+  const settingsSections: { id: SettingsSection; label: string }[] = [
+    { id: "appearance", label: "Appearance" },
+    { id: "playback", label: "Playback" },
+    { id: "library", label: "Library" },
+    { id: "history", label: "Listening history" },
+    { id: "updates", label: "Updates" },
+    { id: "about", label: "About" },
   ];
   const albumTrackSortOptions: { value: AlbumTrackSortKey; label: string }[] = [
     { value: "trackNumber", label: "Track number" },
@@ -623,6 +633,7 @@
   let showGenrePlayCounts = $state(true);
   let showAlbumTrackPlayCounts = $state(true);
   let showSongListNumbers = $state(true);
+  let settingsSection = $state<SettingsSection>("appearance");
   let statsVisibleLimits = $state<Record<StatsSectionId, number>>({
     tracks: STATS_PAGE_SIZE,
     artists: STATS_PAGE_SIZE,
@@ -644,6 +655,7 @@
   let historyImportPreview = $state<ListeningImportPreview | null>(null);
   let historyBusy = $state(false);
   let historyMessage = $state<string | null>(null);
+  let historyImportResult = $state<(ListeningImportResult & { duplicateEvents: number }) | null>(null);
   let historyError = $state<string | null>(null);
   let historyAssociationTargets = $state<Record<string, string>>({});
   let historyPreviewLimit = $state(STATS_PAGE_SIZE);
@@ -1879,6 +1891,7 @@
 
   function handleReviewAvailableUpdate() {
     showUpdateNotice = false;
+    settingsSection = "updates";
     activeView = "Settings";
     requestAnimationFrame(() => {
       document.getElementById("settings-updates-title")?.scrollIntoView({ block: "center", behavior: "smooth" });
@@ -4120,6 +4133,10 @@
   }
 
   function handleLyricsSelect() {
+    if (activeView === "Now Playing") {
+      if (canNavigateBack) navigateViewHistory(-1);
+      return;
+    }
     activeView = "Now Playing";
     isQueueOpen = false;
     mainElement?.scrollTo({ top: 0 });
@@ -6421,6 +6438,7 @@
     try {
       const path = await chooseHistoryImportPath();
       if (!path) return;
+      historyImportResult = null;
       historyImportPreview = null;
       historyPreviewLimit = STATS_PAGE_SIZE;
       historyAssociationTargets = {};
@@ -6438,10 +6456,12 @@
     historyBusy = true;
     historyError = null;
     historyMessage = null;
+    historyImportResult = null;
     try {
+      const duplicateEvents = historyImportPreview.duplicateEvents;
       const result = await importListeningHistory(historyImportPath, historyImportPreview.approvalToken);
       historyImportPreview = null;
-      historyMessage = `Imported ${result.importedEvents} new events and ${result.importedUndatedPlays} undated plays. ${result.pendingTracks} track references remain pending; reopen this backup after adding music or associate an ambiguous match below.`;
+      historyImportResult = { ...result, duplicateEvents };
       await loadLibraryCache();
       statsRevision += 1;
       try {
@@ -9657,11 +9677,16 @@
         {:else}
           <section class="settings-panel" aria-labelledby="settings-title">
             <div class="settings-intro">
-              <p class="eyebrow">Control Center</p>
               <h3 id="settings-title">Settings</h3>
-              <p>Manage Cassette's local library, playback state, app tools, and build details.</p>
             </div>
 
+            <nav class="settings-tabs" aria-label="Settings sections">
+              {#each settingsSections as section (section.id)}
+                <button type="button" class:active={settingsSection === section.id} aria-current={settingsSection === section.id ? "page" : undefined} onclick={() => settingsSection = section.id}>{section.label}</button>
+              {/each}
+            </nav>
+
+            {#if settingsSection === "library"}
             <section class="settings-section" aria-labelledby="settings-library-title">
               <div class="settings-section-header">
                 <div>
@@ -9699,13 +9724,12 @@
                 <button class="primary" type="button" onclick={handleLibraryHealthSelect}>
                   Open Library Health
                 </button>
-                <button class="danger" type="button" disabled title="Coming later: needs a safe cache-only migration path">
-                  Clear Library Cache
-                  <span>Coming later</span>
-                </button>
+                <button type="button" onclick={handleMixBuilderSelect}>Open Mix Builder</button>
               </div>
             </section>
+            {/if}
 
+            {#if settingsSection === "history"}
             <section class="settings-section stats-transfer-panel" aria-labelledby="history-transfer-title">
               <div class="settings-section-header">
                 <div>
@@ -9721,6 +9745,15 @@
               {#if historyBusy}<p role="status" class="stats-status">Preparing listening history… Verifying audio identities can take a while for a large library.</p>{/if}
               {#if historyError}<p role="alert" class="stats-status">{historyError}</p>{/if}
               {#if historyMessage}<p role="status" class="stats-status">{historyMessage}</p>{/if}
+              {#if historyImportResult}
+                <div class="history-import-result" role="status" aria-live="polite">
+                  <div>
+                    <strong>{importCompletionHeading(historyImportResult)}</strong>
+                    <p>{historyImportResult.duplicateEvents} duplicate dated events skipped · {historyImportResult.importedUndatedPlays} undated legacy plays added · {historyImportResult.pendingTracks} track references pending.</p>
+                  </div>
+                  <button type="button" aria-label="Dismiss import result" onclick={() => historyImportResult = null}>Dismiss</button>
+                </div>
+              {/if}
               {#if historyImportPreview}
                 <div class="stats-import-preview">
                   <h5>Import preview</h5>
@@ -9755,7 +9788,9 @@
                 </div>
               {/if}
             </section>
+            {/if}
 
+            {#if settingsSection === "playback"}
             <section class="settings-section" aria-labelledby="settings-playback-title">
               <div class="settings-section-header">
                 <div>
@@ -9827,10 +9862,6 @@
                 <button class="primary" type="button" onclick={openShortcutHelp}>
                   Keyboard Shortcut Help
                 </button>
-                <button type="button" disabled title="Coming later: reset needs explicit playback-engine semantics">
-                  Reset Playback State
-                  <span>Coming later</span>
-                </button>
               </div>
             </section>
 
@@ -9855,7 +9886,9 @@
                 </label>
               </div>
             </section>
+            {/if}
 
+            {#if settingsSection === "appearance"}
             <section class="settings-section" aria-labelledby="settings-interface-title">
               <div class="settings-section-header">
                 <div>
@@ -9922,34 +9955,9 @@
                 </label>
               </div>
             </section>
+            {/if}
 
-            <section class="settings-section" aria-labelledby="settings-tools-title">
-              <div class="settings-section-header">
-                <div>
-                  <p class="eyebrow">Tools</p>
-                  <h4 id="settings-tools-title">Library utilities</h4>
-                </div>
-              </div>
-
-              <div class="settings-tool-grid">
-                <button type="button" onclick={handleLibraryHealthSelect}>
-                  <span class="health-mark" aria-hidden="true">H</span>
-                  <strong>Library Health</strong>
-                  <small>{libraryHealthIssueCount} {libraryHealthIssueCount === 1 ? "issue" : "issues"} found</small>
-                </button>
-                <button type="button" onclick={openShortcutHelp}>
-                  <span class="shortcut-mark" aria-hidden="true">?</span>
-                  <strong>Keyboard Shortcuts</strong>
-                  <small>Show the shortcut overlay</small>
-                </button>
-                <button type="button" onclick={handleMixBuilderSelect}>
-                  <span class="mix-tool-mark" aria-hidden="true">M</span>
-                  <strong>Mix Builder</strong>
-                  <small>Build a local queue from genres, artists, and albums</small>
-                </button>
-              </div>
-            </section>
-
+            {#if settingsSection === "updates"}
             <section class="settings-section updates-section" aria-labelledby="settings-updates-title">
               <div class="settings-section-header">
                 <div>
@@ -10080,7 +10088,9 @@
                 installations remain under your package manager's control. Updating does not replace Cassette's user data.
               </p>
             </section>
+            {/if}
 
+            {#if settingsSection === "about"}
             <section class="settings-section about-section" aria-labelledby="settings-about-title">
               <div class="settings-section-header">
                 <div>
@@ -10104,8 +10114,9 @@
                   <strong>Tauri, Svelte, Rust, GStreamer</strong>
                 </div>
               </div>
-              <p class="settings-note">Cassette does not modify your audio files unless future tag editing is explicitly used.</p>
+              <p class="settings-note">Saving tag edits can modify the selected audio files. Cassette previews affected files before an album-wide edit.</p>
             </section>
+            {/if}
           </section>
         {/if}
       {/if}
@@ -10664,7 +10675,7 @@
       {isQueueOpen}
       {isShuffleEnabled}
       {repeatMode}
-      compact={activeView === "Now Playing"}
+      isLyricsView={activeView === "Now Playing"}
       onTogglePlayback={handleTogglePlayback}
       onPrevious={handlePreviousTrack}
       onNext={handleNextTrack}
@@ -14681,6 +14692,39 @@
     gap: 16px;
   }
 
+  .settings-tabs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 10px;
+  }
+
+  .settings-tabs button {
+    min-height: 36px;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--text-muted);
+    font: inherit;
+    font-size: 0.86rem;
+    font-weight: 750;
+    padding: 5px 12px;
+    cursor: pointer;
+  }
+
+  .settings-tabs button:hover,
+  .settings-tabs button.active {
+    border-color: var(--border-strong);
+    background: var(--panel-strong);
+    color: var(--text);
+  }
+
+  .settings-tabs button:focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 2px;
+  }
+
   .cd-ripper-page {
     display: grid;
     max-width: 1040px;
@@ -14817,6 +14861,63 @@
   .about-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+
+  .settings-panel .settings-control-list {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0;
+  }
+
+  .settings-panel .settings-control-list > :is(div, label) {
+    border: 0;
+    border-bottom: 1px solid var(--border);
+    border-radius: 0;
+    background: transparent;
+    padding: 10px 2px;
+  }
+
+  .settings-panel .settings-control-list > :is(div, label):last-child {
+    border-bottom: 0;
+  }
+
+  .settings-panel .settings-control-list > div {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 2px 12px;
+  }
+
+  .settings-panel .settings-control-list > div small {
+    grid-column: 1 / -1;
+  }
+
+  .settings-panel .settings-control-list span {
+    margin: 0;
+    text-transform: none;
+  }
+
+  .history-import-result {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 14px;
+    border: 1px solid var(--accent-strong);
+    border-radius: 8px;
+    background: var(--accent-soft);
+    padding: 14px;
+  }
+
+  .history-import-result strong { color: var(--accent-text); }
+  .history-import-result p { margin: 5px 0 0; color: var(--text-muted); }
+  .history-import-result button {
+    border: 1px solid var(--border-strong);
+    border-radius: 7px;
+    background: var(--panel);
+    color: var(--text);
+    font: inherit;
+    padding: 6px 10px;
+    cursor: pointer;
+  }
+  .history-import-result button:focus-visible { outline: 2px solid var(--focus-ring); }
 
   .settings-stat-tile,
   .cd-status-grid > div,
@@ -15078,8 +15179,7 @@
   }
 
   .settings-actions button,
-  .cd-rip-actions button,
-  .settings-tool-grid button {
+  .cd-rip-actions button {
     min-height: 40px;
     border: 1px solid var(--border-strong);
     border-radius: 8px;
@@ -15102,9 +15202,7 @@
   .settings-actions button:hover:not(:disabled),
   .settings-actions button:focus-visible:not(:disabled),
   .cd-rip-actions button:hover:not(:disabled),
-  .cd-rip-actions button:focus-visible:not(:disabled),
-  .settings-tool-grid button:hover,
-  .settings-tool-grid button:focus-visible {
+  .cd-rip-actions button:focus-visible:not(:disabled) {
     border-color: var(--accent-strong);
     background: var(--panel-hover);
     outline: none;
@@ -15132,57 +15230,6 @@
     border-color: var(--border);
     background: var(--bg-soft);
     color: var(--text-dim);
-  }
-
-  .settings-actions button span {
-    margin-left: 8px;
-    color: var(--text-soft);
-    font-size: 0.76rem;
-    font-weight: 850;
-  }
-
-  .settings-tool-grid {
-    display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 10px;
-  }
-
-  .settings-tool-grid button {
-    display: grid;
-    min-width: 0;
-    min-height: 138px;
-    gap: 8px;
-    justify-items: start;
-    padding: 14px;
-    text-align: left;
-  }
-
-  .settings-tool-grid .health-mark,
-  .settings-tool-grid .shortcut-mark,
-  .mix-tool-mark {
-    width: 48px;
-    height: 48px;
-    font-size: 1.18rem;
-  }
-
-  .settings-tool-grid strong,
-  .settings-tool-grid small {
-    overflow: hidden;
-    max-width: 100%;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .settings-tool-grid strong {
-    color: var(--text);
-    font-size: 0.98rem;
-    line-height: 1.2;
-  }
-
-  .settings-tool-grid small {
-    color: var(--text-soft);
-    font-size: 0.8rem;
-    font-weight: 750;
   }
 
   .cd-track-table {
@@ -15460,31 +15507,8 @@
     color: var(--text-soft);
   }
 
-  .mix-tool-mark {
-    display: grid;
-    flex: 0 0 auto;
-    place-items: center;
-    border-radius: 8px;
-    background: var(--accent-soft);
-    color: var(--accent-text);
-    font-weight: 900;
-  }
-
   .about-section {
     margin-bottom: 8px;
-  }
-
-  .shortcut-mark {
-    display: grid;
-    flex: 0 0 auto;
-    width: 54px;
-    height: 54px;
-    place-items: center;
-    border-radius: 8px;
-    background: var(--panel-strong);
-    color: var(--text);
-    font-size: 1.35rem;
-    font-weight: 900;
   }
 
   .tag-editor-backdrop,
@@ -16680,7 +16704,6 @@
     .cd-status-grid,
     .cd-metadata-form,
     .settings-status-list,
-    .settings-tool-grid,
     .stats-overview-grid {
       grid-template-columns: repeat(2, minmax(0, 1fr));
     }
@@ -17032,7 +17055,6 @@
     .cd-status-grid,
     .cd-metadata-form,
     .settings-status-list,
-    .settings-tool-grid,
     .stats-overview-grid {
       grid-template-columns: 1fr;
     }
