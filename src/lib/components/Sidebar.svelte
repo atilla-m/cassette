@@ -9,13 +9,14 @@
   };
 
   let { items, active = "Home", onNavigate }: Props = $props();
-  function iconFor(label: string): "albums" | "artists" | "genres" | "songs" | "playlists" | "disc" | "stats" | "settings" {
+  function iconFor(label: string): "albums" | "artists" | "genres" | "songs" | "playlists" | "disc" | "videos" | "stats" | "settings" {
     if (label === "Albums") return "albums";
     if (label === "Artists") return "artists";
     if (label === "Genres") return "genres";
     if (label === "Songs") return "songs";
     if (label === "Playlists") return "playlists";
     if (label === "CD Rip") return "disc";
+    if (label === "Videos") return "videos";
     if (label === "Stats") return "stats";
     return "settings";
   }

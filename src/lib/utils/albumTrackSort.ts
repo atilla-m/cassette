@@ -1,6 +1,6 @@
 import type { Track } from "$lib/types/library";
 
-export type AlbumTrackSortKey = "trackNumber" | "title" | "album" | "artist" | "duration" | "mostPlayed" | "leastPlayed";
+export type AlbumTrackSortKey = "trackNumber" | "title" | "album" | "artist" | "duration" | "playCount" | "mostPlayed" | "leastPlayed";
 export type AlbumTrackSortDirection = "asc" | "desc";
 
 function compareText(left: string, right: string) {
@@ -29,8 +29,9 @@ function directedOptionalNumber(left: number | null, right: number | null, direc
 // playback actions keep using their original track-number order.
 export function sortAlbumDisplayTracks(tracks: Track[], key: AlbumTrackSortKey, direction: AlbumTrackSortDirection) {
   return [...tracks].sort((left, right) => {
-    if (key === "mostPlayed" || key === "leastPlayed") {
-      return (key === "mostPlayed" ? right.playCount - left.playCount : left.playCount - right.playCount)
+    if (key === "playCount" || key === "mostPlayed" || key === "leastPlayed") {
+      const descending = key === "mostPlayed" || (key === "playCount" && direction === "desc");
+      return (descending ? right.playCount - left.playCount : left.playCount - right.playCount)
         || trackOrder(left, right);
     }
 

@@ -52,6 +52,17 @@ test("custom dates are inclusive local dates, invalid dates fail, and all time i
   assert.equal(all.chartDates.length, 30);
 });
 
+test("same-day custom ranges include the whole local day across DST", () => {
+  for (const [day, hours] of [["2026-03-08", 23], ["2026-11-01", 25], ["2026-09-30", 24]]) {
+    const range = statsRangeForPeriod("custom", new Date(), day, day);
+    assert.ok(range);
+    assert.deepEqual(range.chartDates, [day]);
+    assert.equal(range.endUtc - range.startUtc, hours * 3600);
+    const events = [range.startUtc - 1, range.startUtc, range.endUtc - 1, range.endUtc];
+    assert.deepEqual(events.filter((event) => event >= range.startUtc && event < range.endUtc), [range.startUtc, range.endUtc - 1]);
+  }
+});
+
 test("period playback/context actions use authoritative tracks and omit unavailable history", () => {
   const actual = { id: "a", playCount: 99, filePath: "/synthetic/a.wav" };
   const another = { id: "b", playCount: 11, filePath: "/synthetic/b.wav" };

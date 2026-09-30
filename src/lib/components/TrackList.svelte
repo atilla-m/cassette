@@ -268,11 +268,14 @@
 
   .track-list {
     display: grid;
-    gap: 8px;
+    gap: 0;
+    overflow: hidden;
+    border: 1px solid var(--border);
+    border-radius: 8px;
   }
 
   .track-list.library-list {
-    gap: 5px;
+    gap: 0;
   }
 
   .track-row {
@@ -281,8 +284,9 @@
     align-items: center;
     gap: 14px;
     min-height: 64px;
-    border: 1px solid var(--border);
-    border-radius: 8px;
+    border: 0;
+    border-bottom: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+    border-radius: 0;
     background: color-mix(in srgb, var(--panel-soft) 86%, transparent);
     color: inherit;
     font: inherit;
@@ -300,10 +304,11 @@
     grid-template-columns: 46px minmax(190px, 1.35fr) minmax(150px, 0.85fr) minmax(54px, auto) minmax(66px, auto) 34px minmax(48px, auto);
     gap: 12px;
     min-height: 58px;
-    border-color: color-mix(in srgb, var(--border) 82%, transparent);
     background: color-mix(in srgb, var(--panel-soft) 72%, transparent);
     padding: 7px 10px;
   }
+
+  .track-row:last-child { border-bottom: 0; }
 
   .track-row.library.withOrder {
     grid-template-columns: 34px 46px minmax(180px, 1.35fr) minmax(140px, 0.85fr) minmax(54px, auto) minmax(66px, auto) 34px minmax(48px, auto);
@@ -340,9 +345,10 @@
   .track-row:hover,
   .track-row.active,
   .track-row:focus-visible {
-    border-color: var(--accent-strong);
     background: var(--panel-hover);
   }
+
+  .track-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 
   .track-row.library:hover,
   .track-row.library:focus-visible {
@@ -359,7 +365,6 @@
   }
 
   .track-row.library.active {
-    border-color: color-mix(in srgb, var(--accent) 56%, transparent);
     background: linear-gradient(
       90deg,
       color-mix(in srgb, var(--accent-soft) 58%, transparent),

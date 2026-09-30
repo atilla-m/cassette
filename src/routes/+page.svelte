@@ -173,10 +173,10 @@
   import packageInfo from "../../package.json";
 
   type SongSortKey = "title" | "artist" | "album" | "duration" | "recentlyAdded" | "recentlyPlayed" | "playCount";
-  type AlbumSortKey = "title" | "artist" | "year" | "trackCount" | "mostPlayed" | "leastPlayed";
+  type AlbumSortKey = "title" | "artist" | "year" | "trackCount" | "playCount";
   type SettingsSection = "appearance" | "playback" | "library" | "history" | "updates" | "about";
-  type ArtistSortKey = "name" | "songCount" | "albumCount" | "mostPlayed" | "leastPlayed";
-  type GenreSortKey = "name" | "songCount" | "artistCount" | "albumCount" | "mostPlayed" | "leastPlayed";
+  type ArtistSortKey = "name" | "songCount" | "albumCount" | "playCount";
+  type GenreSortKey = "name" | "songCount" | "artistCount" | "albumCount" | "playCount";
   type VideoSortKey = "title" | "artist" | "year" | "recentlyPlayed" | "duration";
   type VideoTypeFilter = "all" | "music_video" | "live" | "interview_documentary" | "behind_the_scenes" | "other";
   type SortDirection = "asc" | "desc";
@@ -397,7 +397,7 @@
     { value: "duration", label: "Duration" },
     { value: "recentlyAdded", label: "Recently added" },
     { value: "recentlyPlayed", label: "Recently played" },
-    { value: "playCount", label: "Most played" },
+    { value: "playCount", label: "Play count" },
   ];
   const settingsSections: { id: SettingsSection; label: string }[] = [
     { id: "appearance", label: "Appearance" },
@@ -412,8 +412,7 @@
     { value: "title", label: "Title" },
     { value: "artist", label: "Artist" },
     { value: "duration", label: "Duration" },
-    { value: "mostPlayed", label: "Most played" },
-    { value: "leastPlayed", label: "Least played" },
+    { value: "playCount", label: "Play count" },
   ];
   const groupedTrackSortOptions: { value: AlbumTrackSortKey; label: string }[] = [
     { value: "title", label: "Title" },
@@ -421,8 +420,26 @@
     { value: "artist", label: "Artist" },
     { value: "trackNumber", label: "Track number" },
     { value: "duration", label: "Duration" },
-    { value: "mostPlayed", label: "Most played" },
-    { value: "leastPlayed", label: "Least played" },
+    { value: "playCount", label: "Play count" },
+  ];
+  const albumSortOptions: { value: AlbumSortKey; label: string }[] = [
+    { value: "title", label: "Album title" }, { value: "artist", label: "Artist" },
+    { value: "year", label: "Year" }, { value: "trackCount", label: "Song count" },
+    { value: "playCount", label: "Play count" },
+  ];
+  const artistSortOptions: { value: ArtistSortKey; label: string }[] = [
+    { value: "name", label: "Artist name" }, { value: "songCount", label: "Song count" },
+    { value: "albumCount", label: "Album count" }, { value: "playCount", label: "Play count" },
+  ];
+  const genreSortOptions: { value: GenreSortKey; label: string }[] = [
+    { value: "name", label: "Genre name" }, { value: "songCount", label: "Song count" },
+    { value: "artistCount", label: "Artist count" }, { value: "albumCount", label: "Album count" },
+    { value: "playCount", label: "Play count" },
+  ];
+  const videoSortOptions: { value: VideoSortKey; label: string }[] = [
+    { value: "title", label: "Title" }, { value: "artist", label: "Artist" },
+    { value: "year", label: "Year" }, { value: "recentlyPlayed", label: "Recently played" },
+    { value: "duration", label: "Duration" },
   ];
   const videoTypeOptions: Array<{ value: VideoType; label: string }> = [
     { value: "music_video", label: "Music Video / PV" },
@@ -618,10 +635,10 @@
   let albumSortDirection = $state<SortDirection>("asc");
   let albumTrackSort = $state<AlbumTrackSortKey>("trackNumber");
   let albumTrackSortDirection = $state<SortDirection>("asc");
-  let artistTrackSort = $state<AlbumTrackSortKey>("mostPlayed");
-  let artistTrackSortDirection = $state<SortDirection>("asc");
-  let genreTrackSort = $state<AlbumTrackSortKey>("mostPlayed");
-  let genreTrackSortDirection = $state<SortDirection>("asc");
+  let artistTrackSort = $state<AlbumTrackSortKey>("playCount");
+  let artistTrackSortDirection = $state<SortDirection>("desc");
+  let genreTrackSort = $state<AlbumTrackSortKey>("playCount");
+  let genreTrackSortDirection = $state<SortDirection>("desc");
   let artistTrackVisibleLimit = $state(STATS_PAGE_SIZE);
   let genreTrackVisibleLimit = $state(STATS_PAGE_SIZE);
   let artistSort = $state<ArtistSortKey>("name");
@@ -738,6 +755,23 @@
   let sortedAlbums = $derived(sortAlbums(displayAlbums, albumSort, albumSortDirection));
   let sortedArtists = $derived(sortArtists(displayArtists, artistSort, artistSortDirection));
   let sortedGenres = $derived(sortGenres(displayGenres, genreSort, genreSortDirection));
+  let mixArtistArtwork = $derived.by(() => {
+    const artwork = new Map<string, string>();
+    for (const track of tracks) {
+      if (track.coverArtPath && !artwork.has(artistNameForTrack(track))) artwork.set(artistNameForTrack(track), track.coverArtPath);
+    }
+    return artwork;
+  });
+  let mixGenreArtwork = $derived.by(() => {
+    const artwork = new Map<string, string>();
+    for (const track of tracks) {
+      if (!track.coverArtPath) continue;
+      for (const genre of trackGenres(track)) {
+        if (!artwork.has(genre)) artwork.set(genre, track.coverArtPath);
+      }
+    }
+    return artwork;
+  });
   let statsRange = $derived(statsRangeForPeriod(statsPeriod, new Date(statsClock), statsCustomFrom, statsCustomTo, statsSelectedMonth, statsSelectedYear));
   let statsSelectedDayLabel = $derived(statsDayValueLabel(statsSelectedDay, statsRange?.chartDates ?? [], statsSnapshot?.dailyPlays ?? []));
   let statsTrackCounts = $derived(new Map(statsSnapshot?.trackCounts.map((item) => [item.trackId, item]) ?? []));
@@ -6222,14 +6256,6 @@
     return direction === "asc" ? value : -value;
   }
 
-  function nextSortDirection(direction: SortDirection) {
-    return direction === "asc" ? "desc" : "asc";
-  }
-
-  function sortDirectionLabel(direction: SortDirection) {
-    return direction === "asc" ? "Asc" : "Desc";
-  }
-
   function handleSongSortChange(value: string) {
     const nextSort = value as SongSortKey;
 
@@ -6462,7 +6488,11 @@
       const result = await importListeningHistory(historyImportPath, historyImportPreview.approvalToken);
       historyImportPreview = null;
       historyImportResult = { ...result, duplicateEvents };
-      await loadLibraryCache();
+      try {
+        await loadLibraryCache();
+      } catch (error) {
+        historyError = `History was imported, but the library view could not refresh: ${error instanceof Error ? error.message : String(error)}`;
+      }
       statsRevision += 1;
       try {
         historyImportPreview = await previewListeningHistoryImport(historyImportPath);
@@ -6637,8 +6667,8 @@
   }
 
   function sortAlbums(albums: Album[], sortKey: AlbumSortKey, direction: SortDirection) {
-    if (sortKey === "mostPlayed" || sortKey === "leastPlayed") {
-      return sortAlbumsByPlayCount(albums, sortKey);
+    if (sortKey === "playCount") {
+      return sortAlbumsByPlayCount(albums, direction === "desc" ? "mostPlayed" : "leastPlayed");
     }
 
     return [...albums].sort((left, right) => {
@@ -6666,8 +6696,8 @@
   }
 
   function sortArtists(artists: Artist[], sortKey: ArtistSortKey, direction: SortDirection) {
-    if (sortKey === "mostPlayed" || sortKey === "leastPlayed") {
-      return sortArtistsByPlayCount(artists, sortKey);
+    if (sortKey === "playCount") {
+      return sortArtistsByPlayCount(artists, direction === "desc" ? "mostPlayed" : "leastPlayed");
     }
 
     return [...artists].sort((left, right) => {
@@ -6689,8 +6719,8 @@
   }
 
   function sortGenres(genres: Genre[], sortKey: GenreSortKey, direction: SortDirection) {
-    if (sortKey === "mostPlayed" || sortKey === "leastPlayed") {
-      return sortGenresByPlayCount(genres, sortKey);
+    if (sortKey === "playCount") {
+      return sortGenresByPlayCount(genres, direction === "desc" ? "mostPlayed" : "leastPlayed");
     }
 
     return [...genres].sort((left, right) => {
@@ -6924,24 +6954,18 @@
     }
 
     if (activeView === "Albums") {
-      return [
-        songCountLabel(tracks.length),
-        `${hasLoadedCache ? displayAlbums.length : 0} ${(hasLoadedCache ? displayAlbums.length : 0) === 1 ? "album" : "albums"}`,
-        scannedFolder,
-      ].filter(Boolean).join(" · ");
+      return "";
     }
 
     if (activeView === "Settings") {
-      return scannedFolder
-        ? `Library folder: ${scannedFolder}`
-        : "No library folder is cached yet.";
+      return "";
     }
 
     if (activeView === "Stats") {
       if (statsDetailSection) {
         return `${statsViewAllLabel(statsDetailSection, statsSectionTotal(statsDetailSection))} · ${statsPeriod === "all" ? "All time" : "Selected listening period"}`;
       }
-      return `${playsLabel(statsTotalPlays)} across ${tracks.length} ${tracks.length === 1 ? "track" : "tracks"}.`;
+      return statsRange ? `${playsLabel(statsTotalPlays)} · ${statsPeriod === "all" ? "All-time history" : "Selected listening period"}` : "";
     }
 
     if (activeView === "CD Rip") {
@@ -6968,11 +6992,7 @@
       return "Add local music videos, concerts, interviews, documentaries, and related videos.";
     }
 
-    if (scanCount !== null && scannedFolder) {
-      return `Found ${scanCount} ${scanCount === 1 ? "track" : "tracks"} in ${scannedFolder}`;
-    }
-
-    return "No cached tracks yet. Pick a folder to scan your local music files.";
+    return "";
   }
 
   function hideBrokenImage(event: Event) {
@@ -7028,9 +7048,9 @@
       {#if activeView !== "Now Playing" && !isAlbumDetailView && !isArtistDetailView && !isGenreDetailView && !isPlaylistDetailView}
         <header class="home-header">
           <div>
-            <p class="eyebrow">{viewEyebrow()}</p>
+            {#if activeView === "CD Rip" || activeView === "Videos"}<p class="eyebrow">{viewEyebrow()}</p>{/if}
             <h2>{viewTitle()}</h2>
-            <p class="scan-status">{viewStatus()}</p>
+            {#if viewStatus()}<p class="scan-status">{viewStatus()}</p>{/if}
           </div>
           <div class="home-header-actions">
             {#if activeView === "Albums" && !selectedAlbum}
@@ -7045,7 +7065,7 @@
               <button type="button" disabled={isScanningVideos} onclick={() => void (videoFolder ? handleRescanVideos() : handleAddVideoFolder())}>
                 {isScanningVideos ? "Scanning..." : videoFolder ? "Rescan Videos" : "Add Video Folder"}
               </button>
-            {:else}
+            {:else if activeView === "Albums" && !selectedAlbum}
               <button type="button" disabled={isScanning} onclick={handleScanLibrary}>
                 {isScanning ? "Scanning..." : "Scan Library"}
               </button>
@@ -7396,31 +7416,15 @@
               <input id="stats-to" type="date" bind:value={statsCustomTo} />
             {/if}
           </div>
-          <p class="stats-coverage-note">Weeks start Monday. Calendar periods use this device’s local timezone; play events are stored in UTC. Rankings use current artist, album and genre tags, not historical metadata snapshots.</p>
           {#if !statsRange}
-            <p class="stats-status" role="alert">Choose valid dates with “From” on or before “Through” (up to 100 years).</p>
+            <p class="stats-status" role="alert">{statsPeriod === "custom" && (!statsCustomFrom || !statsCustomTo) ? "Choose both From and Through dates to see statistics." : "Choose valid dates with From on or before Through (up to 100 years)."}</p>
           {:else if statsError}
             <p class="stats-status" role="alert">{statsError}</p>
           {:else if statsLoading}
             <p class="stats-status" aria-live="polite">Loading listening statistics…</p>
           {/if}
-          <div class="stats-overview-grid" aria-label="Library and listening overview">
-            <div class="stats-overview-card">
-              <span>Total tracks</span>
-              <strong>{tracks.length}</strong>
-            </div>
-            <div class="stats-overview-card">
-              <span>Total albums</span>
-              <strong>{hasLoadedCache ? displayAlbums.length : 0}</strong>
-            </div>
-            <div class="stats-overview-card">
-              <span>Total artists</span>
-              <strong>{hasLoadedCache ? displayArtists.length : 0}</strong>
-            </div>
-            <div class="stats-overview-card">
-              <span>Total genres</span>
-              <strong>{hasLoadedCache ? displayGenres.length : 0}</strong>
-            </div>
+          {#if statsRange}
+          <div class="stats-overview-grid period" aria-label="Selected period listening totals">
             <div class="stats-overview-card">
               <span>Total plays</span>
               <strong>{statsTotalPlays}</strong>
@@ -7433,41 +7437,21 @@
               <span>Distinct artists played</span>
               <strong>{statsDistinctArtists}</strong>
             </div>
-            <div class="stats-overview-card">
-              <span>Liked songs</span>
-              <strong>{favoriteTracks.length}</strong>
-            </div>
-            <div class="stats-overview-card muted">
-              <span>Listening time</span>
-              <strong>Coming later</strong>
-            </div>
           </div>
 
-          {#if statsSnapshot}
-            <p class="stats-coverage-note">
-              {#if statsPeriod === "all"}
-                All-time totals include {statsSnapshot.undatedLegacyPlays} undated legacy plays. The chart shows only the most recent 30 local calendar days of dated events.
-              {:else}
-                Earlier all-time plays without recorded dates cannot be placed in this period.
-              {/if}
-              Detailed tracking start dates for this profile and imported sources:
-              {statsSnapshot.coverageSources.map((source) => source.detailedTrackingStartedAtUtc !== null ? new Date(source.detailedTrackingStartedAtUtc * 1000).toLocaleDateString() : "unknown").join(", ")}.
-              An older known last-played date does not establish complete earlier coverage.
-              {#if statsSnapshot.pendingTracks.length > 0}
-                {statsSnapshot.pendingTracks.length} retained track references are not in this library. Their plays remain in statistics using the backup’s labels; playback is unavailable until associated.
-              {/if}
-            </p>
+          {#if statsSnapshot && statsSnapshot.undatedLegacyPlays > 0}
+            <p class="stats-coverage-note">{statsPeriod === "all" ? `All-time totals include ${statsSnapshot.undatedLegacyPlays} undated legacy plays; the chart shows only dated events.` : "Undated legacy plays cannot be assigned to this period; earlier dated coverage may be incomplete."}</p>
+          {:else if statsSnapshot && statsSnapshot.coverageSources.length > 0}
+            <p class="stats-coverage-note">Dated tracking may not cover earlier listening history.</p>
           {/if}
 
           <section class="stats-chart-panel" aria-labelledby="daily-plays-title">
             <h2 id="daily-plays-title">Daily plays</h2>
-            {#if statsSnapshot && statsRange && statsChartHasPlays}
+            {#if statsSnapshot && statsChartHasPlays}
               <div class="stats-chart-scroll" role="region" aria-label="Daily play counts; use Tab to inspect dates">
-                <div class="stats-chart-bars">
+                <div class="stats-chart-bars" class:compact={statsChartDates.length >= 20 && statsChartDates.length <= 31} style={`--chart-days: ${statsChartDates.length}`}>
                   {#each statsChartDates as day, index (day)}
-                    <button type="button" class="stats-chart-day" aria-pressed={statsSelectedDay === day} aria-label={`${day}: ${playsLabel(statsSnapshot.dailyPlays[index + statsChartOffset] ?? 0)}`} title={`${day}: ${playsLabel(statsSnapshot.dailyPlays[index + statsChartOffset] ?? 0)}`} onclick={() => {
-                      statsSelectedDay = day;
-                    }}>
+                    <button type="button" class="stats-chart-day" aria-pressed={statsSelectedDay === day} aria-label={`${day}: ${playsLabel(statsSnapshot.dailyPlays[index + statsChartOffset] ?? 0)}`} title={`${day}: ${playsLabel(statsSnapshot.dailyPlays[index + statsChartOffset] ?? 0)}`} onclick={() => { statsSelectedDay = day; }}>
                       <span class="stats-chart-value">{statsSnapshot.dailyPlays[index + statsChartOffset] ?? 0}</span>
                       <span class="stats-chart-bar" style={`height: ${Math.max(3, ((statsSnapshot.dailyPlays[index + statsChartOffset] ?? 0) / statsMaxDailyPlays) * 96)}px`}></span>
                       <span class="stats-chart-date">{day.slice(5)}</span>
@@ -7487,8 +7471,46 @@
               <p class="stats-coverage-note">No dated plays in this chart period.</p>
             {/if}
           </section>
+
+          <details class="stats-explanation">
+            <summary>How these stats are counted</summary>
+            <p>Weeks start Monday. Calendar periods use this device’s local timezone; play events are stored in UTC. Rankings use current artist, album and genre tags, not historical metadata snapshots.</p>
+            <p>All-time totals include undated legacy plays. Those plays cannot be assigned to date-filtered periods. The all-time chart shows only the most recent 30 local calendar days of dated events.</p>
+            {#if statsSnapshot}
+              <p>Detailed tracking start dates for this profile and imported sources: {statsSnapshot.coverageSources.map((source) => source.detailedTrackingStartedAtUtc !== null ? new Date(source.detailedTrackingStartedAtUtc * 1000).toLocaleDateString() : "unknown").join(", ")}. An older known last-played date does not establish complete earlier coverage.</p>
+              {#if statsSnapshot.pendingTracks.length > 0}<p>{statsSnapshot.pendingTracks.length} retained track references are not in this library. Their plays remain in statistics using the backup’s labels; playback is unavailable until associated.</p>{/if}
+            {/if}
+          </details>
+
+          <section class="stats-library-overview" aria-label="Library overview">
+            <h2>Library overview</h2>
+            <div class="stats-overview-grid">
+            <div class="stats-overview-card">
+              <span>Total tracks</span>
+              <strong>{tracks.length}</strong>
+            </div>
+            <div class="stats-overview-card">
+              <span>Total albums</span>
+              <strong>{hasLoadedCache ? displayAlbums.length : 0}</strong>
+            </div>
+            <div class="stats-overview-card">
+              <span>Total artists</span>
+              <strong>{hasLoadedCache ? displayArtists.length : 0}</strong>
+            </div>
+            <div class="stats-overview-card">
+              <span>Total genres</span>
+              <strong>{hasLoadedCache ? displayGenres.length : 0}</strong>
+            </div>
+            <div class="stats-overview-card">
+              <span>Liked songs</span>
+              <strong>{favoriteTracks.length}</strong>
+            </div>
+          </div>
+          </section>
+          {/if}
           {/if}
 
+          {#if statsRange}
           {#if !statsDetailSection || statsDetailSection === "tracks"}
           <LibrarySection
             title="Top Tracks"
@@ -7708,6 +7730,7 @@
             {/if}
           </div>
           {/if}
+          {/if}
         </section>
       {:else if activeView === "Albums"}
         {#if selectedAlbum}
@@ -7901,30 +7924,10 @@
           </section>
         {:else}
           <div class="albums-landing">
-            <LibrarySection title="All Albums" viewAllLabel={`${visibleAlbums.length} total`}>
-            <div class="control-bar">
-              <label>
-                <span>Sort</span>
-                <select bind:value={albumSort}>
-                  <option value="title">Album title</option>
-                  <option value="artist">Artist</option>
-                  <option value="year">Year</option>
-                  <option value="trackCount">Song count</option>
-                  <option value="mostPlayed">Most played</option>
-                  <option value="leastPlayed">Least played</option>
-                </select>
-              </label>
-              {#if albumSort !== "mostPlayed" && albumSort !== "leastPlayed"}
-                <button
-                  class="direction-toggle"
-                  type="button"
-                  aria-label={`Album sort direction: ${sortDirectionLabel(albumSortDirection)}`}
-                  onclick={() => albumSortDirection = nextSortDirection(albumSortDirection)}
-                >
-                  {sortDirectionLabel(albumSortDirection)}
-                </button>
-              {/if}
-            </div>
+            <LibrarySection title="Albums" hideTitle viewAllLabel={`${visibleAlbums.length} total`}>
+            {#snippet headerActions()}
+              <TrackSortMenu label="Sort albums" value={albumSort} direction={albumSortDirection} options={albumSortOptions} onSortChange={(value) => { albumSort = value; if (value === "playCount") albumSortDirection = "desc"; }} onDirectionChange={(direction) => albumSortDirection = direction} />
+            {/snippet}
             {#if visibleAlbums.length === 0}
               <div class="group-empty">
                 <h3>{normalizedSearchQuery ? "No albums matched" : "No albums found"}</h3>
@@ -8105,29 +8108,10 @@
             </LibrarySection>
           </section>
         {:else}
-          <LibrarySection title="All Artists" viewAllLabel={`${visibleArtists.length} total`}>
-            <div class="control-bar">
-              <label>
-                <span>Sort</span>
-                <select bind:value={artistSort}>
-                  <option value="name">Artist name</option>
-                  <option value="songCount">Song count</option>
-                  <option value="albumCount">Album count</option>
-                  <option value="mostPlayed">Most played</option>
-                  <option value="leastPlayed">Least played</option>
-                </select>
-              </label>
-              {#if artistSort !== "mostPlayed" && artistSort !== "leastPlayed"}
-                <button
-                  class="direction-toggle"
-                  type="button"
-                  aria-label={`Artist sort direction: ${sortDirectionLabel(artistSortDirection)}`}
-                  onclick={() => artistSortDirection = nextSortDirection(artistSortDirection)}
-                >
-                  {sortDirectionLabel(artistSortDirection)}
-                </button>
-              {/if}
-            </div>
+          <LibrarySection title="Artists" hideTitle viewAllLabel={`${visibleArtists.length} total`}>
+            {#snippet headerActions()}
+              <TrackSortMenu label="Sort artists" value={artistSort} direction={artistSortDirection} options={artistSortOptions} onSortChange={(value) => { artistSort = value; if (value === "playCount") artistSortDirection = "desc"; }} onDirectionChange={(direction) => artistSortDirection = direction} />
+            {/snippet}
             {#if visibleArtists.length === 0}
               <div class="group-empty">
                 <h3>{normalizedSearchQuery ? "No artists matched" : "No artists found"}</h3>
@@ -8299,30 +8283,10 @@
 
           </section>
         {:else}
-          <LibrarySection title="All Genres" viewAllLabel={`${visibleGenres.length} total`}>
-            <div class="control-bar">
-              <label>
-                <span>Sort</span>
-                <select bind:value={genreSort}>
-                  <option value="name">Genre name</option>
-                  <option value="songCount">Song count</option>
-                  <option value="artistCount">Artist count</option>
-                  <option value="albumCount">Album count</option>
-                  <option value="mostPlayed">Most played</option>
-                  <option value="leastPlayed">Least played</option>
-                </select>
-              </label>
-              {#if genreSort !== "mostPlayed" && genreSort !== "leastPlayed"}
-                <button
-                  class="direction-toggle"
-                  type="button"
-                  aria-label={`Genre sort direction: ${sortDirectionLabel(genreSortDirection)}`}
-                  onclick={() => genreSortDirection = nextSortDirection(genreSortDirection)}
-                >
-                  {sortDirectionLabel(genreSortDirection)}
-                </button>
-              {/if}
-            </div>
+          <LibrarySection title="Genres" hideTitle viewAllLabel={`${visibleGenres.length} total`}>
+            {#snippet headerActions()}
+              <TrackSortMenu label="Sort genres" value={genreSort} direction={genreSortDirection} options={genreSortOptions} onSortChange={(value) => { genreSort = value; if (value === "playCount") genreSortDirection = "desc"; }} onDirectionChange={(direction) => genreSortDirection = direction} />
+            {/snippet}
             {#if visibleGenres.length === 0}
               <div class="group-empty">
                 <h3>{normalizedSearchQuery ? "No genres matched" : "No genres found"}</h3>
@@ -8346,22 +8310,17 @@
           </LibrarySection>
         {/if}
       {:else if activeView === "Songs"}
-        <LibrarySection title="All Songs" viewAllLabel={`${visibleSongTracks.length} ${visibleSongTracks.length === 1 ? "song" : "songs"}`}>
+        <LibrarySection title="Songs" hideTitle viewAllLabel={`${visibleSongTracks.length} ${visibleSongTracks.length === 1 ? "song" : "songs"}`}>
+          {#snippet headerActions()}
           <div class="control-bar song-browser-controls">
-            <CompactDropdown
-              label="Sort"
+            <TrackSortMenu
+              label="Sort songs"
               value={songSort}
+              direction={songSortDirection}
               options={songSortOptions}
-              onChange={handleSongSortChange}
+              onSortChange={handleSongSortChange}
+              onDirectionChange={(direction) => songSortDirection = direction}
             />
-            <button
-              class="direction-toggle"
-              type="button"
-              aria-label={`Song sort direction: ${sortDirectionLabel(songSortDirection)}`}
-              onclick={() => songSortDirection = nextSortDirection(songSortDirection)}
-            >
-              {sortDirectionLabel(songSortDirection)}
-            </button>
             <CompactDropdown
               label="Format"
               value={songFormatFilter}
@@ -8369,6 +8328,7 @@
               onChange={handleSongFormatFilterChange}
             />
           </div>
+          {/snippet}
           {#if isScanning}
             <TrackList
               tracks={visibleSongTracks}
@@ -8621,6 +8581,7 @@
                       />
                       <span class="mix-option-mark" style={`--item-color: ${genre.color}`} aria-hidden="true">
                         {genre.name.slice(0, 1)}
+                        {#if mixGenreArtwork.get(genre.name)}<img src={localImageSource(mixGenreArtwork.get(genre.name)) ?? ""} alt="" loading="lazy" onload={showLoadedImage} onerror={hideBrokenImage} />{/if}
                       </span>
                       <span>
                         <strong>{genre.name}</strong>
@@ -8649,6 +8610,7 @@
                       />
                       <span class="mix-option-mark round" style={`--item-color: ${artist.color}`} aria-hidden="true">
                         {artist.name.slice(0, 1)}
+                        {#if mixArtistArtwork.get(artist.name)}<img src={localImageSource(mixArtistArtwork.get(artist.name)) ?? ""} alt="" loading="lazy" onload={showLoadedImage} onerror={hideBrokenImage} />{/if}
                       </span>
                       <span>
                         <strong>{artist.name}</strong>
@@ -8677,6 +8639,7 @@
                       />
                       <span class="mix-option-mark" style={`--item-color: ${album.color}`} aria-hidden="true">
                         {album.title.slice(0, 1)}
+                        {#if album.coverArtPath}<img src={localImageSource(album.coverArtPath) ?? ""} alt="" loading="lazy" onload={showLoadedImage} onerror={hideBrokenImage} />{/if}
                       </span>
                       <span>
                         <strong>{album.title}</strong>
@@ -8689,21 +8652,40 @@
             </LibrarySection>
           </section>
         {:else}
-          <section class="playlists-page" aria-labelledby="playlists-title">
+          <section class="playlists-page" aria-label="Playlists">
             {#if playlistError && !isCreatePlaylistOpen}
               <div class="scan-error" role="alert">{playlistError}</div>
             {:else if playlistMessage && !isCreatePlaylistOpen}
               <p class="playlist-status-pill" role="status">{playlistMessage}</p>
             {/if}
 
-            <LibrarySection title="Smart Playlists" viewAllLabel={`${favoriteTracks.length} liked`}>
-              <div class="playlist-card-grid smart">
+            <div class="playlist-landing-actions">
+              <button class="primary" type="button" onclick={isCreatePlaylistOpen ? handleCancelCreatePlaylist : handleOpenCreatePlaylist}>{isCreatePlaylistOpen ? "Cancel new playlist" : "New playlist"}</button>
+              <button type="button" onclick={handleMixBuilderSelect}>Build a mix</button>
+            </div>
+
+            <LibrarySection title="Your playlists" viewAllLabel={`${playlists.length + 1} total`}>
+              {#if isCreatePlaylistOpen}
+                <form class="playlist-create-panel" onsubmit={(event) => { event.preventDefault(); void handleCreatePlaylist(); }}>
+                  <div>
+                    <p class="eyebrow">New Playlist</p>
+                    <h3>Create Playlist</h3>
+                  </div>
+                  <input id="playlist-name" type="text" bind:value={playlistNameDraft} placeholder="Playlist name" aria-label="Playlist name" aria-invalid={playlistError ? "true" : "false"} />
+                  <div class="playlist-create-actions">
+                    <button type="submit" disabled={!canCreatePlaylist}>Create</button>
+                    <button class="secondary" type="button" onclick={handleCancelCreatePlaylist}>Cancel</button>
+                  </div>
+                  {#if playlistError}<p class="form-message error" role="alert">{playlistError}</p>{:else if playlistMessage}<p class="form-message" role="status">{playlistMessage}</p>{/if}
+                </form>
+              {/if}
+              <div class="playlist-card-grid">
                 <article class="playlist-library-card smart">
                   <button class="playlist-card-main" type="button" onclick={handleLikedSongsSelect}>
                     <div class="playlist-card-art liked" aria-hidden="true">★</div>
                     <div class="playlist-card-copy">
                       <p class="eyebrow">Smart Playlist</p>
-                      <h3 id="playlists-title">Liked Songs</h3>
+                      <h3>Liked Songs</h3>
                       <p>{smartPlaylistMetaLabel(favoriteTracks)}</p>
                     </div>
                   </button>
@@ -8712,63 +8694,6 @@
                     <button type="button" disabled={favoriteTracks.length === 0} onclick={(event) => { stopCardAction(event); void handlePlayLikedSongs(true); }}>Shuffle</button>
                   </div>
                 </article>
-              </div>
-            </LibrarySection>
-
-            <LibrarySection title="Mixes / Tools" viewAllLabel={`${tracks.length} available`}>
-              <div class="playlist-card-grid tools">
-                <button class="mix-tool-card" type="button" onclick={handleMixBuilderSelect}>
-                  <div class="mix-mark" aria-hidden="true">M</div>
-                  <div>
-                    <p class="eyebrow">Mix Builder</p>
-                    <h3>Build a Mix</h3>
-                    <p>Build a local queue from genres, artists, albums, formats, and liked songs.</p>
-                  </div>
-                </button>
-              </div>
-            </LibrarySection>
-
-            <LibrarySection
-              title="Custom Playlists"
-              viewAllLabel={isCreatePlaylistOpen ? "Cancel" : "New Playlist"}
-              onViewAll={isCreatePlaylistOpen ? handleCancelCreatePlaylist : handleOpenCreatePlaylist}
-            >
-              {#if isCreatePlaylistOpen}
-                <form class="playlist-create-panel" onsubmit={(event) => { event.preventDefault(); void handleCreatePlaylist(); }}>
-                  <div>
-                    <p class="eyebrow">New Playlist</p>
-                    <h3>Create Playlist</h3>
-                  </div>
-                  <input
-                    id="playlist-name"
-                    type="text"
-                    bind:value={playlistNameDraft}
-                    placeholder="Playlist name"
-                    aria-label="Playlist name"
-                    aria-invalid={playlistError ? "true" : "false"}
-                  />
-                  <div class="playlist-create-actions">
-                    <button type="submit" disabled={!canCreatePlaylist}>Create</button>
-                    <button class="secondary" type="button" onclick={handleCancelCreatePlaylist}>Cancel</button>
-                  </div>
-                  {#if playlistError}
-                    <p class="form-message error" role="alert">{playlistError}</p>
-                  {:else if playlistMessage}
-                    <p class="form-message" role="status">{playlistMessage}</p>
-                  {/if}
-                </form>
-              {/if}
-
-              {#if playlists.length === 0}
-                <div class="group-empty playlist-empty-state">
-                  <h3>No custom playlists yet</h3>
-                  <p>Create your first playlist, then add songs from any track context menu.</p>
-                  {#if !isCreatePlaylistOpen}
-                    <button type="button" onclick={handleOpenCreatePlaylist}>Create your first playlist</button>
-                  {/if}
-                </div>
-              {:else}
-                <div class="playlist-card-grid">
                   {#each playlists as playlist}
                     {@const playlistTracks = tracksForPlaylist(playlist)}
                     <article class="playlist-library-card" oncontextmenu={(event) => openPlaylistContextMenu(event, playlist)}>
@@ -8801,7 +8726,9 @@
                       </div>
                     </article>
                   {/each}
-                </div>
+              </div>
+              {#if playlists.length === 0}
+                <p class="playlist-empty-hint">No custom playlists yet. Create one, then add songs from any track context menu.</p>
               {/if}
             </LibrarySection>
           </section>
@@ -9006,24 +8933,7 @@
                   <button type="button" aria-label="Clear video search" onclick={() => videoSearchQuery = ""}>Clear</button>
                 {/if}
               </div>
-              <label>
-                <span>Sort</span>
-                <select bind:value={videoSort}>
-                  <option value="title">Title</option>
-                  <option value="artist">Artist</option>
-                  <option value="year">Year</option>
-                  <option value="recentlyPlayed">Recently played</option>
-                  <option value="duration">Duration</option>
-                </select>
-              </label>
-              <button
-                class="direction-toggle"
-                type="button"
-                aria-label={`Video sort direction: ${sortDirectionLabel(videoSortDirection)}`}
-                onclick={() => videoSortDirection = nextSortDirection(videoSortDirection)}
-              >
-                {sortDirectionLabel(videoSortDirection)}
-              </button>
+              <TrackSortMenu label="Sort videos" value={videoSort} direction={videoSortDirection} options={videoSortOptions} onSortChange={(value) => videoSort = value} onDirectionChange={(direction) => videoSortDirection = direction} />
               <button type="button" disabled={isScanningVideos} onclick={() => void handleAddVideoFolder()}>
                 Add Video Folder
               </button>
@@ -9675,11 +9585,7 @@
             </LibrarySection>
           </section>
         {:else}
-          <section class="settings-panel" aria-labelledby="settings-title">
-            <div class="settings-intro">
-              <h3 id="settings-title">Settings</h3>
-            </div>
-
+          <section class="settings-panel" aria-label="Settings">
             <nav class="settings-tabs" aria-label="Settings sections">
               {#each settingsSections as section (section.id)}
                 <button type="button" class:active={settingsSection === section.id} aria-current={settingsSection === section.id ? "page" : undefined} onclick={() => settingsSection = section.id}>{section.label}</button>
@@ -9750,6 +9656,7 @@
                   <div>
                     <strong>{importCompletionHeading(historyImportResult)}</strong>
                     <p>{historyImportResult.duplicateEvents} duplicate dated events skipped · {historyImportResult.importedUndatedPlays} undated legacy plays added · {historyImportResult.pendingTracks} track references pending.</p>
+                    {#if historyImportResult.pendingTracks > 0}<p>Unmatched history is retained. Add music, then reopen this backup; use the preview to associate ambiguous tracks.</p>{/if}
                   </div>
                   <button type="button" aria-label="Dismiss import result" onclick={() => historyImportResult = null}>Dismiss</button>
                 </div>
@@ -9922,7 +9829,7 @@
                   <span>Songs list numbers</span>
                   <input type="checkbox" checked={showSongListNumbers} onchange={handleSongListNumbersSettingChange} />
                   <strong>{showSongListNumbers ? "Shown" : "Hidden"}</strong>
-                  <small>Show positions in the current Songs sort and filters. Choose Most played to see listening rank.</small>
+                  <small>Show positions in the current Songs sort and filters. Choose Play count in descending order to see listening rank.</small>
                 </label>
                 <div>
                   <span>Album track numbers</span>
@@ -11130,59 +11037,10 @@
     align-items: center;
   }
 
-  .control-bar label {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    min-height: 36px;
-    color: var(--text-soft);
-    font-size: 0.82rem;
-    font-weight: 800;
-  }
-
-  .control-bar select {
-    min-height: 36px;
-    border: 1px solid var(--border-strong);
-    border-radius: 8px;
-    background-color: var(--panel);
-    color: var(--text);
-    font: inherit;
-    font-size: 0.86rem;
-    font-weight: 750;
-    outline: none;
-    padding: 0 32px 0 10px;
-  }
-
-  .control-bar select:focus {
-    border-color: var(--accent);
-    box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 22%, transparent);
-  }
-
-  .direction-toggle {
-    min-height: 36px;
-    min-width: 58px;
-    border: 1px solid var(--accent-strong);
-    border-radius: 8px;
-    background: var(--accent-soft);
-    color: var(--accent-text);
-    cursor: default;
-    font: inherit;
-    font-size: 0.82rem;
-    font-weight: 900;
-    padding: 0 10px;
-  }
-
-  .direction-toggle:hover,
-  .direction-toggle:focus-visible {
-    border-color: var(--accent);
-    background: var(--accent-soft);
-    outline: none;
-  }
-
   .song-browser-controls {
     gap: 8px;
     align-items: center;
-    width: 100%;
+    width: auto;
     padding: 2px 0 0;
   }
 
@@ -11295,8 +11153,7 @@
   .album-card,
   .artist-card > div:last-child,
   .genre-card > div:last-child,
-  .playlist-card-copy,
-  .mix-tool-card > div:last-child {
+  .playlist-card-copy {
     min-width: 0;
   }
 
@@ -11704,10 +11561,22 @@
     gap: 16px;
   }
 
-  .playlist-card-grid.smart,
-  .playlist-card-grid.tools {
-    grid-template-columns: repeat(auto-fill, minmax(min(100%, 260px), 1fr));
+  .playlist-landing-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+  .playlist-landing-actions button {
+    min-height: 38px;
+    border: 1px solid var(--border-strong);
+    border-radius: 8px;
+    background: var(--panel-strong);
+    color: var(--text);
+    cursor: pointer;
+    font: inherit;
+    font-weight: 800;
+    padding: 0 12px;
   }
+  .playlist-landing-actions button.primary { border-color: var(--accent-strong); background: var(--accent-soft); color: var(--accent-text); }
+  .playlist-landing-actions button:hover,
+  .playlist-landing-actions button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .playlist-empty-hint { margin: 0; color: var(--text-soft); font-size: 0.88rem; }
 
   .playlist-library-card {
     display: grid;
@@ -11819,20 +11688,16 @@
   }
 
   .playlist-card-copy h3,
-  .playlist-card-copy p:not(.eyebrow),
-  .mix-tool-card h3,
-  .mix-tool-card p:not(.eyebrow) {
+  .playlist-card-copy p:not(.eyebrow) {
     overflow: hidden;
     text-overflow: ellipsis;
   }
 
-  .playlist-card-copy h3,
-  .mix-tool-card h3 {
+  .playlist-card-copy h3 {
     white-space: nowrap;
   }
 
-  .playlist-card-copy p:not(.eyebrow),
-  .mix-tool-card p:not(.eyebrow) {
+  .playlist-card-copy p:not(.eyebrow) {
     margin: 0;
     color: var(--text-soft);
     font-size: 0.86rem;
@@ -11859,8 +11724,7 @@
 
   .playlist-card-actions button,
   .playlist-hero-actions button,
-  .playlist-create-actions button,
-  .playlist-empty-state button {
+  .playlist-create-actions button {
     min-height: 32px;
     border: 1px solid var(--border-strong);
     border-radius: 999px;
@@ -11875,8 +11739,7 @@
 
   .playlist-card-actions button:first-child,
   .playlist-hero-actions button:first-child,
-  .playlist-create-actions button:first-child,
-  .playlist-empty-state button {
+  .playlist-create-actions button:first-child {
     border-color: var(--accent-strong);
     background: var(--accent-soft);
     color: var(--accent-text);
@@ -11887,9 +11750,7 @@
   .playlist-hero-actions button:hover:not(:disabled),
   .playlist-hero-actions button:focus-visible:not(:disabled),
   .playlist-create-actions button:hover:not(:disabled),
-  .playlist-create-actions button:focus-visible:not(:disabled),
-  .playlist-empty-state button:hover,
-  .playlist-empty-state button:focus-visible {
+  .playlist-create-actions button:focus-visible:not(:disabled) {
     border-color: var(--accent);
     background: color-mix(in srgb, var(--accent-soft) 84%, var(--panel-hover));
     color: var(--accent-text);
@@ -11920,35 +11781,6 @@
     border-color: var(--border);
     background: var(--panel-soft);
     color: var(--text-dim);
-  }
-
-  .mix-tool-card {
-    display: grid;
-    grid-template-columns: 58px minmax(0, 1fr);
-    align-items: center;
-    gap: 14px;
-    width: 100%;
-    min-width: 0;
-    min-height: 106px;
-    border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--border));
-    border-radius: 8px;
-    background:
-      linear-gradient(135deg, color-mix(in srgb, var(--accent-soft) 46%, transparent), transparent 58%),
-      var(--panel-soft);
-    color: inherit;
-    cursor: default;
-    font: inherit;
-    padding: 16px;
-    text-align: left;
-  }
-
-  .mix-tool-card:hover,
-  .mix-tool-card:focus-visible {
-    border-color: var(--accent-strong);
-    background:
-      linear-gradient(135deg, color-mix(in srgb, var(--accent-soft) 62%, transparent), transparent 58%),
-      var(--panel-hover);
-    outline: none;
   }
 
   .playlist-create-panel {
@@ -11987,10 +11819,6 @@
   .playlist-create-panel .form-message {
     grid-column: 2 / -1;
     margin-top: -2px;
-  }
-
-  .playlist-empty-state {
-    gap: 8px;
   }
 
   .playlist-status-pill {
@@ -13301,7 +13129,7 @@
 
   .album-track-list {
     display: grid;
-    gap: 4px;
+    gap: 0;
   }
 
   .album-track-list h4 {
@@ -13319,9 +13147,10 @@
     align-items: center;
     gap: 12px;
     min-height: 54px;
-    border: 1px solid rgba(36, 43, 53, 0.72);
-    border-radius: 8px;
-    background: rgba(17, 21, 27, 0.58);
+    border: 0;
+    border-bottom: 1px solid color-mix(in srgb, var(--border) 65%, transparent);
+    border-radius: 0;
+    background: color-mix(in srgb, var(--panel) 58%, transparent);
     color: inherit;
     cursor: default;
     font: inherit;
@@ -13348,8 +13177,12 @@
 
   .album-track-row:hover,
   .album-track-row:focus-visible {
-    border-color: var(--accent-strong);
     background: color-mix(in srgb, var(--panel-hover) 86%, transparent);
+  }
+
+  .album-track-row:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
   }
 
   .album-track-row.active {
@@ -13465,6 +13298,9 @@
     grid-template-columns: minmax(240px, 1fr) auto;
     gap: 14px;
     align-items: center;
+    position: sticky;
+    top: 0;
+    z-index: 4;
     border: 1px solid var(--border);
     border-radius: 8px;
     background: var(--panel);
@@ -13595,6 +13431,8 @@
 
   .mix-option-mark {
     display: grid;
+    position: relative;
+    overflow: hidden;
     width: 42px;
     height: 42px;
     place-items: center;
@@ -13607,6 +13445,14 @@
 
   .mix-option-mark.round {
     border-radius: 50%;
+  }
+
+  .mix-option-mark img {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
   }
 
   .mix-option-card > span:last-child {
@@ -13714,29 +13560,6 @@
     border-color: var(--border-strong);
     background: var(--panel-soft);
     color: var(--text-dim);
-  }
-
-  .videos-toolbar label {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    min-height: 40px;
-    color: var(--text-soft);
-    font-size: 0.82rem;
-    font-weight: 800;
-  }
-
-  .videos-toolbar select {
-    min-height: 40px;
-    border: 1px solid var(--border-strong);
-    border-radius: 8px;
-    background-color: var(--bg-soft);
-    color: var(--text);
-    font: inherit;
-    font-size: 0.86rem;
-    font-weight: 750;
-    outline: none;
-    padding: 0 32px 0 10px;
   }
 
   .video-filter-tabs {
@@ -14397,6 +14220,16 @@
     width: max-content;
   }
 
+  .stats-chart-bars.compact {
+    display: grid;
+    grid-template-columns: repeat(var(--chart-days), minmax(0, 1fr));
+    width: 100%;
+    min-width: calc(var(--chart-days) * 30px);
+    gap: 2px;
+  }
+
+  .stats-chart-bars.compact .stats-chart-day { width: 100%; }
+
   .stats-chart-day {
     display: grid;
     align-items: end;
@@ -14412,10 +14245,10 @@
   }
 
   .stats-chart-value { font-weight: 800; }
-  .stats-chart-date { white-space: nowrap; }
+  .stats-chart-date { white-space: nowrap; font-size: 0.65rem; font-variant-numeric: tabular-nums; }
   .stats-chart-bar {
     display: block;
-    width: 26px;
+    width: min(26px, 90%);
     border-radius: 4px 4px 0 0;
     background: var(--accent);
   }
@@ -14463,16 +14296,26 @@
     gap: 12px;
   }
 
+  .stats-overview-grid.period { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+
+  .stats-library-overview h2 { margin: 0 0 12px; font-size: 1rem; }
+  .stats-library-overview .stats-overview-card { padding: 12px; }
+  .stats-library-overview .stats-overview-card strong { font-size: 1.25rem; }
+  .stats-explanation {
+    color: var(--text-soft);
+    line-height: 1.5;
+    font-size: 0.9rem;
+  }
+  .stats-explanation summary { cursor: pointer; font-weight: 750; }
+  .stats-explanation summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+  .stats-explanation p { margin: 8px 0 0; }
+
   .stats-overview-card {
     min-width: 0;
     border: 1px solid var(--border);
     border-radius: 8px;
     background: var(--panel-soft);
     padding: 16px;
-  }
-
-  .stats-overview-card.muted {
-    background: var(--bg-soft);
   }
 
   .stats-overview-card span {
@@ -14495,10 +14338,6 @@
     white-space: nowrap;
   }
 
-  .stats-overview-card.muted strong {
-    color: var(--text-soft);
-    font-size: 1rem;
-  }
 
   .stats-section-grid {
     display: grid;
@@ -16647,12 +16486,6 @@
     }
   }
 
-  @media (min-width: 900px) {
-    .playlist-card-grid.tools .mix-tool-card {
-      grid-column: span 2;
-    }
-  }
-
   @media (max-width: 1020px) {
     .artist-grid,
     .genre-grid,
@@ -17175,8 +17008,7 @@
       width: min(100%, 180px);
     }
 
-    .playlist-card-main,
-    .mix-tool-card {
+    .playlist-card-main {
       grid-template-columns: 58px minmax(0, 1fr);
     }
 

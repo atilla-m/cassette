@@ -332,6 +332,7 @@
       class="favorite"
       type="button"
       aria-label={track?.isFavorite ? "Remove from liked songs" : "Add to liked songs"}
+      aria-pressed={Boolean(track?.isFavorite)}
       disabled={!track}
       onclick={handleFavoriteClick}
     >
@@ -416,6 +417,7 @@
       class="queue-button"
       type="button"
       aria-label="Show Up Next"
+      aria-pressed={isQueueOpen}
       disabled={!track && queueCount === 0}
       onclick={onToggleQueue}
     >
@@ -440,7 +442,7 @@
 <style>
   .player {
     display: grid;
-    grid-template-columns: minmax(180px, 1.1fr) auto minmax(220px, 1.6fr) minmax(120px, 0.7fr);
+    grid-template-columns: minmax(180px, 1.1fr) auto minmax(160px, 1.6fr) auto;
     align-items: center;
     gap: 22px;
     min-height: 86px;
@@ -640,6 +642,16 @@
     color: var(--text-dim);
   }
 
+  button:focus-visible,
+  button.mode-button:focus-visible,
+  button.lyrics-button:focus-visible,
+  button.queue-button:focus-visible,
+  .progress:focus-visible,
+  .volume-bar:focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 2px;
+  }
+
   .progress-area,
   .volume {
     display: flex;
@@ -672,6 +684,8 @@
   .volume-bar:disabled {
     opacity: 0.55;
   }
+
+  .volume-bar { width: 110px; flex: 0 0 110px; }
 
   .progress::-webkit-slider-thumb,
   .volume-bar::-webkit-slider-thumb {

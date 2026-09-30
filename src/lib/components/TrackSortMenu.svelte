@@ -1,22 +1,32 @@
-<script lang="ts">
-  import type { AlbumTrackSortDirection, AlbumTrackSortKey } from "$lib/utils/albumTrackSort";
+<script lang="ts" generics="T extends string">
+  import type { AlbumTrackSortDirection } from "$lib/utils/albumTrackSort";
   import { tick } from "svelte";
+  import { sortMenuPlacement } from "$lib/utils/sortMenuPlacement";
 
-  type Option = { value: AlbumTrackSortKey; label: string };
-  type Props = {
-    value: AlbumTrackSortKey;
+  type Option<T> = { value: T; label: string };
+  type Props<T> = {
+    value: T;
     direction: AlbumTrackSortDirection;
-    options: Option[];
-    onSortChange: (value: AlbumTrackSortKey) => void;
+    options: Option<T>[];
+    label?: string;
+    onSortChange: (value: T) => void;
     onDirectionChange: (direction: AlbumTrackSortDirection) => void;
   };
 
-  let { value, direction, options, onSortChange, onDirectionChange }: Props = $props();
+  let { value, direction, options, label = "Sort songs", onSortChange, onDirectionChange }: Props<T> = $props();
   let isOpen = $state(false);
   let rootElement: HTMLDivElement | undefined = $state();
   let triggerElement: HTMLButtonElement | undefined = $state();
   let panelElement: HTMLDivElement | undefined = $state();
-  let directionEnabled = $derived(value !== "mostPlayed" && value !== "leastPlayed");
+  let opensUp = $state(false);
+  let availableHeight = $state(370);
+
+  function preparePlacement() {
+    const trigger = triggerElement?.getBoundingClientRect();
+    if (!trigger) return;
+    const content = rootElement?.closest("main")?.getBoundingClientRect();
+    ({ opensUp, availableHeight } = sortMenuPlacement(trigger.top, trigger.bottom, content?.top ?? 0, content?.bottom ?? window.innerHeight, options.length));
+  }
 
   function closeMenu(restoreFocus = false) {
     isOpen = false;
@@ -37,6 +47,7 @@
   async function handleTriggerKeydown(event: KeyboardEvent) {
     if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
     event.preventDefault();
+    preparePlacement();
     isOpen = true;
     await tick();
     const buttons = panelElement?.querySelectorAll<HTMLButtonElement>("button:not(:disabled)");
@@ -70,12 +81,12 @@
     class="sort-trigger"
     aria-haspopup="menu"
     aria-expanded={isOpen}
-    onclick={() => isOpen = !isOpen}
+    onclick={() => { preparePlacement(); isOpen = !isOpen; }}
     onkeydown={(event) => void handleTriggerKeydown(event)}
-  >Sort songs <span aria-hidden="true">⌄</span></button>
+  >{label}: {options.find((option) => option.value === value)?.label ?? value} · {direction === "asc" ? "Asc" : "Desc"} <span aria-hidden="true">⌄</span></button>
 
   {#if isOpen}
-    <div bind:this={panelElement} class="sort-panel" role="menu" aria-label="Sort displayed songs" tabindex="-1" onkeydown={handlePanelKeydown}>
+    <div bind:this={panelElement} class="sort-panel" class:opens-up={opensUp} style={`--sort-menu-height: ${availableHeight}px`} role="menu" aria-label={label} tabindex="-1" onkeydown={handlePanelKeydown}>
       {#each options as option}
         <button
           type="button"
@@ -91,7 +102,6 @@
         type="button"
         role="menuitemcheckbox"
         aria-checked={direction === "desc"}
-        disabled={!directionEnabled}
         onclick={() => onDirectionChange(direction === "asc" ? "desc" : "asc")}
       >
         <span>Descending order</span>
@@ -142,7 +152,7 @@
     right: 0;
     display: grid;
     min-width: 216px;
-    max-height: min(370px, 70vh);
+    max-height: min(var(--sort-menu-height), 70vh);
     overflow-y: auto;
     border: 1px solid var(--border-strong);
     border-radius: 8px;
@@ -150,6 +160,8 @@
     box-shadow: 0 18px 42px rgba(0, 0, 0, 0.36);
     padding: 6px;
   }
+
+  .sort-panel.opens-up { top: auto; bottom: calc(100% + 6px); }
 
   .sort-panel > button {
     display: flex;

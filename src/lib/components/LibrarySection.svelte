@@ -3,18 +3,19 @@
 
   type Props = {
     title: string;
+    hideTitle?: boolean;
     viewAllLabel?: string;
     onViewAll?: () => void;
     headerActions?: Snippet;
     children: Snippet;
   };
 
-  let { title, viewAllLabel = "View all", onViewAll, headerActions, children }: Props = $props();
+  let { title, hideTitle = false, viewAllLabel = "View all", onViewAll, headerActions, children }: Props = $props();
 </script>
 
 <section class="library-section" aria-labelledby={title.toLowerCase().replaceAll(" ", "-")}>
-  <div class="section-header">
-    <h2 id={title.toLowerCase().replaceAll(" ", "-")}>{title}</h2>
+  <div class="section-header" class:untitled={hideTitle}>
+    <h2 class:visually-hidden={hideTitle} id={title.toLowerCase().replaceAll(" ", "-")}>{title}</h2>
     <div class="section-actions">
       {#if onViewAll}
         <button type="button" onclick={onViewAll}>{viewAllLabel}</button>
@@ -55,6 +56,9 @@
     align-items: center;
     gap: 8px;
   }
+
+  .untitled .section-actions { width: 100%; justify-content: space-between; flex-direction: row-reverse; flex-wrap: wrap; }
+  .visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 
   button,
   .section-label {

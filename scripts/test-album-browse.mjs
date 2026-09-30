@@ -1,5 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { sortMenuPlacement } from "../src/lib/utils/sortMenuPlacement.ts";
+
+test("sort menus fit the content area above the player bar", () => {
+  assert.deepEqual(sortMenuPlacement(163, 197, 0, 634, 7), { opensUp: false, availableHeight: 370 });
+  assert.deepEqual(sortMenuPlacement(550, 584, 0, 634, 5), { opensUp: true, availableHeight: 370 });
+  assert.deepEqual(sortMenuPlacement(130, 164, 0, 280, 7), { opensUp: true, availableHeight: 118 });
+});
 import { sortAlbumDisplayTracks, topPlayedTracks } from "../src/lib/utils/albumTrackSort.ts";
 import { stepView, visitView } from "../src/lib/utils/viewHistory.ts";
 
@@ -19,6 +26,8 @@ test("album sorting is display-only, deterministic, and includes zero plays", ()
   assert.deepEqual(ids("trackNumber", "desc"), ["c", "b", "a"]);
   assert.deepEqual(ids("mostPlayed"), ["a", "c", "b"]);
   assert.deepEqual(ids("leastPlayed"), ["b", "a", "c"]);
+  assert.deepEqual(ids("playCount", "desc"), ids("mostPlayed"));
+  assert.deepEqual(ids("playCount", "asc"), ids("leastPlayed"));
   assert.deepEqual(ids("title", "desc"), ["c", "b", "a"]);
   assert.deepEqual(ids("artist"), ["a", "c", "b"]);
   const acrossAlbums = [
