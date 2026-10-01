@@ -595,6 +595,7 @@
   let lastNotifiedPlaybackStartId: number | null = null;
   let playbackStartId = 0;
   let mainElement: HTMLElement | undefined = $state();
+  let playerBarHeight = $state(86);
   let activeView = $state("Albums");
   let statsDetailSection = $state<StatsSectionId | null>(null);
   let selectedAlbumId = $state<string | null>(null);
@@ -7019,7 +7020,7 @@
   <title>Cassette</title>
 </svelte:head>
 
-<div class="app-shell">
+<div class="app-shell" style:--player-height={`${playerBarHeight}px`}>
   <div class:lyrics-mode={activeView === "Now Playing"} class="workspace">
     <div class="workspace-navigation">
       <span class="brand-mark" aria-label="Cassette">C</span>
@@ -10571,6 +10572,7 @@
 
   {#if !isVideoPlaybackActive}
     <NowPlayingBar
+      bind:height={playerBarHeight}
       track={currentTrack}
       {isPlaying}
       {positionSeconds}
@@ -10795,7 +10797,6 @@
   }
 
   .home {
-    --player-height: 86px;
     --content-bottom-padding: 56px;
     width: 100%;
     min-width: 0;
@@ -14886,7 +14887,7 @@
   .update-notice {
     position: fixed;
     right: 24px;
-    bottom: 108px;
+    bottom: calc(var(--player-height) + 22px);
     z-index: 75;
     display: flex;
     align-items: center;
@@ -16146,7 +16147,7 @@
 
   .queue-backdrop {
     position: fixed;
-    inset: 0 0 86px;
+    inset: 0 0 var(--player-height);
     z-index: 3;
     border: 0;
     background: transparent;
@@ -16156,13 +16157,13 @@
   .queue-panel {
     position: fixed;
     right: 22px;
-    bottom: 104px;
+    bottom: calc(var(--player-height) + 18px);
     z-index: 4;
     display: grid;
     grid-template-rows: auto minmax(0, 1fr);
     gap: 14px;
     width: min(480px, calc(100vw - 32px));
-    max-height: min(620px, calc(100dvh - 136px));
+    max-height: min(620px, calc(100dvh - var(--player-height) - 50px));
     overflow: hidden;
     border: 1px solid color-mix(in srgb, var(--border-strong) 86%, transparent);
     border-radius: 8px;
@@ -16808,9 +16809,7 @@
     .queue-panel {
       left: 16px;
       right: 16px;
-      bottom: 150px;
       width: auto;
-      max-height: calc(100dvh - 178px);
     }
 
     .queue-row {
@@ -16893,38 +16892,28 @@
     }
 
     .home.albums-landing-view {
-      --player-height: 146px;
       --content-bottom-padding: 24px;
     }
 
     .home.album-detail-view {
-      --player-height: 146px;
       --content-bottom-padding: 22px;
     }
 
     .home.artist-detail-view {
-      --player-height: 146px;
       --content-bottom-padding: 22px;
     }
 
     .home.genre-detail-view {
-      --player-height: 146px;
       --content-bottom-padding: 22px;
     }
 
     .home.songs-library-view {
-      --player-height: 146px;
       --content-bottom-padding: 24px;
     }
 
     .home.playlists-view,
     .home.playlist-detail-view {
-      --player-height: 146px;
       --content-bottom-padding: 24px;
-    }
-
-    .queue-backdrop {
-      bottom: 146px;
     }
 
     .queue-row-main {
@@ -17057,7 +17046,6 @@
 
     .update-notice {
       right: 16px;
-      bottom: 150px;
       left: 16px;
       display: grid;
       max-width: none;

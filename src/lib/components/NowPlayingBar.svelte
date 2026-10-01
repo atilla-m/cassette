@@ -19,6 +19,7 @@
     isShuffleEnabled?: boolean;
     repeatMode?: RepeatMode;
     isLyricsView?: boolean;
+    height?: number;
     onTogglePlayback?: () => void;
     onPrevious?: () => void;
     onNext?: () => void;
@@ -46,6 +47,7 @@
     isShuffleEnabled = false,
     repeatMode = "off",
     isLyricsView = false,
+    height = $bindable(86),
     onTogglePlayback,
     onPrevious,
     onNext,
@@ -294,7 +296,7 @@
   }
 </script>
 
-<footer class="player" aria-label="Now playing">
+<footer class="player" aria-label="Now playing" bind:offsetHeight={height}>
   <div class="track">
     <span class="cover" aria-hidden="true">
       {#if coverArtSrc}
@@ -711,14 +713,10 @@
     background: var(--accent);
   }
 
-  @media (max-width: 920px) {
+  @media (max-width: 1080px) {
     .player {
       grid-template-columns: minmax(170px, 1fr) auto;
-    }
-
-    .progress-area,
-    .volume {
-      display: none;
+      gap: 12px 20px;
     }
   }
 
@@ -731,6 +729,10 @@
 
     .transport {
       justify-content: flex-start;
+    }
+
+    .volume {
+      flex-wrap: wrap;
     }
   }
 </style>
