@@ -170,6 +170,7 @@
   import { openPath, openUrl } from "@tauri-apps/plugin-opener";
   import { onMount, untrack } from "svelte";
   import packageInfo from "../../package.json";
+  import SettingsTabs, { type SettingsSection } from "$lib/components/SettingsTabs.svelte";
 
   type SongSortKey = "title" | "artist" | "album" | "duration" | "recentlyAdded" | "recentlyPlayed" | "playCount";
   type AlbumSortKey = "title" | "artist" | "year" | "trackCount" | "mostPlayed" | "leastPlayed";
@@ -640,6 +641,7 @@
   let statsSnapshot = $state<ListeningStats | null>(null);
   let statsLoading = $state(false);
   let statsError = $state<string | null>(null);
+  let settingsSection = $state<SettingsSection>("appearance");
   let historyImportPath = $state<string | null>(null);
   let historyImportPreview = $state<ListeningImportPreview | null>(null);
   let historyBusy = $state(false);
@@ -1272,6 +1274,14 @@
         return;
       }
 
+      // Tabs own arrows and Space. Preserve the other page shortcuts,
+      // including help and modal dismissal, while a Settings tab has focus.
+      if (event.target instanceof HTMLElement
+        && event.target.closest('[role="tablist"][aria-label="Settings sections"]')
+        && (event.code === "Space" || event.key === "ArrowLeft" || event.key === "ArrowRight")) {
+        return;
+      }
+
       if (shouldIgnoreShortcut(event.target)) {
         return;
       }
@@ -1878,6 +1888,8 @@
   }
 
   function handleReviewAvailableUpdate() {
+    settingsSection = "updates";
+    isLibraryHealthOpen = false;
     showUpdateNotice = false;
     activeView = "Settings";
     requestAnimationFrame(() => {
@@ -9662,100 +9674,92 @@
               <p>Manage Cassette's local library, playback state, app tools, and build details.</p>
             </div>
 
-            <section class="settings-section" aria-labelledby="settings-library-title">
+            <SettingsTabs active={settingsSection} onSelect={(section) => settingsSection = section} />
+
+            <div
+              class="settings-section-content"
+              id="settings-panel-appearance"
+              role="tabpanel"
+              aria-labelledby="settings-tab-appearance"
+              hidden={settingsSection !== "appearance"}
+              tabindex="0"
+            >
+            <section class="settings-section" aria-labelledby="settings-interface-title">
               <div class="settings-section-header">
                 <div>
-                  <p class="eyebrow">Library</p>
-                  <h4 id="settings-library-title">Local library</h4>
+                  <p class="eyebrow">Interface</p>
+                  <h4 id="settings-interface-title">Display preferences</h4>
                 </div>
-                <span class="settings-pill">{hasLoadedCache ? "Cache loaded" : "Loading cache"}</span>
+                <span class="settings-pill">{themePresets.find((theme) => theme.id === selectedTheme)?.name ?? "Cassette Teal"}</span>
               </div>
 
-              <div class="library-folder-card">
-                <span>Current folder</span>
-                <strong>{scannedFolder ?? "No library folder selected"}</strong>
-              </div>
-
-              <div class="settings-stat-grid" aria-label="Library summary">
-                {#each librarySettingsStats as stat}
-                  <div class="settings-stat-tile">
-                    <span>{stat.label}</span>
-                    <strong>{stat.value}</strong>
-                  </div>
+              <div class="theme-preset-grid" aria-label="Theme presets">
+                {#each themePresets as theme}
+                  <button
+                    class:selected={selectedTheme === theme.id}
+                    type="button"
+                    aria-pressed={selectedTheme === theme.id}
+                    onclick={() => handleThemeSelect(theme.id)}
+                  >
+                    <span class="theme-swatch-row" aria-hidden="true">
+                      {#each theme.swatches as swatch}
+                        <span style={`--swatch-color: ${swatch}`}></span>
+                      {/each}
+                    </span>
+                    <strong>{theme.name}</strong>
+                    <small>{theme.description}</small>
+                  </button>
                 {/each}
-                <div class="settings-stat-tile wide">
-                  <span>Last scan</span>
-                  <strong>{lastScanLabel}</strong>
-                </div>
               </div>
 
-              <div class="settings-actions">
-                <button class="primary" type="button" disabled={isScanning} onclick={handleScanLibrary}>
-                  {isScanning ? "Scanning..." : scannedFolder ? "Rescan Library" : "Scan Library"}
-                </button>
-                <button type="button" disabled={isScanning} onclick={handleScanLibrary}>
-                  Change Library Folder
-                </button>
-                <button class="primary" type="button" onclick={handleLibraryHealthSelect}>
-                  Open Library Health
-                </button>
-                <button class="danger" type="button" disabled title="Coming later: needs a safe cache-only migration path">
-                  Clear Library Cache
-                  <span>Coming later</span>
-                </button>
-              </div>
-            </section>
-
-            <section class="settings-section stats-transfer-panel" aria-labelledby="history-transfer-title">
-              <div class="settings-section-header">
+              <div class="settings-control-list">
+                <label class="settings-toggle-row">
+                  <span>Songs list numbers</span>
+                  <input type="checkbox" checked={showSongListNumbers} onchange={handleSongListNumbersSettingChange} />
+                  <strong>{showSongListNumbers ? "Shown" : "Hidden"}</strong>
+                  <small>Show positions in the current Songs sort and filters. Choose Most played to see listening rank.</small>
+                </label>
                 <div>
-                  <p class="eyebrow">Listening data</p>
-                  <h4 id="history-transfer-title">Portable listening history</h4>
+                  <span>Album track numbers</span>
+                  <strong>Enabled</strong>
+                  <small>Always shown in album detail</small>
                 </div>
+                <label class="settings-toggle-row">
+                  <span>Album play totals</span>
+                  <input type="checkbox" checked={showAlbumPlayCounts} onchange={(event) => updatePlayCountVisibility(event, "albums")} />
+                  <strong>{showAlbumPlayCounts ? "Shown" : "Hidden"}</strong>
+                  <small>Sum of the play counts for tracks on each album.</small>
+                </label>
+                <label class="settings-toggle-row">
+                  <span>Artist play totals</span>
+                  <input type="checkbox" checked={showArtistPlayCounts} onchange={(event) => updatePlayCountVisibility(event, "artists")} />
+                  <strong>{showArtistPlayCounts ? "Shown" : "Hidden"}</strong>
+                  <small>Sum of play counts for tracks credited to each artist.</small>
+                </label>
+                <label class="settings-toggle-row">
+                  <span>Genre play totals</span>
+                  <input type="checkbox" checked={showGenrePlayCounts} onchange={(event) => updatePlayCountVisibility(event, "genres")} />
+                  <strong>{showGenrePlayCounts ? "Shown" : "Hidden"}</strong>
+                  <small>Each track contributes its plays to every assigned genre.</small>
+                </label>
+                <label class="settings-toggle-row">
+                  <span>Album track play counts</span>
+                  <input type="checkbox" checked={showAlbumTrackPlayCounts} onchange={(event) => updatePlayCountVisibility(event, "albumTracks")} />
+                  <strong>{showAlbumTrackPlayCounts ? "Shown" : "Hidden"}</strong>
+                  <small>Show individual all-time counts in album detail.</small>
+                </label>
               </div>
-              <p>Export includes your full history, regardless of the period selected in Stats. Backups contain no audio files or explicit music-folder paths. Original event IDs are retained. Import previews matches, duplicates and conflicts before changing data.</p>
-              <div class="stats-transfer-actions">
-                <button type="button" disabled={historyBusy} onclick={() => void handleExportListeningHistory()}>Export listening history</button>
-                <button type="button" disabled={historyBusy} onclick={() => void handlePreviewListeningHistory()}>Import listening history…</button>
-              </div>
-              {#if historyBusy}<p role="status" class="stats-status">Preparing listening history… Verifying audio identities can take a while for a large library.</p>{/if}
-              {#if historyError}<p role="alert" class="stats-status">{historyError}</p>{/if}
-              {#if historyMessage}<p role="status" class="stats-status">{historyMessage}</p>{/if}
-              {#if historyImportPreview}
-                <div class="stats-import-preview">
-                  <h5>Import preview</h5>
-                  <p>{historyImportPreview.matchedTracks} matched · {historyImportPreview.unmatchedTracks} unmatched · {historyImportPreview.ambiguousTracks} ambiguous tracks</p>
-                  <p>{historyImportPreview.newEvents} new · {historyImportPreview.duplicateEvents} duplicate dated events · {historyImportPreview.undatedPlays} source undated plays</p>
-                  {#if historyImportPreview.conflicts.length > 0}
-                    <ul>{#each historyImportPreview.conflicts as conflict}<li>{conflict}</li>{/each}</ul>
-                  {/if}
-                  <div class="stats-import-tracks">
-                    {#each historyImportPreview.tracks.slice(0, historyPreviewLimit) as item (item.referenceId)}
-                      <div class="stats-import-track">
-                        <strong>{item.title}</strong><span>{item.artist ?? "Unknown Artist"} · {item.status} · {item.newEvents} new / {item.duplicateEvents} duplicate events</span>
-                        {#if item.conflict}<small>{item.conflict}</small>{/if}
-                        {#if item.status === "ambiguous" && item.candidates.length > 0}
-                          <label for={`associate-${item.referenceId}`}>Associate audio-identical track</label>
-                          <select id={`associate-${item.referenceId}`} value={historyAssociationTargets[item.pendingTrackId] ?? ""} onchange={(event) => { historyAssociationTargets[item.pendingTrackId] = event.currentTarget.value; }}>
-                            <option value="">Choose a track</option>
-                            {#each item.candidates as candidate}<option value={candidate}>{tracks.find((track) => track.id === candidate)?.title ?? candidate}</option>{/each}
-                          </select>
-                          <button type="button" disabled={historyBusy || !item.retained || !historyAssociationTargets[item.pendingTrackId]} onclick={() => void handleAssociateListeningHistory(item.pendingTrackId)}>Associate retained history</button>
-                          {#if !item.retained}<small>Import first to retain this history, then choose an audio-identical track.</small>{/if}
-                        {/if}
-                      </div>
-                    {/each}
-                  </div>
-                  {#if historyPreviewLimit < historyImportPreview.tracks.length}
-                    <button type="button" onclick={() => { historyPreviewLimit = nextStatsLimit(historyPreviewLimit, historyImportPreview?.tracks.length ?? 0); }}>Show 50 more track references</button>
-                  {/if}
-                  <p>Showing {Math.min(historyPreviewLimit, historyImportPreview.tracks.length)} of {historyImportPreview.tracks.length} track references. All references are included when importing.</p>
-                  <button type="button" disabled={historyBusy || historyImportPreview.conflicts.length > 0} onclick={() => void handleApplyListeningHistory()}>Import new history</button>
-                  <button type="button" disabled={historyBusy} onclick={() => { historyImportPreview = null; historyImportPath = null; }}>Cancel preview</button>
-                </div>
-              {/if}
             </section>
+            </div>
 
+            <div
+              class="settings-section-content"
+              id="settings-panel-playback"
+              role="tabpanel"
+              aria-labelledby="settings-tab-playback"
+              hidden={settingsSection !== "playback"}
+              tabindex="0"
+            >
             <section class="settings-section" aria-labelledby="settings-playback-title">
               <div class="settings-section-header">
                 <div>
@@ -9855,71 +9859,57 @@
                 </label>
               </div>
             </section>
+            </div>
 
-            <section class="settings-section" aria-labelledby="settings-interface-title">
+            <div
+              class="settings-section-content"
+              id="settings-panel-library"
+              role="tabpanel"
+              aria-labelledby="settings-tab-library"
+              hidden={settingsSection !== "library"}
+              tabindex="0"
+            >
+            <section class="settings-section" aria-labelledby="settings-library-title">
               <div class="settings-section-header">
                 <div>
-                  <p class="eyebrow">Interface</p>
-                  <h4 id="settings-interface-title">Display preferences</h4>
+                  <p class="eyebrow">Library</p>
+                  <h4 id="settings-library-title">Local library</h4>
                 </div>
-                <span class="settings-pill">{themePresets.find((theme) => theme.id === selectedTheme)?.name ?? "Cassette Teal"}</span>
+                <span class="settings-pill">{hasLoadedCache ? "Cache loaded" : "Loading cache"}</span>
               </div>
 
-              <div class="theme-preset-grid" aria-label="Theme presets">
-                {#each themePresets as theme}
-                  <button
-                    class:selected={selectedTheme === theme.id}
-                    type="button"
-                    aria-pressed={selectedTheme === theme.id}
-                    onclick={() => handleThemeSelect(theme.id)}
-                  >
-                    <span class="theme-swatch-row" aria-hidden="true">
-                      {#each theme.swatches as swatch}
-                        <span style={`--swatch-color: ${swatch}`}></span>
-                      {/each}
-                    </span>
-                    <strong>{theme.name}</strong>
-                    <small>{theme.description}</small>
-                  </button>
+              <div class="library-folder-card">
+                <span>Current folder</span>
+                <strong>{scannedFolder ?? "No library folder selected"}</strong>
+              </div>
+
+              <div class="settings-stat-grid" aria-label="Library summary">
+                {#each librarySettingsStats as stat}
+                  <div class="settings-stat-tile">
+                    <span>{stat.label}</span>
+                    <strong>{stat.value}</strong>
+                  </div>
                 {/each}
+                <div class="settings-stat-tile wide">
+                  <span>Last scan</span>
+                  <strong>{lastScanLabel}</strong>
+                </div>
               </div>
 
-              <div class="settings-control-list">
-                <label class="settings-toggle-row">
-                  <span>Songs list numbers</span>
-                  <input type="checkbox" checked={showSongListNumbers} onchange={handleSongListNumbersSettingChange} />
-                  <strong>{showSongListNumbers ? "Shown" : "Hidden"}</strong>
-                  <small>Show positions in the current Songs sort and filters. Choose Most played to see listening rank.</small>
-                </label>
-                <div>
-                  <span>Album track numbers</span>
-                  <strong>Enabled</strong>
-                  <small>Always shown in album detail</small>
-                </div>
-                <label class="settings-toggle-row">
-                  <span>Album play totals</span>
-                  <input type="checkbox" checked={showAlbumPlayCounts} onchange={(event) => updatePlayCountVisibility(event, "albums")} />
-                  <strong>{showAlbumPlayCounts ? "Shown" : "Hidden"}</strong>
-                  <small>Sum of the play counts for tracks on each album.</small>
-                </label>
-                <label class="settings-toggle-row">
-                  <span>Artist play totals</span>
-                  <input type="checkbox" checked={showArtistPlayCounts} onchange={(event) => updatePlayCountVisibility(event, "artists")} />
-                  <strong>{showArtistPlayCounts ? "Shown" : "Hidden"}</strong>
-                  <small>Sum of play counts for tracks credited to each artist.</small>
-                </label>
-                <label class="settings-toggle-row">
-                  <span>Genre play totals</span>
-                  <input type="checkbox" checked={showGenrePlayCounts} onchange={(event) => updatePlayCountVisibility(event, "genres")} />
-                  <strong>{showGenrePlayCounts ? "Shown" : "Hidden"}</strong>
-                  <small>Each track contributes its plays to every assigned genre.</small>
-                </label>
-                <label class="settings-toggle-row">
-                  <span>Album track play counts</span>
-                  <input type="checkbox" checked={showAlbumTrackPlayCounts} onchange={(event) => updatePlayCountVisibility(event, "albumTracks")} />
-                  <strong>{showAlbumTrackPlayCounts ? "Shown" : "Hidden"}</strong>
-                  <small>Show individual all-time counts in album detail.</small>
-                </label>
+              <div class="settings-actions">
+                <button class="primary" type="button" disabled={isScanning} onclick={handleScanLibrary}>
+                  {isScanning ? "Scanning..." : scannedFolder ? "Rescan Library" : "Scan Library"}
+                </button>
+                <button type="button" disabled={isScanning} onclick={handleScanLibrary}>
+                  Change Library Folder
+                </button>
+                <button class="primary" type="button" onclick={handleLibraryHealthSelect}>
+                  Open Library Health
+                </button>
+                <button class="danger" type="button" disabled title="Coming later: needs a safe cache-only migration path">
+                  Clear Library Cache
+                  <span>Coming later</span>
+                </button>
               </div>
             </section>
 
@@ -9949,7 +9939,75 @@
                 </button>
               </div>
             </section>
+            </div>
 
+            <div
+              class="settings-section-content"
+              id="settings-panel-history"
+              role="tabpanel"
+              aria-labelledby="settings-tab-history"
+              hidden={settingsSection !== "history"}
+              tabindex="0"
+            >
+            <section class="settings-section stats-transfer-panel" aria-labelledby="history-transfer-title">
+              <div class="settings-section-header">
+                <div>
+                  <p class="eyebrow">Listening data</p>
+                  <h4 id="history-transfer-title">Portable listening history</h4>
+                </div>
+              </div>
+              <p>Export includes your full history, regardless of the period selected in Stats. Backups contain no audio files or explicit music-folder paths. Original event IDs are retained. Import previews matches, duplicates and conflicts before changing data.</p>
+              <div class="stats-transfer-actions">
+                <button type="button" disabled={historyBusy} onclick={() => void handleExportListeningHistory()}>Export listening history</button>
+                <button type="button" disabled={historyBusy} onclick={() => void handlePreviewListeningHistory()}>Import listening history…</button>
+              </div>
+              {#if historyBusy}<p role="status" class="stats-status">Preparing listening history… Verifying audio identities can take a while for a large library.</p>{/if}
+              {#if historyError}<p role="alert" class="stats-status">{historyError}</p>{/if}
+              {#if historyMessage}<p role="status" class="stats-status">{historyMessage}</p>{/if}
+              {#if historyImportPreview}
+                <div class="stats-import-preview">
+                  <h5>Import preview</h5>
+                  <p>{historyImportPreview.matchedTracks} matched · {historyImportPreview.unmatchedTracks} unmatched · {historyImportPreview.ambiguousTracks} ambiguous tracks</p>
+                  <p>{historyImportPreview.newEvents} new · {historyImportPreview.duplicateEvents} duplicate dated events · {historyImportPreview.undatedPlays} source undated plays</p>
+                  {#if historyImportPreview.conflicts.length > 0}
+                    <ul>{#each historyImportPreview.conflicts as conflict}<li>{conflict}</li>{/each}</ul>
+                  {/if}
+                  <div class="stats-import-tracks">
+                    {#each historyImportPreview.tracks.slice(0, historyPreviewLimit) as item (item.referenceId)}
+                      <div class="stats-import-track">
+                        <strong>{item.title}</strong><span>{item.artist ?? "Unknown Artist"} · {item.status} · {item.newEvents} new / {item.duplicateEvents} duplicate events</span>
+                        {#if item.conflict}<small>{item.conflict}</small>{/if}
+                        {#if item.status === "ambiguous" && item.candidates.length > 0}
+                          <label for={`associate-${item.referenceId}`}>Associate audio-identical track</label>
+                          <select id={`associate-${item.referenceId}`} value={historyAssociationTargets[item.pendingTrackId] ?? ""} onchange={(event) => { historyAssociationTargets[item.pendingTrackId] = event.currentTarget.value; }}>
+                            <option value="">Choose a track</option>
+                            {#each item.candidates as candidate}<option value={candidate}>{tracks.find((track) => track.id === candidate)?.title ?? candidate}</option>{/each}
+                          </select>
+                          <button type="button" disabled={historyBusy || !item.retained || !historyAssociationTargets[item.pendingTrackId]} onclick={() => void handleAssociateListeningHistory(item.pendingTrackId)}>Associate retained history</button>
+                          {#if !item.retained}<small>Import first to retain this history, then choose an audio-identical track.</small>{/if}
+                        {/if}
+                      </div>
+                    {/each}
+                  </div>
+                  {#if historyPreviewLimit < historyImportPreview.tracks.length}
+                    <button type="button" onclick={() => { historyPreviewLimit = nextStatsLimit(historyPreviewLimit, historyImportPreview?.tracks.length ?? 0); }}>Show 50 more track references</button>
+                  {/if}
+                  <p>Showing {Math.min(historyPreviewLimit, historyImportPreview.tracks.length)} of {historyImportPreview.tracks.length} track references. All references are included when importing.</p>
+                  <button type="button" disabled={historyBusy || historyImportPreview.conflicts.length > 0} onclick={() => void handleApplyListeningHistory()}>Import new history</button>
+                  <button type="button" disabled={historyBusy} onclick={() => { historyImportPreview = null; historyImportPath = null; }}>Cancel preview</button>
+                </div>
+              {/if}
+            </section>
+            </div>
+
+            <div
+              class="settings-section-content"
+              id="settings-panel-updates"
+              role="tabpanel"
+              aria-labelledby="settings-tab-updates"
+              hidden={settingsSection !== "updates"}
+              tabindex="0"
+            >
             <section class="settings-section updates-section" aria-labelledby="settings-updates-title">
               <div class="settings-section-header">
                 <div>
@@ -10080,7 +10138,16 @@
                 installations remain under your package manager's control. Updating does not replace Cassette's user data.
               </p>
             </section>
+            </div>
 
+            <div
+              class="settings-section-content"
+              id="settings-panel-about"
+              role="tabpanel"
+              aria-labelledby="settings-tab-about"
+              hidden={settingsSection !== "about"}
+              tabindex="0"
+            >
             <section class="settings-section about-section" aria-labelledby="settings-about-title">
               <div class="settings-section-header">
                 <div>
@@ -10106,6 +10173,7 @@
               </div>
               <p class="settings-note">Cassette does not modify your audio files unless future tag editing is explicitly used.</p>
             </section>
+            </div>
           </section>
         {/if}
       {/if}
@@ -14679,6 +14747,21 @@
     display: grid;
     max-width: 1040px;
     gap: 16px;
+  }
+
+  .settings-section-content {
+    display: grid;
+    min-width: 0;
+    gap: 16px;
+  }
+
+  .settings-section-content[hidden] {
+    display: none;
+  }
+
+  .settings-section-content:focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 2px;
   }
 
   .cd-ripper-page {
