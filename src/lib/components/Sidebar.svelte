@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { NavItem } from "$lib/types/library";
+  import AppIcon from "$lib/components/AppIcon.svelte";
 
   type Props = {
     items: NavItem[];
@@ -8,18 +9,37 @@
   };
 
   let { items, active = "Home", onNavigate }: Props = $props();
+
+  function iconFor(label: string): "albums" | "artists" | "genres" | "songs" | "playlists" | "disc" | "stats" | "settings" | undefined {
+    if (label === "Albums") return "albums";
+    if (label === "Artists") return "artists";
+    if (label === "Genres") return "genres";
+    if (label === "Songs") return "songs";
+    if (label === "Playlists") return "playlists";
+    if (label === "CD Rip") return "disc";
+    if (label === "Stats") return "stats";
+    if (label === "Settings") return "settings";
+    return undefined;
+  }
 </script>
 
 <aside class="sidebar" aria-label="Primary navigation">
   <nav>
     {#each items as item}
+      {@const icon = iconFor(item.label)}
       <button
         class:active={item.label === active}
         type="button"
         aria-current={item.label === active ? "page" : undefined}
         onclick={() => onNavigate?.(item.label)}
       >
-        <span class="nav-icon" aria-hidden="true">{item.icon}</span>
+        <span class="nav-icon" aria-hidden="true">
+          {#if icon}
+            <AppIcon name={icon} size={17} />
+          {:else}
+            {item.icon}
+          {/if}
+        </span>
         <span>{item.label}</span>
       </button>
     {/each}
@@ -66,6 +86,11 @@
   button.active .nav-icon {
     background: var(--accent);
     color: var(--accent-contrast);
+  }
+
+  button:focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 2px;
   }
 
   .nav-icon {
