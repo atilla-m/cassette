@@ -47,6 +47,7 @@ jobs:
             binutils \
             cpio \
             file \
+            flac \
             libarchive-tools \
             libayatana-appindicator3-dev \
             libdiscid-dev \
@@ -74,6 +75,7 @@ jobs:
       - run: npm run check
       - run: npm run test:stats
       - run: npm run test:updater
+      - run: npm run test:cd-rip
       - run: python3 scripts/test-signature-safety.py
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
       - run: cargo test --manifest-path src-tauri/Cargo.toml
@@ -165,6 +167,7 @@ jobs:
       - run: npm run check
       - run: npm run test:stats
       - run: npm run test:updater
+      - run: npm run test:cd-rip
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
       - run: cargo test --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc
       - run: cargo check --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc

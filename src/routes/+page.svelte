@@ -171,6 +171,7 @@
   import { onMount, untrack } from "svelte";
   import packageInfo from "../../package.json";
   import SettingsTabs, { type SettingsSection } from "$lib/components/SettingsTabs.svelte";
+  import { createCdRipMetadataSnapshot, mergeCdLookupMetadata } from "$lib/utils/cdRipMetadata";
 
   type SongSortKey = "title" | "artist" | "album" | "duration" | "recentlyAdded" | "recentlyPlayed" | "playCount";
   type AlbumSortKey = "title" | "artist" | "year" | "trackCount" | "mostPlayed" | "leastPlayed";
@@ -521,6 +522,8 @@
   let selectedCdReleaseId = $state<string | null>(null);
   let cdRipMetadata = $state<CdRipMetadata | null>(null);
   let cdRipMetadataSnapshot = $state<CdRipMetadata | null>(null);
+  const cdManuallyEditedFields = new Set<string>();
+  let cdMetadataLookupGeneration = 0;
   let cdDiscId = $state<string | null>(null);
   let isLookingUpCdCover = $state(false);
   let cdCoverError = $state<string | null>(null);
@@ -2910,6 +2913,9 @@
   }
 
   function resetCdMetadataLookup() {
+    cdMetadataLookupGeneration += 1;
+    cdManuallyEditedFields.clear();
+    isLookingUpCdMetadata = false;
     cdMetadataError = null;
     cdMetadataMessage = null;
     cdMetadataResults = [];
@@ -2934,18 +2940,22 @@
     }
 
     isLookingUpCdMetadata = true;
+    const generation = ++cdMetadataLookupGeneration;
     cdMetadataError = null;
     cdMetadataMessage = "Looking up metadata...";
     cdMetadataResults = [];
     selectedCdReleaseId = null;
 
     try {
-      applyCdMetadataLookup(await lookupCdMetadata());
+      const result = await lookupCdMetadata();
+      if (generation === cdMetadataLookupGeneration) applyCdMetadataLookup(result);
     } catch (error) {
-      cdMetadataMessage = null;
-      cdMetadataError = error instanceof Error ? error.message : String(error);
+      if (generation === cdMetadataLookupGeneration) {
+        cdMetadataMessage = null;
+        cdMetadataError = error instanceof Error ? error.message : String(error);
+      }
     } finally {
-      isLookingUpCdMetadata = false;
+      if (generation === cdMetadataLookupGeneration) isLookingUpCdMetadata = false;
     }
   }
 
@@ -2964,20 +2974,25 @@
     cdMetadataMessage = result.releases.length === 1
       ? "One MusicBrainz release found."
       : `${result.releases.length} MusicBrainz releases found. Choose the matching release.`;
-    selectCdMetadataRelease(result.releases[0]);
+    selectCdMetadataRelease(result.releases[0], true);
   }
 
-  function selectCdMetadataRelease(release: CdMetadataRelease) {
+  function selectCdMetadataRelease(release: CdMetadataRelease, preserveManualEdits = false) {
     if (isRippingCd) {
       return;
     }
 
     const existingManualCover = cdRipMetadata?.cover?.source === "manual" ? cdRipMetadata.cover : null;
     selectedCdReleaseId = release.id;
+    const incoming = metadataFromRelease(release, cdTracks);
+    const metadata = preserveManualEdits && cdRipMetadata
+      ? mergeCdLookupMetadata(cdRipMetadata, incoming, cdManuallyEditedFields)
+      : incoming;
     cdRipMetadata = {
-      ...metadataFromRelease(release, cdTracks),
+      ...metadata,
       cover: existingManualCover,
     };
+    if (!preserveManualEdits) cdManuallyEditedFields.clear();
     cdMetadataError = null;
     cdCoverError = null;
     cdCoverMessage = existingManualCover ? "Manual cover selected" : null;
@@ -3075,13 +3090,13 @@
       }
     }
 
+    const ripMetadataSnapshot = createCdRipMetadataSnapshot(cdRipMetadata ?? defaultCdRipMetadata(cdTracks, null));
     isRippingCd = true;
-    const ripMetadataSnapshot = cloneCdRipMetadata(metadataForRip());
     cdRipMetadataSnapshot = ripMetadataSnapshot;
     cdRipError = null;
     cdRipMessage = "Starting CD rip...";
     lastRippedFolder = null;
-    cdTracks = cdTracks.map((track) => ({ ...track, status: "pending", error: null }));
+    cdTracks = cdTracks.map((track) => ({ ...track, status: "pending", outputPath: undefined, error: null }));
 
     try {
       const result = await ripCdToFlac(cdOutputFolder, ripMetadataSnapshot);
@@ -3142,6 +3157,7 @@
         ...track,
         status,
         outputFilename: payload.outputFilename ?? track.outputFilename,
+        outputPath: payload.outputPath ?? track.outputPath,
         error: status === "error" ? (payload.message ?? "Track failed.") : null,
       };
     });
@@ -3205,50 +3221,12 @@
     };
   }
 
-  function metadataForRip(): CdRipMetadata | null {
-    if (!cdRipMetadata || !metadataHasUserValue(cdRipMetadata)) {
-      return null;
-    }
-
-    return cdRipMetadata;
-  }
-
-  function cloneCdRipMetadata(metadata: CdRipMetadata | null): CdRipMetadata | null {
-    if (!metadata) {
-      return null;
-    }
-
-    return {
-      albumArtist: metadata.albumArtist,
-      albumTitle: metadata.albumTitle,
-      year: metadata.year,
-      genre: metadata.genre,
-      discNumber: metadata.discNumber,
-      cover: metadata.cover ? { ...metadata.cover } : null,
-      tracks: metadata.tracks.map((track) => ({ ...track })),
-    };
-  }
-
-  function metadataHasUserValue(metadata: CdRipMetadata) {
-    return Boolean(
-      metadata.albumArtist.trim()
-      || metadata.albumTitle.trim()
-      || metadata.year.trim()
-      || metadata.genre.trim()
-      || metadata.discNumber
-      || metadata.tracks.some((track) => (
-        track.artist.trim()
-        || track.discNumber
-        || track.title.trim() !== `Track ${String(track.number).padStart(2, "0")}`
-      )),
-    );
-  }
-
   function updateCdAlbumMetadata(key: "albumArtist" | "albumTitle" | "year" | "genre", value: string) {
     if (isRippingCd) {
       return;
     }
 
+    cdManuallyEditedFields.add(key);
     cdRipMetadata = {
       ...(cdRipMetadata ?? defaultCdRipMetadata(cdTracks, null)),
       [key]: value,
@@ -3261,6 +3239,7 @@
     }
 
     const parsed = Number.parseInt(value, 10);
+    cdManuallyEditedFields.add("discNumber");
     const discNumber = Number.isFinite(parsed) && parsed > 0 ? parsed : null;
     const metadata = cdRipMetadata ?? defaultCdRipMetadata(cdTracks, null);
 
@@ -3276,6 +3255,7 @@
       return;
     }
 
+    cdManuallyEditedFields.add(`track.${trackNumber}.${key}`);
     const metadata = cdRipMetadata ?? defaultCdRipMetadata(cdTracks, null);
 
     cdRipMetadata = {
@@ -9463,7 +9443,7 @@
                         <small>{track.warning}</small>
                       {/if}
                     </span>
-                    <span role="cell">{cdTrackOutputFilenameDisplay(track)}</span>
+                    <span role="cell" title={track.outputPath}>{cdTrackOutputFilenameDisplay(track)}</span>
                   </div>
                 {/each}
               </div>

@@ -335,6 +335,7 @@ export type CdRipTrack = {
   durationSeconds: number | null;
   status?: CdRipTrackStatus;
   outputFilename?: string;
+  outputPath?: string | null;
   error?: string | null;
   warning?: string | null;
 };

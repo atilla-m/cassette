@@ -37,6 +37,9 @@ mod mpris;
 mod portable_history;
 mod updates;
 
+#[cfg(all(test, target_os = "linux"))]
+mod cd_rip_tests;
+
 use mpris::{MprisState, MprisTrack};
 
 const SUPPORTED_EXTENSIONS: &[&str] = &["flac", "mp3", "ogg", "opus", "wav", "m4a"];
@@ -405,6 +408,7 @@ struct CdRipTrack {
     duration_seconds: Option<u32>,
     status: Option<String>,
     output_filename: Option<String>,
+    output_path: Option<String>,
     error: Option<String>,
     warning: Option<String>,
 }
@@ -444,7 +448,7 @@ struct CdRipCover {
     extension: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CdRipMetadata {
     album_artist: String,
@@ -2404,7 +2408,12 @@ fn cover_mime_and_extension(data: &[u8], content_type: Option<&str>) -> Option<(
 
 #[cfg(target_os = "linux")]
 fn run_cdparanoia_query() -> Result<CdDetectResult, String> {
-    let output = match Command::new("cdparanoia").arg("-Q").output() {
+    run_cdparanoia_query_with_reader(Path::new("cdparanoia"))
+}
+
+#[cfg(target_os = "linux")]
+fn run_cdparanoia_query_with_reader(reader: &Path) -> Result<CdDetectResult, String> {
+    let output = match Command::new(reader).arg("-Q").output() {
         Ok(output) => output,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             return Ok(CdDetectResult {
@@ -2482,6 +2491,7 @@ fn parse_cdparanoia_track_line(line: &str) -> Option<CdRipTrack> {
         duration_seconds,
         status: Some("pending".to_owned()),
         output_filename: Some(cd_track_filename(number)),
+        output_path: None,
         error: None,
         warning: None,
     })
@@ -2522,8 +2532,24 @@ fn rip_cd_to_flac_blocking(
     metadata: Option<CdRipMetadata>,
     app: AppHandle,
 ) -> Result<CdRipResult, String> {
+    rip_cd_to_flac_with_reader(
+        output_folder,
+        metadata,
+        Path::new("cdparanoia"),
+        |event, payload| emit_cd_rip_event(&app, event, payload),
+    )
+}
+
+// The same job used by the native command, with only disc reading injectable.
+#[cfg(target_os = "linux")]
+fn rip_cd_to_flac_with_reader(
+    output_folder: String,
+    metadata: Option<CdRipMetadata>,
+    reader: &Path,
+    emit: impl Fn(&str, CdRipEvent),
+) -> Result<CdRipResult, String> {
     ensure_command_available(
-        "cdparanoia",
+        reader,
         "cdparanoia is not installed. Install cdparanoia and try again.",
     )?;
     ensure_command_available("flac", "flac is not installed. Install flac and try again.")?;
@@ -2536,7 +2562,7 @@ fn rip_cd_to_flac_blocking(
         return Err("Selected output path is not a folder.".to_owned());
     }
 
-    let detection = run_cdparanoia_query()?;
+    let detection = run_cdparanoia_query_with_reader(reader)?;
     if !detection.drive_found {
         return Err(detection.error.unwrap_or_else(|| {
             "No CD drive was found or the drive could not be opened.".to_owned()
@@ -2548,15 +2574,13 @@ fn rip_cd_to_flac_blocking(
             .unwrap_or_else(|| "No audio CD was detected in the drive.".to_owned()));
     }
 
-    let (rip_folder_name, folder_warning) = cd_rip_folder_name(metadata.as_ref());
-    let rip_folder = unique_child_folder(&output_root, &rip_folder_name);
-    fs::create_dir_all(&rip_folder)
-        .map_err(|error| format!("Could not create rip folder: {error}"))?;
+    let metadata = metadata.unwrap_or_default();
+    let (rip_folder_name, folder_warning) = cd_rip_folder_name(Some(&metadata));
+    let rip_folder = create_cd_rip_folder(&output_root, &rip_folder_name)?;
     let rip_folder_string = rip_folder.to_string_lossy().to_string();
-    let (prepared_cover, cover_warning) = prepare_cd_cover(metadata.as_ref(), &rip_folder);
+    let (prepared_cover, cover_warning) = prepare_cd_cover(Some(&metadata), &rip_folder);
 
-    emit_cd_rip_event(
-        &app,
+    emit(
         "cd-rip-started",
         CdRipEvent {
             output_folder: Some(rip_folder_string.clone()),
@@ -2571,14 +2595,19 @@ fn rip_cd_to_flac_blocking(
     let mut ripped_tracks = Vec::with_capacity(detection.tracks.len());
 
     for detected_track in detection.tracks {
-        let metadata_track = metadata.as_ref().and_then(|metadata| {
-            metadata
-                .tracks
-                .iter()
-                .find(|track| track.number == detected_track.number)
-        });
+        let fallback_track = CdRipMetadataTrack {
+            number: detected_track.number,
+            title: format!("Track {:02}", detected_track.number),
+            artist: String::new(),
+            disc_number: metadata.disc_number,
+        };
+        let metadata_track = metadata
+            .tracks
+            .iter()
+            .find(|track| track.number == detected_track.number)
+            .unwrap_or(&fallback_track);
         let (output_filename, filename_warning) =
-            cd_track_filename_from_metadata(detected_track.number, metadata_track);
+            cd_track_filename_from_metadata(detected_track.number, Some(metadata_track));
         let output_path = rip_folder.join(&output_filename);
         let wav_path = rip_folder.join(format!(
             "{:02} - Track {:02}.wav",
@@ -2586,8 +2615,7 @@ fn rip_cd_to_flac_blocking(
         ));
         let output_path_string = output_path.to_string_lossy().to_string();
 
-        emit_cd_rip_event(
-            &app,
+        emit(
             "cd-rip-track-started",
             CdRipEvent {
                 output_folder: Some(rip_folder_string.clone()),
@@ -2601,6 +2629,7 @@ fn rip_cd_to_flac_blocking(
         let mut track_result = detected_track.clone();
         track_result.status = Some("ripping".to_owned());
         track_result.output_filename = Some(output_filename.clone());
+        track_result.output_path = Some(output_path_string.clone());
         track_result.warning = merge_warnings(
             merge_warnings(folder_warning.clone(), filename_warning),
             cover_warning.clone(),
@@ -2610,10 +2639,11 @@ fn rip_cd_to_flac_blocking(
             detected_track.number,
             &wav_path,
             &output_path,
-            metadata.as_ref(),
-            metadata_track,
+            Some(&metadata),
+            Some(metadata_track),
             track_total,
             prepared_cover.as_ref(),
+            reader,
         ) {
             Ok(tag_warning) => {
                 track_result.status = Some("done".to_owned());
@@ -2621,8 +2651,7 @@ fn rip_cd_to_flac_blocking(
                 if let Some(tag_warning) = tag_warning {
                     track_result.warning = merge_warnings(track_result.warning, Some(tag_warning));
                 }
-                emit_cd_rip_event(
-                    &app,
+                emit(
                     "cd-rip-track-finished",
                     CdRipEvent {
                         output_folder: Some(rip_folder_string.clone()),
@@ -2636,8 +2665,7 @@ fn rip_cd_to_flac_blocking(
             Err(error) => {
                 track_result.status = Some("error".to_owned());
                 track_result.error = Some(error.clone());
-                emit_cd_rip_event(
-                    &app,
+                emit(
                     "cd-rip-track-error",
                     CdRipEvent {
                         output_folder: Some(rip_folder_string.clone()),
@@ -2653,8 +2681,7 @@ fn rip_cd_to_flac_blocking(
         ripped_tracks.push(track_result);
     }
 
-    emit_cd_rip_event(
-        &app,
+    emit(
         "cd-rip-finished",
         CdRipEvent {
             output_folder: Some(rip_folder_string.clone()),
@@ -2680,8 +2707,11 @@ fn rip_single_track_to_flac(
     metadata_track: Option<&CdRipMetadataTrack>,
     track_total: u32,
     cover: Option<&PreparedCdCover>,
+    reader: &Path,
 ) -> Result<Option<String>, String> {
-    let rip_output = Command::new("cdparanoia")
+    ensure_cd_destination_absent(flac_path)?;
+    ensure_cd_destination_absent(wav_path)?;
+    let rip_output = Command::new(reader)
         .arg(track_number.to_string())
         .arg(wav_path)
         .output()
@@ -2696,7 +2726,6 @@ fn rip_single_track_to_flac(
     }
 
     let flac_output = Command::new("flac")
-        .arg("-f")
         .arg("-o")
         .arg(flac_path)
         .arg(wav_path)
@@ -2724,11 +2753,18 @@ fn rip_single_track_to_flac(
 }
 
 #[cfg(target_os = "linux")]
-fn ensure_command_available(command: &str, missing_message: &str) -> Result<(), String> {
+fn ensure_command_available(
+    command: impl AsRef<std::ffi::OsStr>,
+    missing_message: &str,
+) -> Result<(), String> {
+    let command = command.as_ref();
     match Command::new(command).arg("--version").output() {
         Ok(_) => Ok(()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Err(missing_message.to_owned()),
-        Err(error) => Err(format!("Could not run {command}: {error}")),
+        Err(error) => Err(format!(
+            "Could not run {}: {error}",
+            command.to_string_lossy()
+        )),
     }
 }
 
@@ -3173,13 +3209,50 @@ fn cd_track_filename_from_metadata(
     metadata_track: Option<&CdRipMetadataTrack>,
 ) -> (String, Option<String>) {
     let fallback = format!("Track {track_number:02}");
-    let title = metadata_track
-        .map(|track| track.title.as_str())
-        .filter(|title| !title.trim().is_empty())
-        .unwrap_or(&fallback);
-    let (safe_title, warning) = sanitize_path_component(title, &fallback);
+    let title = cd_track_title(track_number, metadata_track);
+    let (safe_title, warning) = sanitize_path_component(&title, &fallback);
 
     (format!("{track_number:02} - {safe_title}.flac"), warning)
+}
+
+fn cd_track_title(track_number: u32, metadata_track: Option<&CdRipMetadataTrack>) -> String {
+    metadata_track
+        .map(|track| track.title.trim())
+        .filter(|title| !title.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("Track {track_number:02}"))
+}
+
+#[cfg(target_os = "linux")]
+fn create_cd_rip_folder(parent: &Path, folder_name: &str) -> Result<PathBuf, String> {
+    for index in 1..=1000 {
+        let candidate = parent.join(if index == 1 {
+            folder_name.to_owned()
+        } else {
+            format!("{folder_name} ({index})")
+        });
+        match fs::create_dir(&candidate) {
+            Ok(()) => return Ok(candidate),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(format!("Could not create rip folder: {error}")),
+        }
+    }
+    Err("Could not create a new rip folder without replacing an existing destination.".to_owned())
+}
+
+#[cfg(target_os = "linux")]
+fn ensure_cd_destination_absent(path: &Path) -> Result<(), String> {
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Ok(_) => Err(format!(
+            "Rip destination already exists; it will not be overwritten: {}",
+            path.display()
+        )),
+        Err(error) => Err(format!(
+            "Could not check rip destination {}: {error}",
+            path.display()
+        )),
+    }
 }
 
 fn cd_rip_folder_name(metadata: Option<&CdRipMetadata>) -> (String, Option<String>) {
@@ -3310,9 +3383,7 @@ fn write_flac_tags(
         .map_err(|error| format!("Could not read encoded FLAC for tagging: {error}"))?;
     let mut tag = Tag::new(TagType::VorbisComments);
 
-    if !metadata_track.title.trim().is_empty() {
-        tag.set_title(metadata_track.title.trim().to_owned());
-    }
+    tag.set_title(cd_track_title(metadata_track.number, Some(metadata_track)));
 
     if !metadata_track.artist.trim().is_empty() {
         tag.set_artist(metadata_track.artist.trim().to_owned());
