@@ -1,7 +1,7 @@
 /*
  * Keep Cassette readable if the page component stylesheet is briefly replaced
- * during Vite/Svelte hot reload. The complete theme definitions live in
- * src/routes/+page.svelte and override these baseline values when loaded.
+ * during Vite/Svelte hot reload. Keep the light palette here so a saved
+ * Light selection also takes effect before the page component loads.
  */
 :root {
   color-scheme: dark;
@@ -30,6 +30,33 @@
   --range-empty: #2a313c;
   background: var(--bg);
   color: var(--text);
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f1f5f4;
+  --bg-soft: #eaf0ef;
+  --panel: #ffffff;
+  --panel-soft: #f7faf9;
+  --panel-strong: #e8eeed;
+  --panel-hover: #e0ece9;
+  --border: #cbd8d5;
+  --border-strong: #748983;
+  --text: #172522;
+  --text-muted: #354944;
+  --text-soft: #4c605a;
+  --text-dim: #526760;
+  --accent: #216e61;
+  --accent-soft: #dcefe9;
+  --accent-strong: #4b8276;
+  --accent-text: #155548;
+  --accent-contrast: #ffffff;
+  --danger: #9f2d29;
+  --danger-soft: #fce7e5;
+  --warning: #775300;
+  --shadow: rgba(33, 62, 54, 0.14);
+  --focus-ring: #216e61;
+  --range-empty: #b8cbc6;
 }
 
 body {

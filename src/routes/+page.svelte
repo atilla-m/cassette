@@ -224,7 +224,7 @@
     libraryHealth: boolean;
     videoId: string | null;
   };
-  type ThemeId = "cassette-teal" | "rose-noir" | "royal-gold" | "glacier" | "obsidian";
+  type ThemeId = "cassette-teal" | "rose-noir" | "royal-gold" | "glacier" | "obsidian" | "light";
   type ThemePreset = {
     id: ThemeId;
     name: string;
@@ -363,11 +363,6 @@
   };
   const THEME_SETTING_KEY = "cassette:theme";
   const DEFAULT_THEME: ThemeId = "cassette-teal";
-  const SELECTABLE_THEME_IDS: readonly ThemeId[] = [
-    "cassette-teal",
-    "glacier",
-    "obsidian",
-  ];
   const themePresets: ThemePreset[] = [
     {
       id: "cassette-teal",
@@ -386,6 +381,12 @@
       name: "Obsidian",
       description: "OLED black, graphite panels, and cool silver accents.",
       swatches: ["#000000", "#111216", "#9aa6b2"],
+    },
+    {
+      id: "light",
+      name: "Light",
+      description: "White panels, soft gray, and deep teal accents.",
+      swatches: ["#f1f5f4", "#ffffff", "#216e61"],
     },
   ];
   const songSortOptions: DropdownOption[] = [
@@ -1021,7 +1022,7 @@
   });
 
   function isThemeId(value: string | null): value is ThemeId {
-    return SELECTABLE_THEME_IDS.some((themeId) => themeId === value);
+    return themePresets.some((theme) => theme.id === value);
   }
 
   function savedThemeOrDefault(value: string | null): ThemeId {
@@ -1991,11 +1992,13 @@
     }
   }
 
-  async function handleScanLibrary() {
+  async function handleScanLibrary(changeFolder = false) {
+    if (isScanning) return;
+    isScanning = true;
     scanError = null;
 
     try {
-      const folder = await chooseLibraryFolder();
+      const folder = changeFolder || !scannedFolder ? await chooseLibraryFolder() : scannedFolder;
 
       if (!folder) {
         return;
@@ -7070,8 +7073,8 @@
                 {isScanningVideos ? "Scanning..." : videoFolder ? "Rescan Videos" : "Add Video Folder"}
               </button>
             {:else}
-              <button type="button" disabled={isScanning} onclick={handleScanLibrary}>
-                {isScanning ? "Scanning..." : "Scan Library"}
+              <button type="button" disabled={isScanning} onclick={() => void handleScanLibrary()}>
+                {isScanning ? "Scanning..." : scannedFolder ? "Rescan Library" : "Scan Library"}
               </button>
             {/if}
           </div>
@@ -9734,10 +9737,10 @@
               </div>
 
               <div class="settings-actions">
-                <button class="primary" type="button" disabled={isScanning} onclick={handleScanLibrary}>
+                <button class="primary" type="button" disabled={isScanning} onclick={() => void handleScanLibrary()}>
                   {isScanning ? "Scanning..." : scannedFolder ? "Rescan Library" : "Scan Library"}
                 </button>
-                <button type="button" disabled={isScanning} onclick={handleScanLibrary}>
+                <button type="button" disabled={isScanning} onclick={() => void handleScanLibrary(true)}>
                   Change Library Folder
                 </button>
                 <button class="primary" type="button" onclick={handleLibraryHealthSelect}>
@@ -10855,6 +10858,69 @@
     --range-empty: #24394c;
   }
 
+  :global(:root[data-theme="light"]) :is(.album-card, .playlist-hero, .artist-detail-header, .genre-detail-header, .album-detail-header) {
+    border-color: var(--border);
+    box-shadow: 0 18px 44px var(--shadow);
+  }
+
+  :global(:root[data-theme="light"]) :is(.playlist-hero, .artist-detail-header, .genre-detail-header, .album-detail-header) {
+    background: linear-gradient(115deg, var(--panel-strong), var(--panel) 62%, var(--bg-soft));
+  }
+
+  :global(:root[data-theme="light"]) .album-detail-header::after {
+    background: none;
+  }
+
+  :global(:root[data-theme="light"]) :is(.album-card:hover, .album-card:focus-within, .artist-card:hover, .artist-card:focus-visible, .genre-card:hover, .genre-card:focus-visible) {
+    border-color: var(--accent-strong);
+    background: var(--panel-hover);
+  }
+
+  :global(:root[data-theme="light"]) .album-art .album-art-placeholder {
+    background:
+      radial-gradient(circle at 50% 42%, color-mix(in srgb, var(--item-color) 28%, transparent), transparent 68%),
+      var(--panel-strong);
+  }
+
+  :global(:root[data-theme="light"]) .album-art-placeholder small {
+    color: var(--text-muted);
+  }
+
+  :global(:root[data-theme="light"]) :is(.album-detail-overflow, .album-card-actions button, .album-detail-actions button:not(:first-child)) {
+    border-color: var(--border-strong);
+    background: var(--panel);
+  }
+
+  :global(:root[data-theme="light"]) :is(.album-detail-overflow, .album-card-actions button, .album-detail-actions button:not(:first-child)):is(:hover, :focus-visible):not(:disabled) {
+    border-color: var(--accent-strong);
+    background: var(--accent-soft);
+  }
+
+  :global(:root[data-theme="light"]) :is(.album-card-actions button, .album-detail-actions button):disabled {
+    border-color: var(--border);
+    background: var(--bg-soft);
+  }
+
+  :global(:root[data-theme="light"]) :is(.album-detail-meta span, .playlist-hero-meta span, .album-genre-chip-list button.muted, .album-track-format, .lyrics-offset-controls) {
+    border-color: var(--border);
+    background: var(--bg-soft);
+  }
+
+  :global(:root[data-theme="light"]) :is(.album-genre-chip-list button:not(.muted), .lyrics-genre-links button) {
+    border-color: var(--accent-strong);
+    background: var(--accent-soft);
+  }
+
+  :global(:root[data-theme="light"]) :is(.album-genre-chip-list button:not(.muted), .lyrics-genre-links button):is(:hover, :focus-visible) {
+    border-color: var(--accent);
+    background: var(--panel-hover);
+  }
+
+  :global(:root[data-theme="light"]) .album-track-row:not(.active, :hover, :focus-visible) {
+    border-color: var(--border);
+    background: var(--panel);
+  }
+
   :global(*) {
     box-sizing: border-box;
   }
@@ -11131,7 +11197,7 @@
     background-repeat: no-repeat;
     background-size: 5px 5px;
     color: var(--text);
-    color-scheme: dark;
+    color-scheme: inherit;
     font: inherit;
     font-size: 0.86rem;
     font-weight: 750;

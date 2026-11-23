@@ -662,6 +662,10 @@
     font-size: 0.74rem;
   }
 
+  :global(:root[data-theme="light"]) .player.compact button:not(.play) {
+    border-color: var(--border-strong);
+  }
+
   button:disabled {
     color: var(--text-dim);
     background: var(--panel-soft);

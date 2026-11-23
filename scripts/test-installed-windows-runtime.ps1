@@ -14,6 +14,7 @@ if (-not (Test-Path -LiteralPath $installerPath -PathType Leaf)) {
   throw "Missing diagnostic NSIS installer: $installerPath"
 }
 $python = (Get-Command python.exe -ErrorAction Stop).Source
+$node = (Get-Command node.exe -ErrorAction Stop).Source
 $sourceGstBin = Join-Path $env:GSTREAMER_1_0_ROOT_MSVC_X86_64 "bin"
 $sourceInspect = Join-Path $sourceGstBin "gst-inspect-1.0.exe"
 $sourceLaunch = Join-Path $sourceGstBin "gst-launch-1.0.exe"
@@ -65,7 +66,7 @@ New-Item -ItemType Directory -Path $testRoot | Out-Null
 Copy-Item -LiteralPath $sourceInspect, $sourceLaunch -Destination $testRoot
 $inspect = Join-Path $testRoot "gst-inspect-1.0.exe"
 $launch = Join-Path $testRoot "gst-launch-1.0.exe"
-$fixtureRoot = Join-Path $testRoot "media"
+$fixtureRoot = Join-Path $testRoot "Sample music – Etude"
 New-Item -ItemType Directory -Path $fixtureRoot | Out-Null
 foreach ($extension in @("flac", "mp3", "ogg", "opus", "m4a")) {
   $encoded = (Get-Content -LiteralPath "src-tauri/test-fixtures/tag-edit-tone.$extension.base64" -Raw).Trim()
@@ -120,17 +121,9 @@ foreach ($extension in @("flac", "mp3", "ogg", "opus", "wav", "m4a")) {
 }
 Write-Host "Installed-package six-format decoding and Windows audio-output factory checks passed using only bundled DLLs/plugins and a fresh registry; audible output was not tested."
 
-# A missing loader-time DLL exits before Cassette's main(). A short process
-# survival check catches that failure without claiming desktop/UI qualification.
-$running = Start-Process -FilePath $application -WorkingDirectory $installRoot -PassThru
-try {
-  if ($running.WaitForExit(8000)) {
-    throw "Installed Cassette exited during startup (exit code $($running.ExitCode))"
-  }
-  Write-Host "Installed-package DLL closure and loader startup passed without build-machine GStreamer on PATH."
-} finally {
-  if (-not $running.HasExited) {
-    Stop-Process -Id $running.Id -Force
-    $running.WaitForExit()
-  }
+# Start the packaged UI and use the runner's disposable Cassette profile and
+# synthetic files to exercise the native scanner and Settings.
+& $node scripts/test-installed-windows-ui.mjs $application $fixtureRoot $testRoot
+if ($LASTEXITCODE -ne 0) {
+  throw "The installed Cassette UI or native library scanner failed its smoke test"
 }
