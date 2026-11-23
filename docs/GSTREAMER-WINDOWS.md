@@ -1,55 +1,23 @@
-# Windows GStreamer strategy
+# Windows GStreamer qualification for beta.5.1
 
-## Decision after Cassette 0.1.0-beta.1
+The Windows `0.1.0-beta.5.1` candidate is based on Linux release commit `4399ac3756b724e6fdd3efd40c4addb1564da6cb` and incorporates the Windows fixes previously tested on `feature/windows-beta4`. The diagnostic results below apply to the listed beta.4 commits. Repeat the remaining desktop checks on the beta.5.1 installer.
 
-`v0.1.0-beta.1` is Linux-only. Windows 10/11 x86_64 build coverage remains in CI, but installer qualification and distribution are deferred to a later beta. The planned installers are unsigned and not self-contained, and the Windows checkpoint must still verify that they work on clean machines. Users of a future Windows beta will need the official GStreamer 1.26.11 MSVC x86_64 runtime with its `bin` directory available through `PATH` unless the distribution strategy changes first.
+Manual result (Windows 11, diagnostic commit `c0eef761585abd9097631657fb3d4070e065f467`): **FAIL — Start-menu launch stopped before the app opened with `gio-2.0-0.dll was not found`.** The exact NSIS payload omitted GIO even though `cassette.exe` imports it directly. Windows resolves that import before `main()`, so Cassette's process-local runtime setup cannot repair the omission. This candidate is retained only as failed diagnostic evidence; it is not Windows-qualified. The successor must pass an installed-package import-closure and loader-startup check without the builder's GStreamer environment, followed by another real Windows 11 launch.
 
-The Windows CI builder installs both official packages:
+Manual result (Windows 11, diagnostic commit `68b0114083442a14a421b123adf4969e741628eb`): **FAIL — the installer launched, but playback failed for all six synthetic formats.** `GST_DEBUG=*:6` showed 13 registered plugins, zero typefind factories, and no Windows hardware audio sink. The staging script selected the `typefind` element but omitted the separate `typefindfunctions` plugin; it also selected `autoaudiosink` without the WASAPI sinks it needs. This candidate is not playback-qualified.
 
-- `gstreamer-1.0-msvc-x86_64-1.26.11.msi`
-- `gstreamer-1.0-devel-msvc-x86_64-1.26.11.msi`
+Manual result (Windows 11, diagnostic commit `4c1542ecb57355019484c6c16a99ac3028b0e5ac`): **PASS** for all six synthetic formats playing and seeking, cover viewer, and theme/favorite/library persistence. Editing a different, unloaded track also passed. **FAIL** for editing the currently loaded track, both playing and paused: Windows rejected the safe file replacement with OS error 32 because playback still held the source open. The loaded-track fix requires a new manual recheck; these earlier passes do not establish that it works.
 
-They are downloaded only from `gstreamer.freedesktop.org` and checked against SHA-256 values published alongside the installers. The automated setup is in `scripts/install-gstreamer-windows.ps1`.
+CI builds an unsigned NSIS candidate for Windows 10/11 x86_64. Clean Windows desktop qualification and codec-redistribution review remain open.
 
-The development package is used only by the build runner. It is not uploaded or added to Cassette's installer. Cassette does not package headers, `.lib` files, static libraries, PDBs, test programs, or raw GStreamer development directories.
+The CI builder obtains the official GStreamer 1.26.11 MSVC x86_64 runtime and development MSIs from `gstreamer.freedesktop.org`, verifies their pinned SHA-256 values in `scripts/install-gstreamer-windows.ps1`, and uses the development files only while compiling. `scripts/stage-gstreamer-windows.ps1` resolves required playback elements through `gst-inspect-1.0`, rejects non-allowlisted plugin licenses, includes Cassette's direct GIO import, follows the selected PE DLL dependency closure with MSVC `dumpbin`, and stages only those runtime DLLs, plugin DLLs, the plugin scanner, upstream license texts, and a provenance/hash manifest. After bundling, the artifact scanner checks the packaged executable and runtime DLL import closure. CI then silently installs the exact NSIS package into an isolated runner directory and checks the installed layout and loader startup with build-machine GStreamer paths removed. The staged directory is ignored and generated only on the Windows runner. Headers, `.lib` files, PDBs, GStreamer test tools, and the development MSI are not bundled.
 
-## Why the runtime is external
+The Windows-only Tauri configuration places the runtime beside Cassette and includes an offline WebView2 installer. Cassette uses Tauri's default static Visual C++ runtime for its own binary, but the official GStreamer DLLs import dynamic Visual C++ runtime DLLs. Staging follows those imports and copies only the needed DLLs from Visual Studio's x64 `Microsoft.VC143.CRT` redistributable directory after verifying their Microsoft signatures. The exact files and hashes are recorded in the installer manifest, and its notice links to Microsoft's redistribution terms. Cassette points GStreamer at its private plugin directory and prepends its installation directory to **its own process** environment for the scanner child process; it never edits the user's or system's `PATH`. Missing staged components abort packaging or show a startup error where Windows can load the executable. A missing core DLL may still cause the Windows loader's own error before Cassette starts. The normal repair is to reinstall the verified NSIS package, not to install GStreamer separately.
 
-A private runtime deployment needs a verified closure of DLL dependencies and plugins, preserved GStreamer layout, codec-by-codec license notices, and patent/redistribution review. That work has not been completed. In particular, a convenient “full runtime” copy can include GPL or patent-sensitive codec packages that should not be redistributed casually.
+CI separately runs every selected element and the `typefindfunctions` plugin from a copied private runtime with the shared GStreamer directory removed from `PATH`. The artifact scanner requires their providers in the exact manifest, plus the core DLL, notices, and matching hashes in the extracted installer; it continues rejecting unlisted GStreamer DLLs and unsafe payloads. After NSIS installation, CI uses copied test executables but only the installed DLLs/plugins and a fresh registry to typefind and decode disposable FLAC, MP3, Vorbis, Opus, WAV, and AAC files to raw audio and EOS through a fakesink. It also loads both WASAPI hardware-output factories separately. This proves neither audible output nor clean-machine desktop playback or codec patent clearance.
 
-The official GStreamer deployment documentation permits shared-runtime installation and explains that the application must be able to locate the runtime `bin` directory. It also explains that plugins are discovered relative to `gstreamer-1.0-0.dll` when the installed layout is preserved.
+Required playback elements include `playbin`, `uridecodebin`, `decodebin3`, `filesrc`, `typefind`, `audioconvert`, `audioresample`, `autoaudiosink`, `id3demux`, `flacdec`, `flacparse`, `oggdemux`, `vorbisdec`, `vorbisparse`, `opusdec`, `opusparse`, `wavparse`, `qtdemux`, `avdec_mp3`, `mpegaudioparse`, `avdec_aac`, `aacparse`, `wasapi2sink`, and `wasapisink`, plus the separate `typefindfunctions` plugin. All six formats passed a Windows 11 synthetic-media playback and seek check on the `4c1542e` diagnostic candidate. Audible playback on the beta.5.1 candidate remains to be confirmed. Test the six-format tag editors on disposable copies. Lyrics editing remains deferred.
 
-Because Rust's GStreamer bindings dynamically link the core DLL, an absent or undiscoverable runtime may fail in the Windows loader before Cassette can display an in-app error. Documentation alone is not the desired final experience. A tested self-contained runtime or a launcher/installer prerequisite check remains release work before Windows should be described as generally available.
+The installer is unsigned; Windows may warn before installation. Compare the downloaded artifact's SHA-256 with the recorded CI artifact hash. Windows does not self-install from Cassette's Linux AppImage update feed. A later Windows version must be downloaded from Releases and installed manually; no Windows auto-update or package repository is configured.
 
-## Required playback elements
-
-Cassette uses `playbin` for audio and GStreamer's discovery/typefinding support while scanning. CI verifies these runtime elements:
-
-- Core/playback: `playbin`, `uridecodebin`, `decodebin3`, `filesrc`, `typefind`
-- Audio pipeline: `audioconvert`, `audioresample`, `autoaudiosink`
-- FLAC: `flacdec`
-- MP3: `mpg123audiodec` or `avdec_mp3`
-- OGG/Vorbis: `oggdemux`, `vorbisdec`
-- Opus: `opusdec`
-- WAV: `wavparse`
-- M4A/AAC: `qtdemux` plus `faad` or `avdec_aac`
-
-A successful Rust compile proves that headers/import libraries were found; it does not prove that these plugins load or that real files play. The release checklist therefore requires representative real-file tests on clean Windows 10 and Windows 11 virtual machines.
-
-Experimental video/DVD functionality is disabled and unsupported in Cassette `0.1.0-beta.3` on every platform. Existing backend code may remain, but the beta does not expose its UI and does not require or advertise `mpv`, `ffmpeg`, `ffprobe`, or `lsdvd` as beta runtime dependencies.
-
-## Future self-contained distribution requirements
-
-Before bundling a private GStreamer runtime:
-
-1. Enumerate the transitive DLL dependency closure for every required plugin.
-2. Keep `bin` and `lib\gstreamer-1.0` in the layout expected by GStreamer.
-3. Initialize DLL and plugin search paths before any GStreamer symbol is loaded.
-4. Exclude headers, import/static libraries, debug symbols, caches, development tools, and unused plugins.
-5. Generate third-party notices from the exact redistributed files.
-6. Review LGPL obligations and every codec/plugin license.
-7. Exclude GPL or patent-sensitive codec components unless redistribution has been explicitly approved.
-8. Test clean installs without GStreamer or a modified `PATH`.
-9. Test uninstall and upgrades without removing a separately installed shared runtime.
-
-Do not change the Windows installer claim to “self-contained” until those checks pass.
+Remaining manual qualification includes loaded-track individual and album tag edits while playing and paused, failure recovery, WebView2-absent startup, and uninstall without deleting the test library or profile. Keep the diagnostic library and `%APPDATA%`/`%LOCALAPPDATA%` profile disposable. Check the LGPL and other copied notices against the exact staged DLLs, Microsoft's redistribution terms for the selected VC DLLs, and codec patent obligations before any Windows publication. GStreamer documents both private runtime deployment and licensing obligations at <https://gstreamer.freedesktop.org/documentation/deploying/windows.html> and <https://gstreamer.freedesktop.org/documentation/deploying/index.html>.

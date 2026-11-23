@@ -549,6 +549,7 @@
   let automaticUpdateChecksEnabled = $state(true);
   let lastSuccessfulUpdateCheck = $state<number | null>(null);
   let updateRuntime = $state<UpdateRuntimeInfo | null>(null);
+  const isWindows = $derived(platformCapabilities?.os === "windows" || updateRuntime?.platform === "windows");
   let appImageMenuStatus = $state<AppImageMenuStatus | null>(null);
   let appImageMenuBusy = $state(false);
   let appImageMenuMessage = $state<string | null>(null);
@@ -665,6 +666,8 @@
   let playbackSessionEventId: string | null = null;
   let playbackSessionListenedSeconds = 0;
   let playbackSessionStartedAtMs: number | null = null;
+  let isTagWriteSuspendingPlayback = false;
+  let tagWritePlaybackGeneration = 0;
   let positionSeconds = $state(0);
   let lastConfirmedPlaybackPositionSeconds = 0;
   const playbackSeekCoordinator = new PlaybackSeekCoordinator();
@@ -1162,17 +1165,19 @@
     ];
 
     const statusIntervalId = window.setInterval(async () => {
-      if (!currentTrack || (!isPlaying && !hasCurrentTrackEnded)) {
+      if (isTagWriteSuspendingPlayback || !currentTrack || (!isPlaying && !hasCurrentTrackEnded)) {
         return;
       }
 
       const statusTrackPath = currentTrack.filePath;
+      const tagWriteGeneration = tagWritePlaybackGeneration;
       const positionSnapshot = playbackSeekCoordinator.capturePositionUpdate(statusTrackPath);
 
       try {
         const status = await getPlaybackStatus();
 
-        if (currentTrack?.filePath !== statusTrackPath || status.filePath !== statusTrackPath) {
+        if (isTagWriteSuspendingPlayback || tagWriteGeneration !== tagWritePlaybackGeneration
+          || currentTrack?.filePath !== statusTrackPath || status.filePath !== statusTrackPath) {
           return;
         }
 
@@ -1183,12 +1188,14 @@
           await handlePlaybackStatusUpdate(status, "status");
         }
       } catch (error) {
-        playbackError = error instanceof Error ? error.message : String(error);
+        if (!isTagWriteSuspendingPlayback && tagWriteGeneration === tagWritePlaybackGeneration) {
+          playbackError = error instanceof Error ? error.message : String(error);
+        }
       }
     }, 1000);
 
     const progressIntervalId = window.setInterval(() => {
-      if (!currentTrack || !isPlaying || playbackSeekCoordinator.hasPendingSeek(currentTrack.filePath)) {
+      if (isTagWriteSuspendingPlayback || !currentTrack || !isPlaying || playbackSeekCoordinator.hasPendingSeek(currentTrack.filePath)) {
         return;
       }
 
@@ -1801,12 +1808,15 @@
   }
 
   async function handleViewUpdateDownload() {
-    if (!availableUpdateVersion) {
+    const downloadUrl = isWindows
+      ? "https://github.com/atilla-m/cassette/releases"
+      : availableUpdateVersion && updateReleaseUrl(availableUpdateVersion);
+    if (!downloadUrl) {
       return;
     }
 
     try {
-      await openUrl(updateReleaseUrl(availableUpdateVersion));
+      await openUrl(downloadUrl);
     } catch (error) {
       updateCheckState = "error";
       updateStatusIsError = true;
@@ -3562,6 +3572,34 @@
     };
   }
 
+  function holdPlaybackClockForTagWrite(paths: string[]): boolean {
+    if (platformCapabilities?.os !== "windows" || !currentTrack || !paths.includes(currentTrack.filePath)) {
+      return false;
+    }
+    updatePlaybackListenClock(false);
+    isTagWriteSuspendingPlayback = true;
+    tagWritePlaybackGeneration += 1;
+    return true;
+  }
+
+  async function releasePlaybackClockAfterTagWrite(held: boolean) {
+    if (!held) return;
+    try {
+      const status = await getPlaybackStatus();
+      if (currentTrack?.filePath === status.filePath) {
+        applyPlaybackStatus(status);
+        await handlePlaybackStatusUpdate(status, "status");
+      }
+    } catch (error) {
+      updatePlaybackListenClock(false);
+      isPlaying = false;
+      playbackError = error instanceof Error ? error.message : String(error);
+    } finally {
+      isTagWriteSuspendingPlayback = false;
+      tagWritePlaybackGeneration += 1;
+    }
+  }
+
   async function handleSaveTagEditor() {
     if (!tagEditorTrack || !tagEditorData || isSavingTagEditor) {
       return;
@@ -3583,6 +3621,7 @@
     tagEditorMessage = "Writing tags...";
     const savedSnapshot = normalizedTagEditorDraft(tagEditorDraft);
     let shouldCloseAfterSave = false;
+    const heldPlaybackClock = holdPlaybackClockForTagWrite([tagEditorTrack.filePath]);
 
     try {
       const changedFields = (Object.keys(tagEditorDraft) as Array<keyof TagEditorDraft>).filter(tagEditorFieldChanged);
@@ -3595,6 +3634,7 @@
       tagEditorMessage = null;
       tagEditorError = error instanceof Error ? error.message : String(error);
     } finally {
+      await releasePlaybackClockAfterTagWrite(heldPlaybackClock);
       if (shouldCloseAfterSave) {
         window.setTimeout(() => {
           isSavingTagEditor = false;
@@ -3847,6 +3887,9 @@
       total: albumTagEditorData?.editableTrackCount ?? 0,
       fileName: null,
     };
+    const heldPlaybackClock = holdPlaybackClockForTagWrite(
+      albumTagEditorData?.tracks.filter((item) => item.editable).map((item) => item.track.filePath) ?? [],
+    );
 
     try {
       const result = await updateAlbumTags(request);
@@ -3874,6 +3917,7 @@
       albumTagEditorError = error instanceof Error ? error.message : String(error);
       albumTagEditorStage = "edit";
     } finally {
+      await releasePlaybackClockAfterTagWrite(heldPlaybackClock);
       isSavingAlbumTagEditor = false;
     }
   }
@@ -9954,119 +9998,126 @@
               <div class="settings-section-header">
                 <div>
                   <p class="eyebrow">Updates</p>
-                  <h4 id="settings-updates-title">Linux beta channel</h4>
+                  <h4 id="settings-updates-title">{isWindows ? "Windows prerelease" : "Linux beta channel"}</h4>
                 </div>
                 <span class="settings-pill">Version {appVersion}</span>
               </div>
 
-              <div class="settings-control-list">
-                <label class="settings-toggle-row">
-                  <span>Automatic update checks</span>
-                  <input
-                    type="checkbox"
-                    checked={automaticUpdateChecksEnabled}
-                    onchange={handleAutomaticUpdateSettingChange}
-                  />
-                  <strong>{automaticUpdateChecksEnabled ? "On" : "Off"}</strong>
-                  <small>At most once every 24 hours. Available updates are never installed automatically.</small>
-                </label>
-                <div>
-                  <span>Installation type</span>
-                  <strong>{updatePackageLabel}</strong>
-                  <small>
-                    {updateRuntime?.canSelfInstall
-                      ? "This AppImage can install a verified update after you confirm."
-                      : "Cassette will open the release page and will not replace a system package."}
-                  </small>
+              {#if isWindows}
+                <p class="settings-note">Download and run the latest Windows installer from GitHub Releases to update Cassette.</p>
+                <div class="settings-actions">
+                  <button type="button" onclick={handleViewUpdateDownload}>Open GitHub Releases</button>
                 </div>
-              </div>
-
-              <div class="settings-actions">
-                <button type="button" disabled={!updateRuntime || updateIsBusy} onclick={handleManualUpdateCheck}>
-                  {updateCheckState === "checking" ? "Checking..." : "Check for updates"}
-                </button>
-              </div>
-
-              {#if updateRuntime?.packageKind === "appimage" && !updateRuntime.development}
+              {:else}
                 <div class="settings-control-list">
+                  <label class="settings-toggle-row">
+                    <span>Automatic update checks</span>
+                    <input
+                      type="checkbox"
+                      checked={automaticUpdateChecksEnabled}
+                      onchange={handleAutomaticUpdateSettingChange}
+                    />
+                    <strong>{automaticUpdateChecksEnabled ? "On" : "Off"}</strong>
+                    <small>At most once every 24 hours. Available updates are never installed automatically.</small>
+                  </label>
                   <div>
-                    <span>Applications menu</span>
-                    <strong>
-                      {appImageMenuStatus?.needsRefresh
-                        ? "Launcher needs refresh"
-                        : appImageMenuStatus?.installed
-                          ? "Cassette AppImage launcher added"
-                          : "Launcher not added"}
-                    </strong>
+                    <span>Installation type</span>
+                    <strong>{updatePackageLabel}</strong>
                     <small>
-                      The launcher points to this AppImage's current location. If you move or delete the AppImage,
-                      launch it from the new location and add or refresh the launcher again.
+                      {updateRuntime?.canSelfInstall
+                        ? "This AppImage can install a verified update after you confirm."
+                        : "Cassette will open the release page and will not replace a system package."}
                     </small>
-                    {#if appImageMenuStatus}
-                      <small>Current AppImage: {appImageMenuStatus.imagePath}</small>
+                  </div>
+                </div>
+
+                <div class="settings-actions">
+                  <button type="button" disabled={!updateRuntime || updateIsBusy} onclick={handleManualUpdateCheck}>
+                    {updateCheckState === "checking" ? "Checking..." : "Check for updates"}
+                  </button>
+                </div>
+
+                {#if updateRuntime?.packageKind === "appimage" && !updateRuntime.development}
+                  <div class="settings-control-list">
+                    <div>
+                      <span>Applications menu</span>
+                      <strong>
+                        {appImageMenuStatus?.needsRefresh
+                          ? "Launcher needs refresh"
+                          : appImageMenuStatus?.installed
+                            ? "Cassette AppImage launcher added"
+                            : "Launcher not added"}
+                      </strong>
+                      <small>
+                        The launcher points to this AppImage's current location. If you move or delete the AppImage,
+                        launch it from the new location and add or refresh the launcher again.
+                      </small>
+                      {#if appImageMenuStatus}
+                        <small>Current AppImage: {appImageMenuStatus.imagePath}</small>
+                      {/if}
+                    </div>
+                  </div>
+                  <div class="settings-actions">
+                    <button type="button" disabled={appImageMenuBusy || updateIsBusy} onclick={handleAddAppImageToMenu}>
+                      {appImageMenuBusy ? "Working..." : appImageMenuStatus?.installed ? "Refresh applications-menu launcher" : "Add to applications menu"}
+                    </button>
+                    {#if appImageMenuStatus?.installed}
+                      <button class="danger" type="button" disabled={appImageMenuBusy || updateIsBusy} onclick={handleRemoveAppImageFromMenu}>
+                        Remove AppImage launcher
+                      </button>
                     {/if}
                   </div>
-                </div>
-                <div class="settings-actions">
-                  <button type="button" disabled={appImageMenuBusy || updateIsBusy} onclick={handleAddAppImageToMenu}>
-                    {appImageMenuBusy ? "Working..." : appImageMenuStatus?.installed ? "Refresh applications-menu launcher" : "Add to applications menu"}
-                  </button>
-                  {#if appImageMenuStatus?.installed}
-                    <button class="danger" type="button" disabled={appImageMenuBusy || updateIsBusy} onclick={handleRemoveAppImageFromMenu}>
-                      Remove AppImage launcher
-                    </button>
+                  {#if appImageMenuMessage}
+                    <p class="form-message" class:error={appImageMenuIsError} role={appImageMenuIsError ? "alert" : "status"}>
+                      {appImageMenuMessage}
+                    </p>
                   {/if}
-                </div>
-                {#if appImageMenuMessage}
-                  <p class="form-message" class:error={appImageMenuIsError} role={appImageMenuIsError ? "alert" : "status"}>
-                    {appImageMenuMessage}
-                  </p>
                 {/if}
-              {/if}
 
-              {#if unavailableUpdateMessage(updateRuntime)}
-                <p class="settings-note">{unavailableUpdateMessage(updateRuntime)}</p>
-              {/if}
+                {#if unavailableUpdateMessage(updateRuntime)}
+                  <p class="settings-note">{unavailableUpdateMessage(updateRuntime)}</p>
+                {/if}
 
-              {#if lastSuccessfulUpdateCheck !== null}
-                <p class="settings-note">Last successful check: {formatDateTime(lastSuccessfulUpdateCheck / 1000)}</p>
-              {/if}
+                {#if lastSuccessfulUpdateCheck !== null}
+                  <p class="settings-note">Last successful check: {formatDateTime(lastSuccessfulUpdateCheck / 1000)}</p>
+                {/if}
 
-              {#if availableUpdateVersion}
-                <article class="update-available-card">
-                  <div>
-                    <p class="eyebrow">Update available</p>
-                    <h5>Cassette {availableUpdateVersion}</h5>
-                  </div>
-                  <div class="update-release-notes">
-                    <strong>Release notes</strong>
-                    <p>{availableUpdateNotes}</p>
-                  </div>
-
-                  {#if updateCheckState === "downloading" || updateCheckState === "installing"}
-                    <div class="update-progress" aria-live="polite">
-                      {#if updateDownloadProgress?.percent !== null && updateDownloadProgress?.percent !== undefined}
-                        <progress max="100" value={updateDownloadProgress.percent}></progress>
-                      {:else}
-                        <progress></progress>
-                      {/if}
-                      <strong>{updateProgressLabel}</strong>
+                {#if availableUpdateVersion}
+                  <article class="update-available-card">
+                    <div>
+                      <p class="eyebrow">Update available</p>
+                      <h5>Cassette {availableUpdateVersion}</h5>
                     </div>
-                  {:else}
-                    <div class="settings-actions">
-                      {#if updateRuntime?.canSelfInstall}
-                        <button class="primary" type="button" disabled={updateIsBusy} onclick={handleInstallAppImageUpdate}>
-                          Update and restart
-                        </button>
-                      {:else}
-                        <button class="primary" type="button" onclick={handleViewUpdateDownload}>
-                          View download
-                        </button>
-                      {/if}
-                      <button type="button" onclick={handleUpdateLater}>Later</button>
+                    <div class="update-release-notes">
+                      <strong>Release notes</strong>
+                      <p>{availableUpdateNotes}</p>
                     </div>
-                  {/if}
-                </article>
+
+                    {#if updateCheckState === "downloading" || updateCheckState === "installing"}
+                      <div class="update-progress" aria-live="polite">
+                        {#if updateDownloadProgress?.percent !== null && updateDownloadProgress?.percent !== undefined}
+                          <progress max="100" value={updateDownloadProgress.percent}></progress>
+                        {:else}
+                          <progress></progress>
+                        {/if}
+                        <strong>{updateProgressLabel}</strong>
+                      </div>
+                    {:else}
+                      <div class="settings-actions">
+                        {#if updateRuntime?.canSelfInstall}
+                          <button class="primary" type="button" disabled={updateIsBusy} onclick={handleInstallAppImageUpdate}>
+                            Update and restart
+                          </button>
+                        {:else}
+                          <button class="primary" type="button" onclick={handleViewUpdateDownload}>
+                            View download
+                          </button>
+                        {/if}
+                        <button type="button" onclick={handleUpdateLater}>Later</button>
+                      </div>
+                    {/if}
+                  </article>
+                {/if}
               {/if}
 
               {#if updateStatusMessage}
@@ -10075,10 +10126,12 @@
                 </p>
               {/if}
 
-              <p class="settings-note">
-                AppImage updates require a valid Tauri signature and explicit confirmation. DEB, RPM, and unknown
-                installations remain under your package manager's control. Updating does not replace Cassette's user data.
-              </p>
+              {#if !isWindows}
+                <p class="settings-note">
+                  AppImage updates require a valid Tauri signature and explicit confirmation. DEB, RPM, and unknown
+                  installations remain under your package manager's control. Updating does not replace Cassette's user data.
+                </p>
+              {/if}
             </section>
 
             <section class="settings-section about-section" aria-labelledby="settings-about-title">
@@ -10097,7 +10150,7 @@
                 </div>
                 <div>
                   <span>Platform</span>
-                  <strong>Linux-first</strong>
+                  <strong>{isWindows ? "Windows" : "Linux-first"}</strong>
                 </div>
                 <div>
                   <span>Tech stack</span>

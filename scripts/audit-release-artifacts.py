@@ -29,6 +29,24 @@ from update_signature import validate_signature
 
 EXPECTED_VERSION = "0.1.0-beta.5.1"
 EXPECTED_LICENSE = "GPL-3.0-or-later"
+WINDOWS_GSTREAMER_VERSION = "1.26.11"
+WINDOWS_GSTREAMER_MSI_SHA256 = "31cbc21fa0950b5c1e79c80959b2799805cb05a7a35953a13a9f790776137605"
+WINDOWS_REQUIRED_ELEMENTS = {
+    "playbin", "uridecodebin", "decodebin3", "filesrc", "typefind",
+    "audioconvert", "audioresample", "autoaudiosink", "id3demux",
+    "flacdec", "oggdemux", "vorbisdec", "opusdec", "wavparse",
+    "qtdemux", "avdec_mp3", "avdec_aac", "wasapi2sink", "wasapisink",
+    "flacparse", "mpegaudioparse", "aacparse", "vorbisparse", "opusparse",
+}
+# Only operating-system DLLs may be absent from Cassette's installed folder.
+# Keep this deliberately narrow: new imports require an explicit review.
+WINDOWS_SYSTEM_DLLS = {
+    "advapi32.dll", "bcrypt.dll", "bcryptprimitives.dll", "comctl32.dll",
+    "crypt32.dll", "dnsapi.dll", "dwmapi.dll", "gdi32.dll", "iphlpapi.dll",
+    "kernel32.dll", "mfplat.dll", "mmdevapi.dll", "ntdll.dll", "ole32.dll", "oleaut32.dll", "shell32.dll",
+    "shlwapi.dll", "user32.dll",
+    "ws2_32.dll",
+}
 NATIVE_TAURI_DEV_URL_EXCEPTIONS = {
     b"http://localhost:1420",
     b"ws://localhost:1420",
@@ -80,6 +98,11 @@ def sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def same_text_ignoring_crlf(first: Path, second: Path) -> bool:
+    """Compare tracked text after Windows checkout's LF-to-CRLF conversion."""
+    return first.read_bytes().replace(b"\r\n", b"\n") == second.read_bytes().replace(b"\r\n", b"\n")
 
 
 def command_path(name: str) -> str | None:
@@ -338,6 +361,70 @@ def pe_resource_types(path: Path) -> set[int]:
     return types
 
 
+def pe_imported_dlls(path: Path) -> set[str]:
+    """Read PE import names without depending on the build host's DLL search path."""
+    data = path.read_bytes()
+    if len(data) < 64 or data[:2] != b"MZ":
+        raise ValueError(f"not a PE file: {path}")
+    pe_offset = struct.unpack_from("<I", data, 60)[0]
+    if pe_offset + 24 > len(data) or data[pe_offset:pe_offset + 4] != b"PE\0\0":
+        raise ValueError(f"invalid PE header: {path}")
+    coff = pe_offset + 4
+    section_count = struct.unpack_from("<H", data, coff + 2)[0]
+    optional_size = struct.unpack_from("<H", data, coff + 16)[0]
+    optional = coff + 20
+    if optional + optional_size > len(data):
+        raise ValueError(f"truncated PE optional header: {path}")
+    magic = struct.unpack_from("<H", data, optional)[0]
+    if magic not in (0x10B, 0x20B):
+        raise ValueError(f"unsupported PE optional header: {path}")
+    directory = optional + (112 if magic == 0x20B else 96)
+    directory_count = struct.unpack_from("<I", data, directory - 4)[0]
+    if directory_count < 2 or directory + 16 > optional + optional_size:
+        return set()
+    import_rva, _ = struct.unpack_from("<II", data, directory + 8)
+    if not import_rva:
+        return set()
+    sections = []
+    section_start = optional + optional_size
+    for index in range(section_count):
+        offset = section_start + index * 40
+        if offset + 40 > len(data):
+            raise ValueError(f"truncated PE section table: {path}")
+        virtual_size, virtual_address, raw_size, raw_offset = struct.unpack_from(
+            "<IIII", data, offset + 8,
+        )
+        sections.append((virtual_address, max(virtual_size, raw_size), raw_size, raw_offset))
+
+    def rva_to_offset(rva: int) -> int:
+        for address, extent, raw_size, offset in sections:
+            displacement = rva - address
+            if 0 <= displacement < extent and displacement < raw_size:
+                resolved = offset + displacement
+                if resolved < len(data):
+                    return resolved
+        raise ValueError(f"unmapped PE import RVA in {path}")
+
+    imports: set[str] = set()
+    descriptor = rva_to_offset(import_rva)
+    for _ in range(4096):
+        if descriptor + 20 > len(data):
+            raise ValueError(f"truncated PE import table: {path}")
+        values = struct.unpack_from("<IIIII", data, descriptor)
+        if values == (0, 0, 0, 0, 0):
+            return imports
+        name_offset = rva_to_offset(values[3])
+        name_end = data.find(b"\0", name_offset, min(name_offset + 256, len(data)))
+        if name_end < 0:
+            raise ValueError(f"unterminated PE import name: {path}")
+        name = data[name_offset:name_end].decode("ascii", "strict").lower()
+        if not re.fullmatch(r"[a-z0-9_.+-]+\.dll", name):
+            raise ValueError(f"invalid PE import name {name!r}: {path}")
+        imports.add(name)
+        descriptor += 20
+    raise ValueError(f"oversized PE import table: {path}")
+
+
 def parse_control_fields(control: str) -> dict[str, str]:
     fields: dict[str, str] = {}
     current: str | None = None
@@ -411,7 +498,10 @@ def audit_configuration(audit: Audit) -> None:
         audit.fail("Production CSP contains a development frontend URL")
 
 
-def audit_filename(audit: Audit, relative: Path, artifact_label: str, windows_bundle: bool) -> None:
+def audit_filename(
+    audit: Audit, relative: Path, artifact_label: str, windows_bundle: bool,
+    allowed_windows_runtime: set[str] | None = None,
+) -> None:
     normalized = relative.as_posix().lower()
     name = relative.name.lower()
     suffix = relative.suffix.lower()
@@ -433,7 +523,7 @@ def audit_filename(audit: Audit, relative: Path, artifact_label: str, windows_bu
     if suffix in PRIVATE_KEY_SUFFIXES or private_pem or name == ".env":
         audit.fail(f"{artifact_label}: packaged credential-like file {relative.as_posix()}")
 
-    if windows_bundle:
+    if windows_bundle and normalized not in (allowed_windows_runtime or set()):
         if "gstreamer" in normalized and suffix in {".dll", ".exe", ".cache"}:
             audit.fail(f"{artifact_label}: bundled external GStreamer runtime file {relative.as_posix()}")
         if suffix == ".dll" and (name.startswith("gst") or name.startswith("libgst")):
@@ -511,11 +601,14 @@ def scan_file(
         audit.native_dev_url_exceptions += len(allowed_native_urls)
 
 
-def scan_tree(audit: Audit, root: Path, artifact_label: str, *, windows_bundle: bool = False) -> None:
+def scan_tree(
+    audit: Audit, root: Path, artifact_label: str, *, windows_bundle: bool = False,
+    allowed_windows_runtime: set[str] | None = None,
+) -> None:
     patterns = content_patterns(audit)
     for path in sorted(candidate for candidate in root.rglob("*") if candidate.is_file()):
         relative = path.relative_to(root)
-        audit_filename(audit, relative, artifact_label, windows_bundle)
+        audit_filename(audit, relative, artifact_label, windows_bundle, allowed_windows_runtime)
         suffix = path.suffix.lower()
         frontend = suffix in FRONTEND_SUFFIXES
         native = path.name.lower() in {"cassette", "cassette.exe"}
@@ -637,7 +730,151 @@ def verify_appdir_host_libraries(audit: Audit, root: Path, label: str) -> None:
         )
 
 
-def verify_windows_payload(audit: Audit, root: Path, label: str) -> None:
+def verify_windows_runtime(audit: Audit, root: Path, label: str) -> set[str]:
+    marker = "third-party/gstreamer/manifest.json"
+    manifests = [
+        path for path in root.rglob("manifest.json")
+        if path.relative_to(root).as_posix().lower().endswith(marker)
+    ]
+    if len(manifests) != 1:
+        audit.fail(f"{label}: expected exactly one bundled GStreamer manifest, found {len(manifests)}")
+        return set()
+    manifest_path = manifests[0]
+    relative_marker = manifest_path.relative_to(root).as_posix()
+    installation_prefix = relative_marker[:-len(marker)]
+    allowed = {relative_marker.lower()}
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError) as error:
+        audit.fail(f"{label}: invalid GStreamer manifest: {error}")
+        return allowed
+    if (manifest.get("schemaVersion") != 1
+            or manifest.get("gstreamerVersion") != WINDOWS_GSTREAMER_VERSION
+            or manifest.get("runtimeMsiSha256") != WINDOWS_GSTREAMER_MSI_SHA256):
+        audit.fail(f"{label}: bundled GStreamer provenance is incorrect")
+    providers = manifest.get("elementProviders")
+    if not isinstance(providers, dict) or set(providers) != WINDOWS_REQUIRED_ELEMENTS:
+        audit.fail(f"{label}: GStreamer element allowlist is incomplete")
+        providers = {}
+    typefind_provider = manifest.get("typefindProvider")
+    if typefind_provider != "gsttypefindfunctions.dll":
+        audit.fail(f"{label}: GStreamer typefindfunctions provider is missing")
+    vc_runtime = manifest.get("vcRuntime")
+    vc_dlls: set[str] = set()
+    if (not isinstance(vc_runtime, dict)
+            or vc_runtime.get("source") != "Microsoft.VC143.CRT x64"
+            or not isinstance(vc_runtime.get("dlls"), list)):
+        audit.fail(f"{label}: Microsoft VC runtime provenance is missing")
+    else:
+        names = vc_runtime["dlls"]
+        permitted_vc = re.compile(
+            r"(?:vcruntime140(?:_1)?|msvcp140(?:_1|_2|_atomic_wait|_codecvt_ids)?|concrt140)\.dll",
+            re.IGNORECASE,
+        )
+        if (not all(isinstance(name, str) and name == name.lower()
+                    and permitted_vc.fullmatch(name) for name in names)
+                or len({name.lower() for name in names}) != len(names)):
+            audit.fail(f"{label}: Microsoft VC runtime file list is unsafe")
+        else:
+            vc_dlls = {name.lower() for name in names}
+            if "vcruntime140.dll" not in vc_dlls:
+                audit.fail(f"{label}: required Microsoft VC runtime is missing")
+
+    files = manifest.get("files")
+    if not isinstance(files, list) or not files:
+        audit.fail(f"{label}: GStreamer manifest has no files")
+        return allowed
+    seen: set[str] = set()
+    for entry in files:
+        if not isinstance(entry, dict):
+            audit.fail(f"{label}: invalid GStreamer file entry")
+            continue
+        name, digest = entry.get("path"), entry.get("sha256")
+        if (not isinstance(name, str) or not name or name.startswith("/")
+                or "\\" in name or ".." in name.split("/")
+                or not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest)):
+            audit.fail(f"{label}: unsafe GStreamer file entry")
+            continue
+        normalized = name.lower()
+        if normalized in vc_dlls and name != normalized:
+            audit.fail(f"{label}: Microsoft VC runtime path casing is noncanonical: {name}")
+        if normalized in seen:
+            audit.fail(f"{label}: duplicate GStreamer file {name}")
+            continue
+        seen.add(normalized)
+        permitted = (
+            ("/" not in name and normalized.endswith(".dll"))
+            or (normalized.startswith("lib/gstreamer-1.0/") and normalized.endswith(".dll"))
+            or normalized == "libexec/gstreamer-1.0/gst-plugin-scanner.exe"
+            or (normalized.startswith("third-party/gstreamer/")
+                and Path(name).suffix.lower() in {".txt", ".md", "", ".license"})
+        )
+        if not permitted:
+            audit.fail(f"{label}: disallowed bundled GStreamer path {name}")
+            continue
+        relative = installation_prefix + name
+        candidate = root / relative
+        if not candidate.is_file() or sha256_file(candidate) != digest:
+            audit.fail(f"{label}: bundled GStreamer file missing or changed: {name}")
+        allowed.add(relative.lower())
+    if "gstreamer-1.0-0.dll" not in seen:
+        audit.fail(f"{label}: bundled GStreamer core DLL is missing")
+    for feature, provider in [*providers.items(), ("typefindfunctions", typefind_provider)]:
+        if (not isinstance(provider, str)
+                or not re.fullmatch(r"gst[a-z0-9_]+\.dll", provider, re.IGNORECASE)
+                or f"lib/gstreamer-1.0/{provider.lower()}" not in seen):
+            audit.fail(f"{label}: provider for {feature} is not in the bundled plugin allowlist")
+    if not vc_dlls.issubset(seen):
+        audit.fail(f"{label}: listed Microsoft VC runtime files are missing")
+    if any(name in seen and name not in vc_dlls for name in (
+            "vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll",
+            "msvcp140_1.dll", "msvcp140_2.dll", "msvcp140_atomic_wait.dll",
+            "msvcp140_codecvt_ids.dll", "concrt140.dll")):
+        audit.fail(f"{label}: an unlisted Microsoft VC runtime file was bundled")
+    if "third-party/gstreamer/notice.txt" not in seen:
+        audit.fail(f"{label}: bundled GStreamer notice is missing")
+    return allowed
+
+
+def verify_windows_binary_imports(
+    audit: Audit, root: Path, executable: Path, allowed_runtime: set[str], label: str,
+) -> None:
+    """Ensure loader-time imports resolve within the installed app or Windows."""
+    application_dir = executable.parent
+    local_dlls = {
+        path.name.lower(): path
+        for path in application_dir.iterdir()
+        if path.is_file() and path.suffix.lower() == ".dll"
+    }
+    binaries = [executable]
+    packaged = {
+        path.relative_to(root).as_posix().lower(): path
+        for path in root.rglob("*") if path.is_file()
+    }
+    for relative in sorted(allowed_runtime):
+        candidate = packaged.get(relative)
+        if candidate and candidate.suffix.lower() in {".dll", ".exe"}:
+            binaries.append(candidate)
+    for binary in binaries:
+        try:
+            imports = pe_imported_dlls(binary)
+        except (OSError, UnicodeError, ValueError) as error:
+            audit.fail(f"{label}: cannot inspect PE imports of {binary.name}: {error}")
+            continue
+        for name in imports:
+            if name.startswith(("api-ms-win-", "ext-ms-win-")) or name in WINDOWS_SYSTEM_DLLS:
+                continue
+            dependency = local_dlls.get(name)
+            if dependency is None:
+                audit.fail(
+                    f"{label}: {binary.name} imports {name}, absent beside cassette.exe "
+                    "before startup"
+                )
+            elif dependency.relative_to(root).as_posix().lower() not in allowed_runtime:
+                audit.fail(f"{label}: {binary.name} imports unlisted DLL {name}")
+
+
+def verify_windows_payload(audit: Audit, root: Path, label: str) -> set[str]:
     executables = [path for path in root.rglob("*.exe") if path.name.lower() == "cassette.exe"]
     if not executables:
         audit.fail(f"{label}: extracted installer contains no Cassette executable")
@@ -649,8 +886,19 @@ def verify_windows_payload(audit: Audit, root: Path, label: str) -> None:
     licenses = [path for path in root.rglob("*") if path.is_file() and path.name.upper() == "LICENSE"]
     if not licenses:
         audit.fail(f"{label}: extracted installer contains no LICENSE resource")
-    elif not any(sha256_file(path) == audit.license_hash for path in licenses):
+    elif not any(same_text_ignoring_crlf(path, audit.license_path) for path in licenses):
         audit.fail(f"{label}: extracted installer LICENSE does not match repository LICENSE")
+    allowed = verify_windows_runtime(audit, root, label)
+    if not any(
+        (path.parent / "gstreamer-1.0-0.dll").is_file()
+        and (path.parent / "lib/gstreamer-1.0").is_dir()
+        and (path.parent / "third-party/gstreamer/manifest.json").is_file()
+        for path in executables
+    ):
+        audit.fail(f"{label}: private GStreamer runtime is not installed beside cassette.exe")
+    for executable in executables:
+        verify_windows_binary_imports(audit, root, executable, allowed, label)
+    return allowed
 
 
 def audit_artifact(audit: Audit, path: Path, temporary_root: Path) -> None:
@@ -690,15 +938,15 @@ def audit_artifact(audit: Audit, path: Path, temporary_root: Path) -> None:
             scan_tree(audit, path, label)
         elif kind == "nsis":
             root = extract_nsis(path, destination)
-            verify_windows_payload(audit, root, label)
-            scan_tree(audit, root, label, windows_bundle=True)
+            allowed = verify_windows_payload(audit, root, label)
+            scan_tree(audit, root, label, windows_bundle=True, allowed_windows_runtime=allowed)
         elif kind == "msi":
             root = extract_msi(path, destination)
             if root is None:
                 audit.warn(f"{label}: MSI extraction is unsupported on this host; container scan only")
             else:
-                verify_windows_payload(audit, root, label)
-                scan_tree(audit, root, label, windows_bundle=True)
+                allowed = verify_windows_payload(audit, root, label)
+                scan_tree(audit, root, label, windows_bundle=True, allowed_windows_runtime=allowed)
         elif kind in {"directory"}:
             scan_tree(audit, path, label)
         else:
@@ -733,6 +981,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--license", type=Path, default=Path("LICENSE"))
     parser.add_argument("--frontend", action="append", type=Path, default=[])
     parser.add_argument("--artifact", action="append", type=Path, default=[])
+    parser.add_argument("--installed-windows-dir", type=Path)
     return parser.parse_args()
 
 
@@ -752,6 +1001,17 @@ def main() -> int:
     for frontend in args.frontend:
         frontend_path = frontend if frontend.is_absolute() else workspace / frontend
         scan_frontend(audit, frontend_path.resolve())
+
+    if args.installed_windows_dir is not None:
+        installed = args.installed_windows_dir.resolve()
+        if not installed.is_dir():
+            audit.fail(f"Windows installer did not create the expected directory: {installed}")
+        else:
+            allowed = verify_windows_payload(audit, installed, "installed Windows package")
+            scan_tree(
+                audit, installed, "installed Windows package",
+                windows_bundle=True, allowed_windows_runtime=allowed,
+            )
 
     with tempfile.TemporaryDirectory(prefix="cassette-artifact-audit-") as temporary:
         temporary_root = Path(temporary)
