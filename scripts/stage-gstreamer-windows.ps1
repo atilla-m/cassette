@@ -6,9 +6,8 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$version = "1.26.11"
-$runtimeMsiSha256 = "31cbc21fa0950b5c1e79c80959b2799805cb05a7a35953a13a9f790776137605"
-$sourceUrl = "https://gstreamer.freedesktop.org/pkg/windows/$version/msvc/gstreamer-1.0-msvc-x86_64-$version.msi"
+$release = Get-Content -LiteralPath (Join-Path $PSScriptRoot "windows-gstreamer.json") -Raw | ConvertFrom-Json
+$version = $release.version
 if (-not $GStreamerRoot -or -not [IO.Path]::IsPathRooted($GStreamerRoot)) {
   throw "An absolute, verified GStreamer MSVC x86_64 root is required."
 }
@@ -40,7 +39,7 @@ function Add-StagedFile {
 }
 
 # Resolve the actual element providers rather than guessing plug-in filenames.
-# The official MSI can reorganize elements between plug-ins in a patch release.
+# The official distribution can reorganize elements between plug-ins.
 $elements = @(
   "playbin", "uridecodebin", "decodebin3", "filesrc", "typefind",
   "audioconvert", "audioresample", "autoaudiosink", "id3demux",
@@ -91,7 +90,7 @@ $scanner = Get-ChildItem -LiteralPath $root -Filter "gst-plugin-scanner.exe" -Fi
 if (-not $scanner) { throw "The official runtime has no gst-plugin-scanner.exe" }
 
 # dumpbin is part of the already-installed MSVC build tools. Follow imported
-# DLLs transitively, but copy only dependencies supplied by the verified MSI.
+# DLLs transitively and copy dependencies from the verified distribution.
 $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio/Installer/vswhere.exe"
 if (-not (Test-Path -LiteralPath $vswhere)) { throw "vswhere.exe is unavailable" }
 $visualStudio = (& $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath | Select-Object -First 1)
@@ -218,8 +217,8 @@ if (-not $hasLgpl) { throw "The official runtime did not provide the LGPL text" 
 
 $notice = @(
   "Cassette diagnostic Windows installer: private GStreamer $version runtime",
-  "Official runtime MSI: $sourceUrl",
-  "Official runtime MSI SHA-256: $runtimeMsiSha256",
+  "Official installer: $($release.installerUrl)",
+  "Official installer SHA-256: $($release.installerSha256)",
   "GStreamer source: https://gitlab.freedesktop.org/gstreamer/gstreamer/-/tree/$version",
   "Only the DLLs and plugins named in manifest.json are bundled. No development files or shared GStreamer installation are included.",
   "GStreamer and its dependencies retain their upstream licenses. Accompanying upstream license texts are in this directory.",
@@ -240,10 +239,10 @@ $staged.Add([ordered]@{
 })
 
 $manifest = [ordered]@{
-  schemaVersion = 1
+  schemaVersion = 2
   gstreamerVersion = $version
-  runtimeMsiUrl = $sourceUrl
-  runtimeMsiSha256 = $runtimeMsiSha256
+  installerUrl = $release.installerUrl
+  installerSha256 = $release.installerSha256
   vcRuntime = [ordered]@{
     source = "Microsoft.VC143.CRT x64"
     dlls = @($selectedVcDlls.Values | ForEach-Object { Split-Path -Leaf $_ } | Sort-Object)

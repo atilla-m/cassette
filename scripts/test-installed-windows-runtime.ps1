@@ -38,7 +38,7 @@ if (-not (Test-Path -LiteralPath $application -PathType Leaf)) {
   throw "NSIS did not install Cassette at the isolated destination: $application"
 }
 
-# The builder has a globally installed GStreamer MSI. Exclude it, its plugin
+# The builder has a separate GStreamer development install. Exclude it, its plugin
 # variables, and developer tool directories before auditing or launching the
 # installed application. Windows still searches the EXE's own directory.
 $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
@@ -57,8 +57,8 @@ if ($LASTEXITCODE -ne 0) {
   throw "The installed package has an unresolved or unlisted DLL dependency"
 }
 
-# Copy only the official MSI's test executables, never its libraries or plugins.
-# With the copied tools outside the MSI bin directory and PATH restricted to the
+# Copy only the upstream test executables. With the tools outside the
+# development bin directory and PATH restricted to the
 # installed app, Windows can resolve GStreamer DLLs only from the NSIS payload.
 $testRoot = Join-Path $env:RUNNER_TEMP "cassette-installed-playback-smoke"
 if (Test-Path -LiteralPath $testRoot) { throw "Refusing to reuse playback test directory: $testRoot" }

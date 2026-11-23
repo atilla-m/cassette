@@ -37,9 +37,10 @@ class WindowsRuntimeAuditTests(unittest.TestCase):
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(body)
         manifest = {
-            "schemaVersion": 1,
-            "gstreamerVersion": audit_module.WINDOWS_GSTREAMER_VERSION,
-            "runtimeMsiSha256": audit_module.WINDOWS_GSTREAMER_MSI_SHA256,
+            "schemaVersion": 2,
+            "gstreamerVersion": audit_module.WINDOWS_GSTREAMER["version"],
+            "installerUrl": audit_module.WINDOWS_GSTREAMER["installerUrl"],
+            "installerSha256": audit_module.WINDOWS_GSTREAMER["installerSha256"],
             "vcRuntime": {
                 "source": "Microsoft.VC143.CRT x64",
                 "dlls": ["vcruntime140.dll"],

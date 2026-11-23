@@ -130,7 +130,7 @@ jobs:
           targets: x86_64-pc-windows-msvc
           components: rustfmt
 
-      - name: Install and discover official GStreamer MSVC x86_64 packages
+      - name: Install and verify official GStreamer MSVC x86_64
         shell: pwsh
         run: ./scripts/install-gstreamer-windows.ps1
 

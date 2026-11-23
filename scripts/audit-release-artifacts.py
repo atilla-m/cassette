@@ -29,8 +29,7 @@ from update_signature import validate_signature
 
 EXPECTED_VERSION = "0.1.0-beta.5.1"
 EXPECTED_LICENSE = "GPL-3.0-or-later"
-WINDOWS_GSTREAMER_VERSION = "1.26.11"
-WINDOWS_GSTREAMER_MSI_SHA256 = "31cbc21fa0950b5c1e79c80959b2799805cb05a7a35953a13a9f790776137605"
+WINDOWS_GSTREAMER = json.loads(Path(__file__).with_name("windows-gstreamer.json").read_text(encoding="utf-8"))
 WINDOWS_REQUIRED_ELEMENTS = {
     "playbin", "uridecodebin", "decodebin3", "filesrc", "typefind",
     "audioconvert", "audioresample", "autoaudiosink", "id3demux",
@@ -748,9 +747,10 @@ def verify_windows_runtime(audit: Audit, root: Path, label: str) -> set[str]:
     except (OSError, ValueError) as error:
         audit.fail(f"{label}: invalid GStreamer manifest: {error}")
         return allowed
-    if (manifest.get("schemaVersion") != 1
-            or manifest.get("gstreamerVersion") != WINDOWS_GSTREAMER_VERSION
-            or manifest.get("runtimeMsiSha256") != WINDOWS_GSTREAMER_MSI_SHA256):
+    if (manifest.get("schemaVersion") != 2
+            or manifest.get("gstreamerVersion") != WINDOWS_GSTREAMER["version"]
+            or manifest.get("installerUrl") != WINDOWS_GSTREAMER["installerUrl"]
+            or manifest.get("installerSha256") != WINDOWS_GSTREAMER["installerSha256"]):
         audit.fail(f"{label}: bundled GStreamer provenance is incorrect")
     providers = manifest.get("elementProviders")
     if not isinstance(providers, dict) or set(providers) != WINDOWS_REQUIRED_ELEMENTS:

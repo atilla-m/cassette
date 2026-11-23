@@ -1,0 +1,5 @@
+{
+  "version": "1.28.9",
+  "installerUrl": "https://gstreamer.freedesktop.org/pkg/windows/1.28.9/msvc/gstreamer-1.0-msvc-x86_64-1.28.9.exe",
+  "installerSha256": "ce4008705e8c6fe92803535b82fb3d6551e183f438e6ef26682ac4d0aca61076"
+}
