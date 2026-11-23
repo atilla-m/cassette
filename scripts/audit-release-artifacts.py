@@ -40,7 +40,7 @@ WINDOWS_REQUIRED_ELEMENTS = {
 # Only operating-system DLLs may be absent from Cassette's installed folder.
 # Keep this deliberately narrow: new imports require an explicit review.
 WINDOWS_SYSTEM_DLLS = {
-    "advapi32.dll", "bcrypt.dll", "bcryptprimitives.dll", "comctl32.dll",
+    "advapi32.dll", "avrt.dll", "bcrypt.dll", "bcryptprimitives.dll", "comctl32.dll",
     "crypt32.dll", "dnsapi.dll", "dwmapi.dll", "gdi32.dll", "iphlpapi.dll",
     "kernel32.dll", "mfplat.dll", "mmdevapi.dll", "ntdll.dll", "ole32.dll", "oleaut32.dll", "shell32.dll",
     "shlwapi.dll", "user32.dll",
