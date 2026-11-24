@@ -1,4 +1,10 @@
 {
+  "app": {
+    "windows": [{ "title": "Cassette", "width": 800, "height": 600, "theme": "Dark" }]
+  },
+  "plugins": {
+    "updater": { "windows": { "installMode": "passive" } }
+  },
   "bundle": {
     "resources": {
       "../LICENSE": "LICENSE",

@@ -10,7 +10,7 @@ use lofty::iff::wav::WavFile;
 use lofty::mp4::{Ilst, Mp4File};
 use lofty::mpeg::MpegFile;
 use lofty::ogg::{OpusFile, VorbisComments, VorbisFile};
-use lofty::picture::{MimeType, Picture, PictureType};
+use lofty::picture::{MimeType, Picture, PictureInformation, PictureType};
 use lofty::probe::Probe;
 use lofty::tag::{Accessor, ItemKey, MergeTag, SplitTag, Tag, TagExt, TagType};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -749,6 +749,7 @@ struct GenreAssignmentMaps {
 #[serde(rename_all = "camelCase")]
 struct LibraryCache {
     tracks: Vec<Track>,
+    album_covers: HashMap<String, String>,
     playlists: Vec<Playlist>,
     last_scanned_folder: Option<String>,
     last_scanned_at: Option<i64>,
@@ -876,6 +877,53 @@ fn get_library_cache(library: State<'_, Mutex<LibraryDatabase>>) -> Result<Libra
         .map_err(|_| "Library cache is unavailable.".to_owned())?;
 
     library.load_cache()
+}
+
+#[tauri::command]
+async fn set_album_cover(
+    album_id: String,
+    image_path: Option<String>,
+    app: AppHandle,
+) -> Result<HashMap<String, String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let directory = app
+            .path()
+            .app_data_dir()
+            .map_err(|error| format!("Could not find Cassette's artwork directory: {error}"))?
+            .join("cover-art");
+        let image = image_path
+            .as_deref()
+            .map(|path| read_custom_cover(Path::new(path)))
+            .transpose()?;
+        let library = app.state::<Mutex<LibraryDatabase>>();
+        let mut library = library.lock().map_err(|_| "Library cache is unavailable.")?;
+        library.set_album_cover(&album_id, &directory, image)
+    })
+    .await
+    .map_err(|error| format!("Could not save album artwork: {error}"))?
+}
+
+fn read_custom_cover(path: &Path) -> Result<(Vec<u8>, &'static str), String> {
+    if !path.is_file() {
+        return Err("Select an existing JPEG or PNG image.".into());
+    }
+    let mut data = Vec::new();
+    fs::File::open(path)
+        .and_then(|file| file.take(MAX_FOLDER_COVER_BYTES + 1).read_to_end(&mut data))
+        .map_err(|error| format!("Could not read the selected cover: {error}"))?;
+    if data.len() as u64 > MAX_FOLDER_COVER_BYTES {
+        return Err("Choose an image smaller than 25 MB.".into());
+    }
+    let (info, extension) = if data.starts_with(b"\x89PNG\r\n\x1a\n") {
+        (PictureInformation::from_png(&data), "png")
+    } else {
+        (PictureInformation::from_jpeg(&data), "jpg")
+    };
+    let info = info.map_err(|_| "Select a valid JPEG or PNG image.")?;
+    if info.width == 0 || info.height == 0 || u64::from(info.width) * u64::from(info.height) > 36_000_000 {
+        return Err("Choose an image with at most 36 million pixels.".into());
+    }
+    Ok((data, extension))
 }
 
 fn playback_notification_replacement_id(replacement_id: Option<u32>) -> u32 {
@@ -3891,6 +3939,11 @@ impl LibraryDatabase {
                 track_id TEXT PRIMARY KEY NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS album_covers (
+                album_id TEXT PRIMARY KEY NOT NULL,
+                cover_path TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS genre_assignments (
                 scope TEXT NOT NULL,
                 entity_key TEXT NOT NULL,
@@ -4170,6 +4223,7 @@ impl LibraryDatabase {
 
         Ok(LibraryCache {
             tracks,
+            album_covers: self.album_covers()?,
             playlists: self.playlists()?,
             last_scanned_folder: self.meta_value("last_scanned_folder")?,
             last_scanned_at: self
@@ -4177,6 +4231,68 @@ impl LibraryDatabase {
                 .and_then(|value| value.parse::<i64>().ok()),
             recovery_notice: self.recovery_notice.clone(),
         })
+    }
+
+    fn album_covers(&self) -> Result<HashMap<String, String>, String> {
+        let read = || -> rusqlite::Result<HashMap<String, String>> {
+            let mut statement = self.connection.prepare("SELECT album_id, cover_path FROM album_covers")?;
+            let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get::<_, String>(1)?)))?;
+            rows.collect()
+        };
+        read().map_err(|error| format!("Could not load album artwork: {error}"))
+    }
+
+    fn set_album_cover(
+        &mut self,
+        album_id: &str,
+        directory: &Path,
+        image: Option<(Vec<u8>, &'static str)>,
+    ) -> Result<HashMap<String, String>, String> {
+        cached_album_tracks(self, album_id)?;
+        let mut covers = self.album_covers()?;
+        let previous = covers.remove(album_id);
+        let image_file = image
+            .map(|(bytes, extension)| -> io::Result<tempfile::NamedTempFile> {
+                fs::create_dir_all(directory)?;
+                let mut output = tempfile::Builder::new()
+                    .prefix("user-cover-")
+                    .suffix(&format!(".{extension}"))
+                    .tempfile_in(directory)?;
+                output.write_all(&bytes)?;
+                output.as_file().sync_all()?;
+                Ok(output)
+            })
+            .transpose()
+            .map_err(|error| format!("Could not copy album artwork: {error}"))?;
+        let new_path = image_file
+            .map(|file| file.keep().map(|(_, path)| path))
+            .transpose()
+            .map_err(|error| format!("Could not save album artwork: {error}"))?;
+        let result = if let Some(path) = &new_path {
+            let path = path.to_string_lossy().into_owned();
+            covers.insert(album_id.to_owned(), path.clone());
+            self.connection.execute(
+                "INSERT OR REPLACE INTO album_covers (album_id, cover_path) VALUES (?1, ?2)",
+                params![album_id, path],
+            )
+        } else {
+            self.connection.execute("DELETE FROM album_covers WHERE album_id = ?1", [album_id])
+        };
+        if let Err(error) = result {
+            if let Some(path) = new_path {
+                let _ = fs::remove_file(path);
+            }
+            return Err(format!("Could not save album artwork: {error}"));
+        }
+        if let Some(path) = previous {
+            let path = Path::new(&path);
+            if path.parent() == Some(directory)
+                && path.file_name().is_some_and(|name| name.to_string_lossy().starts_with("user-cover-"))
+            {
+                let _ = fs::remove_file(path);
+            }
+        }
+        Ok(covers)
     }
 
     fn video_library(&self) -> Result<VideoLibrary, String> {
@@ -13346,6 +13462,7 @@ pub fn run() {
             portable_history::import_listening_history,
             portable_history::associate_listening_history_track,
             set_album_genres,
+            set_album_cover,
             set_artist_genres,
             create_playlist,
             rename_playlist,

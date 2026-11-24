@@ -9,7 +9,7 @@ const UNIT_SEPARATOR = "\u001f";
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const workspace = realpathSync(resolve(scriptDirectory, ".."));
 const packageInfo = JSON.parse(readFileSync(join(workspace, "package.json"), "utf8"));
-const expectedVersion = "0.1.0-beta.5.1";
+const expectedVersion = process.platform === "win32" ? packageInfo.version : "0.1.0-beta.5.1";
 
 if (packageInfo.version !== expectedVersion) {
   throw new Error(
@@ -18,6 +18,18 @@ if (packageInfo.version !== expectedVersion) {
 }
 
 const forwardedArguments = process.argv.slice(2);
+if (process.platform === "win32") {
+  const configuration = readReleaseConfiguration(workspace);
+  const cargoManifest = readFileSync(join(workspace, "src-tauri/Cargo.toml"), "utf8");
+  const cargoVersion = /^version\s*=\s*"([^"]+)"/m.exec(cargoManifest)?.[1];
+  if (configuration.version !== expectedVersion || cargoVersion !== expectedVersion
+      || !/^\d+\.\d+\.\d+-beta\.[\dA-Za-z]+(?:\.[\dA-Za-z-]+)*$/.test(expectedVersion)) {
+    throw new Error("Windows beta version must match in package.json, Cargo.toml and tauri.conf.json.");
+  }
+  if (forwardedArguments.includes("--config") && process.env.GITHUB_REF_NAME !== `windows-v${expectedVersion}`) {
+    throw new Error("Windows signing requires the matching windows-v release tag.");
+  }
+}
 validateReleaseArguments(
   forwardedArguments,
   readReleaseConfiguration(workspace),

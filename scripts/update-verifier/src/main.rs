@@ -5,13 +5,17 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use minisign_verify::{PublicKey, Signature};
 use std::{fs, path::Path};
 
-fn verify(image: &Path, signature: &Path, config: &Path, version: &str) -> Result<(), String> {
-    let image_name = format!("Cassette_{version}_amd64.AppImage");
+fn verify(image: &Path, signature: &Path, config: &Path, version: &str, windows: bool) -> Result<(), String> {
+    let image_name = if windows {
+        format!("Cassette_{version}_x64-setup.exe")
+    } else {
+        format!("Cassette_{version}_amd64.AppImage")
+    };
     if image.file_name().and_then(|s| s.to_str()) != Some(&image_name)
         || signature.file_name().and_then(|s| s.to_str()) != Some(&format!("{image_name}.sig"))
         || signature.parent() != image.parent()
     {
-        return Err("AppImage/signature filenames or directories do not match".into());
+        return Err("Update payload and signature filenames or directories do not match".into());
     }
     let configuration: serde_json::Value =
         serde_json::from_slice(&fs::read(config).map_err(|_| "Cannot read configuration")?)
@@ -46,28 +50,30 @@ fn verify(image: &Path, signature: &Path, config: &Path, version: &str) -> Resul
         .split('\t')
         .any(|s| s == format!("file:{image_name}"))
     {
-        return Err("Signed filename does not match AppImage".into());
+        return Err("Signed filename does not match update payload".into());
     }
-    let payload = fs::read(image).map_err(|_| "Cannot read AppImage")?;
+    let payload = fs::read(image).map_err(|_| "Cannot read update payload")?;
     public
         .verify(&payload, &signature, true)
-        .map_err(|_| "AppImage signature verification FAILED".into())
+        .map_err(|_| "Update payload signature verification FAILED".into())
 }
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let result = if args.len() == 4 {
+    let windows = args.get(4).is_some_and(|flag| flag == "--windows");
+    let result = if args.len() == 4 || (args.len() == 5 && windows) {
         verify(
             Path::new(&args[0]),
             Path::new(&args[1]),
             Path::new(&args[2]),
             &args[3],
+            windows,
         )
     } else {
-        Err("Usage: cassette-update-verifier APPIMAGE SIGNATURE CONFIG VERSION".into())
+        Err("Usage: cassette-update-verifier PAYLOAD SIGNATURE CONFIG VERSION [--windows]".into())
     };
     match result {
-        Ok(()) => println!("AppImage signature verified with the configured public key."),
+        Ok(()) => println!("Update signature verified with the configured public key."),
         Err(error) => {
             eprintln!("{error}");
             std::process::exit(1);

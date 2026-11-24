@@ -62,6 +62,10 @@ test("release links use an immutable encoded version tag", () => {
     updateReleaseUrl("1.0.0/unsafe"),
     "https://github.com/atilla-m/cassette/releases/tag/v1.0.0%2Funsafe",
   );
+  assert.equal(
+    updateReleaseUrl("0.1.0-beta.6", "windows"),
+    "https://github.com/atilla-m/cassette/releases/tag/windows-v0.1.0-beta.6",
+  );
 });
 
 test("failed automatic attempts survive reloads and delay retries for 24 hours", () => {

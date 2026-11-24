@@ -88,7 +88,7 @@ export async function chooseDvdImportOutputFolder(): Promise<string | null> {
   return typeof selected === "string" ? selected : null;
 }
 
-export async function chooseCoverImage(): Promise<string | null> {
+export async function chooseCoverImage(purpose: "cd" | "album" = "cd"): Promise<string | null> {
   const selected = await open({
     directory: false,
     multiple: false,
@@ -96,12 +96,16 @@ export async function chooseCoverImage(): Promise<string | null> {
     filters: [
       {
         name: "Cover images",
-        extensions: ["jpg", "jpeg", "png", "webp"],
+        extensions: purpose === "album" ? ["jpg", "jpeg", "png"] : ["jpg", "jpeg", "png", "webp"],
       },
     ],
   });
 
   return typeof selected === "string" ? selected : null;
+}
+
+export async function setAlbumCover(albumId: string, imagePath: string | null): Promise<Record<string, string>> {
+  return invoke("set_album_cover", { albumId, imagePath });
 }
 
 export async function scanLibrary(root: string, append = false): Promise<Track[]> {

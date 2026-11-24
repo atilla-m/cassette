@@ -37,10 +37,12 @@ export function validateReleaseArguments(args, config, overlay, environment, pla
     : ["--bundles", "deb,rpm"];
   const signed = ["--features", "signed-updater", "--bundles", "appimage,deb,rpm",
     "--config", "src-tauri/tauri.updater.conf.json", "--ci"];
+  const signedWindows = ["--target", "x86_64-pc-windows-msvc", "--bundles", "nsis",
+    "--config", "src-tauri/tauri.updater.conf.json", "--ci"];
   const same = (expected) => JSON.stringify(args) === JSON.stringify(expected);
   if (same(ordinary)) return false;
-  if (platform !== "linux" || !same(signed)) {
-    throw new Error("Unsupported release arguments; use release:linux or release:linux:signed exactly.");
+  if (!(platform === "linux" && same(signed)) && !(platform === "win32" && same(signedWindows))) {
+    throw new Error("Unsupported release arguments; use the release command for this platform exactly.");
   }
   validateUpdaterConfiguration(config);
   if (JSON.stringify(overlay.bundle) !== JSON.stringify({ createUpdaterArtifacts: true })

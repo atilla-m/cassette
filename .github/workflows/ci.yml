@@ -14,6 +14,7 @@ env:
 jobs:
   linux:
     name: Linux x86_64 (Ubuntu 22.04)
+    if: "!startsWith(github.ref, 'refs/tags/windows-v')"
     runs-on: ubuntu-22.04
     timeout-minutes: 120
     steps:
@@ -117,6 +118,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Read Windows release version
+        shell: pwsh
+        run: |
+          $version = node -p "require('./package.json').version"
+          "RELEASE_VERSION=$version" >> $env:GITHUB_ENV
       - name: Use non-personal Rust tool directories
         shell: pwsh
         run: |
@@ -182,7 +188,15 @@ jobs:
       - run: cargo check --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc
 
       - name: Build current-version NSIS bundle
+        if: "!startsWith(github.ref, 'refs/tags/windows-v')"
         run: npm run release:windows
+
+      - name: Build and sign the Windows beta update
+        if: startsWith(github.ref, 'refs/tags/windows-v')
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: npm run release:windows:signed
 
       - name: Verify and scan Windows release artifacts
         shell: pwsh
@@ -193,16 +207,72 @@ jobs:
             --license LICENSE `
             --frontend build `
             --artifact src-tauri/target/x86_64-pc-windows-msvc/release/cassette.exe `
-            --artifact src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/Cassette_0.1.0-beta.5.1_x64-setup.exe
+            --artifact "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/Cassette_${env:RELEASE_VERSION}_x64-setup.exe"
 
       - name: Install and smoke-test without build-machine GStreamer
         shell: pwsh
         run: ./scripts/test-installed-windows-runtime.ps1
 
       - name: Upload exact Windows CI artifacts
+        if: "!startsWith(github.ref, 'refs/tags/windows-v')"
         uses: actions/upload-artifact@v4
         with:
-          name: cassette-0.1.0-beta.5.1-windows-x86_64
+          name: cassette-${{ env.RELEASE_VERSION }}-windows-x86_64
           if-no-files-found: error
           path: |
-            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/Cassette_0.1.0-beta.5.1_x64-setup.exe
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/Cassette_${{ env.RELEASE_VERSION }}_x64-setup.exe
+
+      - name: Verify the signed update and prepare its manifest
+        if: startsWith(github.ref, 'refs/tags/windows-v')
+        shell: pwsh
+        run: |
+          $directory = "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis"
+          $name = "Cassette_${env:RELEASE_VERSION}_x64-setup.exe"
+          $installer = Join-Path $directory $name
+          $signature = "$installer.sig"
+          cargo run --locked --quiet --manifest-path scripts/update-verifier/Cargo.toml -- $installer $signature src-tauri/tauri.conf.json $env:RELEASE_VERSION --windows
+          if ($LASTEXITCODE -ne 0) { throw "Windows update signature verification failed." }
+          $manifest = @{
+            version = $env:RELEASE_VERSION
+            platforms = @{
+              "windows-x86_64" = @{
+                url = "https://github.com/atilla-m/cassette/releases/download/$env:GITHUB_REF_NAME/$name"
+                signature = (Get-Content -LiteralPath $signature -Raw).Trim()
+              }
+            }
+          }
+          $manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath "$directory/windows-update.json" -Encoding utf8
+
+      - name: Upload verified Windows update assets
+        if: startsWith(github.ref, 'refs/tags/windows-v')
+        uses: actions/upload-artifact@v4
+        with:
+          name: signed-windows-update
+          if-no-files-found: error
+          path: |
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/Cassette_${{ env.RELEASE_VERSION }}_x64-setup.exe
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/Cassette_${{ env.RELEASE_VERSION }}_x64-setup.exe.sig
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/windows-update.json
+
+  windows-release-draft:
+    name: Stage the signed Windows beta release
+    if: startsWith(github.ref, 'refs/tags/windows-v') && github.repository == 'atilla-m/cassette'
+    needs: windows
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: signed-windows-update
+          path: windows-update
+      - name: Create a draft for review
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release create "$GITHUB_REF_NAME" windows-update/* \
+            --verify-tag --draft --prerelease --latest=false \
+            --title "Cassette ${GITHUB_REF_NAME#windows-v} for Windows" --generate-notes

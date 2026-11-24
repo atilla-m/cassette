@@ -41,6 +41,7 @@
     saveTrackLyricsResult,
     searchTrackLyricsResults,
     setAlbumGenres,
+    setAlbumCover,
     setArtistGenres,
     setTrackLyricsOffset,
     toggleTrackFavorite,
@@ -78,7 +79,7 @@
     checkForCassetteUpdate,
     getAppImageMenuStatus,
     getUpdateRuntimeInfo,
-    installAppImageUpdate,
+    installCassetteUpdate,
     loadUpdaterStorage,
     persistUpdaterStorage,
     removeAppImageFromMenu,
@@ -166,6 +167,8 @@
     visibleStatsItems,
   } from "$lib/utils/playStats";
   import { listen } from "@tauri-apps/api/event";
+  import { isTauri } from "@tauri-apps/api/core";
+  import { getCurrentWindow } from "@tauri-apps/api/window";
   import { ask } from "@tauri-apps/plugin-dialog";
   import { openPath, openUrl } from "@tauri-apps/plugin-opener";
   import { onMount, untrack } from "svelte";
@@ -463,7 +466,16 @@
     },
   ];
 
-  let tracks = $state<Track[]>([]);
+  let libraryTracks = $state<Track[]>([]);
+  let customAlbumCovers = $state<Record<string, string>>({});
+  let tracks = $derived(Object.keys(customAlbumCovers).length > 0
+    ? libraryTracks.map((track) => {
+      const coverArtPath = customAlbumCovers[albumIdForTrack(track)];
+      return coverArtPath ? { ...track, coverArtPath } : track;
+    })
+    : libraryTracks);
+  let editingCoverForAlbum = $state<string | null>(null);
+  let albumCoverFeedback = $state<{ albumId: string; message: string; error: boolean } | null>(null);
   let videos = $state<VideoEntry[]>([]);
   let isScanning = $state(false);
   let isScanningVideos = $state(false);
@@ -776,6 +788,7 @@
   let statsDistinctArtists = $derived(new Set(periodTracks.filter((track) => track.playCount > 0)
     .map((track) => track.artist ?? track.albumArtist ?? "Unknown Artist")).size);
   let statsMaxDailyPlays = $derived(Math.max(1, ...(statsSnapshot?.dailyPlays ?? [])));
+  let statsActiveDays = $derived(statsSnapshot?.dailyPlays.filter((count) => count > 0).length ?? 0);
   let statsChartHasPlays = $derived((statsSnapshot?.dailyPlays ?? []).some((count) => count > 0));
   let statsChartDates = $derived(statsRange?.chartDates.slice(statsChartOffset, statsChartOffset + 90) ?? []);
   let songFormatOptions = $derived<DropdownOption[]>(availableFormats.map((format) => ({ value: format, label: format })));
@@ -874,6 +887,8 @@
       ? "Detecting..."
       : updateRuntime.packageKind === "appimage"
       ? "AppImage"
+      : updateRuntime.packageKind === "nsis"
+      ? "Windows installer"
       : updateRuntime.packageKind === "native-or-unknown"
         ? "DEB, RPM, or other"
         : updateRuntime.development
@@ -903,7 +918,8 @@
   let currentOrderIndex = $derived(queueOrderIndex(playbackOrder, currentQueueIndex));
   let queuePanelEntries = $derived(buildQueuePanelEntries(playbackQueue, playbackOrder, currentQueueIndex));
   let currentTrackGenres = $derived(currentTrack ? trackGenres(currentTrack).filter((genre) => genre !== "Unknown Genre") : []);
-  let currentTrackCoverArtSrc = $derived(localImageSource(currentTrack?.coverArtPath));
+  let currentTrackCoverArtPath = $derived(currentTrack ? trackCoverPath(currentTrack) : null);
+  let currentTrackCoverArtSrc = $derived(localImageSource(currentTrackCoverArtPath));
   let currentTrackDuration = $derived(durationSeconds ?? currentTrack?.durationSeconds ?? null);
   let syncedLyricLines = $derived(currentLyrics?.kind === "synced" ? parseLrcLyrics(currentLyrics.text) : []);
   let lyricsOffsetSeconds = $derived(currentLyrics?.offsetSeconds ?? 0);
@@ -1090,6 +1106,13 @@
   // Normalize hidden legacy selections before the component is mounted, so
   // Rose Noir or Royal Gold is never applied during startup.
   initializeSavedTheme();
+
+  $effect(() => {
+    if (isWindows && isTauri()) {
+      void getCurrentWindow().setTheme(selectedTheme === "light" ? "light" : "dark")
+        .catch((error) => console.warn("Could not apply the Windows title bar theme:", error));
+    }
+  });
 
   $effect(() => {
     void loadCurrentTrackLyrics(currentTrack?.filePath ?? null);
@@ -1359,7 +1382,8 @@
     try {
       const cache = await getLibraryCache();
       libraryRecoveryNotice = cache.recoveryNotice ?? null;
-      tracks = cache.tracks;
+      libraryTracks = cache.tracks;
+      customAlbumCovers = cache.albumCovers ?? {};
       playlists = cache.playlists;
       scannedFolder = cache.lastScannedFolder;
       lastScannedAt = cache.lastScannedAt;
@@ -1688,7 +1712,7 @@
 
     if (
       !updateRuntime.development
-      && updateRuntime.platform === "linux"
+      && updateRuntime.updaterAvailable
       && shouldRunAutomaticUpdateCheck(automaticUpdateChecksEnabled, lastAutomaticUpdateAttempt)
     ) {
       await runUpdateCheck("automatic");
@@ -1698,10 +1722,6 @@
   function unavailableUpdateMessage(runtime: UpdateRuntimeInfo | null) {
     if (!runtime || runtime.development) {
       return "Update checks are unavailable in development builds. No update server was contacted.";
-    }
-
-    if (runtime.platform !== "linux") {
-      return "Update checks are available only in Linux builds for Cassette 0.1.0-beta.5.1.";
     }
 
     if (!runtime.updaterAvailable) {
@@ -1834,9 +1854,9 @@
   }
 
   async function handleViewUpdateDownload() {
-    const downloadUrl = isWindows
-      ? "https://github.com/atilla-m/cassette/releases"
-      : availableUpdateVersion && updateReleaseUrl(availableUpdateVersion);
+    const downloadUrl = availableUpdateVersion
+      ? updateReleaseUrl(availableUpdateVersion, updateRuntime?.platform)
+      : "https://github.com/atilla-m/cassette/releases";
     if (!downloadUrl) {
       return;
     }
@@ -1850,7 +1870,7 @@
     }
   }
 
-  async function handleInstallAppImageUpdate() {
+  async function handleInstallCassetteUpdate() {
     if (updateIsBusy || !availableUpdate || !availableUpdateVersion || !updateRuntime?.canSelfInstall) {
       return;
     }
@@ -1863,7 +1883,7 @@
     updateCheckState = "confirming";
     try {
       confirmed = await ask(
-        `Download the signed Cassette ${confirmedVersion} AppImage, replace this AppImage, and restart Cassette?`,
+        `Download and verify Cassette ${confirmedVersion}, install the update, and restart Cassette?`,
         {
           title: "Update Cassette",
           kind: "info",
@@ -1890,7 +1910,7 @@
     updateDownloadProgress = { downloadedBytes: 0, totalBytes: null, percent: null, installing: false };
 
     try {
-      await installAppImageUpdate(confirmedUpdate, (progress) => {
+      await installCassetteUpdate(confirmedUpdate, (progress) => {
         updateDownloadProgress = progress;
         if (progress.installing) {
           updateCheckState = "installing";
@@ -2061,7 +2081,7 @@
     const sameLibrary = scannedFolder !== null && (append || scannedFolder === folder);
     const scannedTracks = await scanLibrary(folder, append);
     if (!append || !scannedFolder) scannedFolder = folder;
-    tracks = scannedTracks;
+    libraryTracks = scannedTracks;
     scanCount = scannedTracks.length;
     lastScannedAt = Math.floor(Date.now() / 1000);
     statsRevision += 1;
@@ -4273,20 +4293,6 @@
     return displayArtists.find((candidate) => candidate.name === artistName)?.playCount ?? 0;
   }
 
-  async function handleShuffleLibrary() {
-    await playTrackSet(tracks, true);
-  }
-
-  function handleRandomAlbum() {
-    const albumsWithTracks = displayAlbums.filter(albumHasTracks);
-
-    if (albumsWithTracks.length === 0) {
-      return;
-    }
-
-    handleAlbumSelect(albumsWithTracks[Math.floor(Math.random() * albumsWithTracks.length)]);
-  }
-
   async function handleAlbumCardPlay(event: MouseEvent, album: Album, shouldShuffle = false) {
     event.stopPropagation();
     await playTrackSet(tracksForAlbum(album), shouldShuffle);
@@ -5029,7 +5035,7 @@
   }
 
   function applyTrackFavorite(trackId: string, isFavorite: boolean) {
-    tracks = tracks.map((track) => (track.id === trackId ? { ...track, isFavorite } : track));
+    libraryTracks = libraryTracks.map((track) => (track.id === trackId ? { ...track, isFavorite } : track));
     playbackQueue = playbackQueue.map((track) => (track.id === trackId ? { ...track, isFavorite } : track));
 
     if (currentTrack?.id === trackId) {
@@ -5156,7 +5162,7 @@
   function applyUpdatedTracks(updatedTracks: Track[]) {
     const tracksById = new Map(updatedTracks.map((track) => [track.id, track]));
 
-    tracks = updatedTracks;
+    libraryTracks = updatedTracks;
     playbackQueue = playbackQueue.map((track) => tracksById.get(track.id) ?? track);
 
     if (currentTrack) {
@@ -5166,7 +5172,7 @@
   }
 
   function applyUpdatedTrack(updatedTrack: Track) {
-    tracks = tracks.map((track) => (track.id === updatedTrack.id ? updatedTrack : track));
+    libraryTracks = libraryTracks.map((track) => (track.id === updatedTrack.id ? updatedTrack : track));
     playbackQueue = playbackQueue.map((track) => (track.id === updatedTrack.id ? updatedTrack : track));
 
     if (currentTrack?.id === updatedTrack.id) {
@@ -5641,6 +5647,28 @@
     const artist = track.albumArtist ?? track.artist ?? "Unknown Artist";
 
     return `${artist.toLowerCase()}\u0000${title.toLowerCase()}`;
+  }
+
+  function trackCoverPath(track: Track): string | null {
+    const cached = libraryTracksById.get(track.id);
+    return cached ? cached.coverArtPath : track.coverArtPath;
+  }
+
+  async function changeSelectedAlbumCover(reset = false) {
+    const albumId = selectedAlbum?.id;
+    if (!albumId || editingCoverForAlbum) return;
+    editingCoverForAlbum = albumId;
+    albumCoverFeedback = null;
+    try {
+      const imagePath = reset ? null : await chooseCoverImage("album");
+      if (!reset && !imagePath) return;
+      customAlbumCovers = await setAlbumCover(albumId, imagePath);
+      albumCoverFeedback = { albumId, message: reset ? "Original artwork restored." : "Album artwork saved in Cassette.", error: false };
+    } catch (error) {
+      albumCoverFeedback = { albumId, message: error instanceof Error ? error.message : String(error), error: true };
+    } finally {
+      editingCoverForAlbum = null;
+    }
   }
 
   function artistNameForTrack(track: Track) {
@@ -7001,7 +7029,7 @@
       if (statsDetailSection) {
         return `${statsViewAllLabel(statsDetailSection, statsSectionTotal(statsDetailSection))} · ${statsPeriod === "all" ? "All time" : "Selected listening period"}`;
       }
-      return `${playsLabel(statsTotalPlays)} across ${tracks.length} ${tracks.length === 1 ? "track" : "tracks"}.`;
+      return "Listening activity and library totals.";
     }
 
     if (activeView === "CD Rip") {
@@ -7093,14 +7121,6 @@
             <p class="scan-status">{viewStatus()}</p>
           </div>
           <div class="home-header-actions">
-            {#if activeView === "Albums" && !selectedAlbum}
-              <button type="button" disabled={tracks.length === 0} onclick={() => void handleShuffleLibrary()}>
-                Shuffle Library
-              </button>
-              <button type="button" disabled={tracks.length === 0 || displayAlbums.length === 0} onclick={handleRandomAlbum}>
-                Random Album
-              </button>
-            {/if}
             {#if ENABLE_EXPERIMENTAL_VIDEOS && activeView === "Videos"}
               <button type="button" disabled={isScanningVideos} onclick={() => void (videoFolder ? handleRescanVideos() : handleAddVideoFolder())}>
                 {isScanningVideos ? "Scanning..." : videoFolder ? "Rescan Videos" : "Add Video Folder"}
@@ -7192,12 +7212,12 @@
                     onerror={hideBrokenImage}
                   />
                 {/if}
-                {#if currentTrackCoverArtSrc && currentTrack?.coverArtPath}
+                {#if currentTrackCoverArtSrc && currentTrackCoverArtPath}
                   <button
                     class="lyrics-cover cover-open-button"
                     type="button"
                     aria-label={`View full cover art for ${currentTrack.title}`}
-                    onclick={(event) => openArtworkViewer(event, currentTrack?.coverArtPath ?? "", currentTrack?.title ?? "Current track")}
+                    onclick={(event) => openArtworkViewer(event, currentTrackCoverArtPath ?? "", currentTrack?.title ?? "Current track")}
                   >
                     <img
                       src={currentTrackCoverArtSrc}
@@ -7459,7 +7479,6 @@
               <input id="stats-to" type="date" bind:value={statsCustomTo} />
             {/if}
           </div>
-          <p class="stats-coverage-note">Weeks start Monday. Calendar periods use this device’s local timezone; play events are stored in UTC. Rankings use current artist, album and genre tags, not historical metadata snapshots.</p>
           {#if !statsRange}
             <p class="stats-status" role="alert">Choose valid dates with “From” on or before “Through” (up to 100 years).</p>
           {:else if statsError}
@@ -7467,47 +7486,24 @@
           {:else if statsLoading}
             <p class="stats-status" aria-live="polite">Loading listening statistics…</p>
           {/if}
-          <div class="stats-overview-grid" aria-label="Library and listening overview">
-            <div class="stats-overview-card">
-              <span>Total tracks</span>
-              <strong>{tracks.length}</strong>
-            </div>
-            <div class="stats-overview-card">
-              <span>Total albums</span>
-              <strong>{hasLoadedCache ? displayAlbums.length : 0}</strong>
-            </div>
-            <div class="stats-overview-card">
-              <span>Total artists</span>
-              <strong>{hasLoadedCache ? displayArtists.length : 0}</strong>
-            </div>
-            <div class="stats-overview-card">
-              <span>Total genres</span>
-              <strong>{hasLoadedCache ? displayGenres.length : 0}</strong>
-            </div>
-            <div class="stats-overview-card">
-              <span>Total plays</span>
-              <strong>{statsTotalPlays}</strong>
-            </div>
-            <div class="stats-overview-card">
-              <span>Distinct tracks played</span>
-              <strong>{statsDistinctTracks}</strong>
-            </div>
-            <div class="stats-overview-card">
-              <span>Distinct artists played</span>
-              <strong>{statsDistinctArtists}</strong>
-            </div>
-            <div class="stats-overview-card">
-              <span>Liked songs</span>
-              <strong>{favoriteTracks.length}</strong>
-            </div>
-            <div class="stats-overview-card muted">
-              <span>Listening time</span>
-              <strong>Coming later</strong>
-            </div>
-          </div>
+          <dl class="stats-overview-grid" aria-label="Selected listening period">
+            {#each [
+              { label: "Plays", value: statsTotalPlays },
+              { label: "Songs played", value: statsDistinctTracks },
+              { label: "Artists played", value: statsDistinctArtists },
+              { label: statsPeriod === "all" ? "Active days (last 30)" : "Active days", value: statsActiveDays },
+            ] as metric, index (metric.label)}
+              <div class="stats-overview-card" class:highlight={index === 0}>
+                <dt>{metric.label}</dt>
+                <dd>{statsRange && !statsLoading && !statsError && (statsSnapshot || (statsPeriod === "all" && index < 3)) ? metric.value.toLocaleString() : "—"}</dd>
+              </div>
+            {/each}
+          </dl>
 
           {#if statsSnapshot}
-            <p class="stats-coverage-note">
+            <details class="stats-coverage">
+              <summary>Tracking coverage</summary>
+              <p class="stats-coverage-note">
               {#if statsPeriod === "all"}
                 All-time totals include {statsSnapshot.undatedLegacyPlays} undated legacy plays. The chart shows only the most recent 30 local calendar days of dated events.
               {:else}
@@ -7519,20 +7515,26 @@
               {#if statsSnapshot.pendingTracks.length > 0}
                 {statsSnapshot.pendingTracks.length} retained track references are not in this library. Their plays remain in statistics using the backup’s labels; playback is unavailable until associated.
               {/if}
-            </p>
+              </p>
+            </details>
           {/if}
 
           <section class="stats-chart-panel" aria-labelledby="daily-plays-title">
-            <h2 id="daily-plays-title">Daily plays</h2>
+            <div class="stats-chart-heading">
+              <h2 id="daily-plays-title">Daily plays</h2>
+              {#if statsChartDates.length}
+                <span>{statsChartDates[0]} – {statsChartDates.at(-1)}</span>
+              {/if}
+            </div>
             {#if statsSnapshot && statsRange && statsChartHasPlays}
               <div class="stats-chart-scroll" role="region" aria-label="Daily play counts; use Tab to inspect dates">
-                <div class="stats-chart-bars">
+                <div class="stats-chart-bars" style:--chart-days={statsChartDates.length}>
                   {#each statsChartDates as day, index (day)}
                     <button type="button" class="stats-chart-day" aria-pressed={statsSelectedDay === day} aria-label={`${day}: ${playsLabel(statsSnapshot.dailyPlays[index + statsChartOffset] ?? 0)}`} title={`${day}: ${playsLabel(statsSnapshot.dailyPlays[index + statsChartOffset] ?? 0)}`} onclick={() => {
                       statsSelectedDay = day;
                     }}>
                       <span class="stats-chart-value">{statsSnapshot.dailyPlays[index + statsChartOffset] ?? 0}</span>
-                      <span class="stats-chart-bar" style={`height: ${Math.max(3, ((statsSnapshot.dailyPlays[index + statsChartOffset] ?? 0) / statsMaxDailyPlays) * 96)}px`}></span>
+                      <span class="stats-chart-bar" class:zero={!statsSnapshot.dailyPlays[index + statsChartOffset]} style:height={`${Math.max(2, ((statsSnapshot.dailyPlays[index + statsChartOffset] ?? 0) / statsMaxDailyPlays) * 96)}px`}></span>
                       <span class="stats-chart-date">{day.slice(5)}</span>
                     </button>
                   {/each}
@@ -7542,7 +7544,6 @@
               {#if statsRange.chartDates.length > 90}
                 <div class="stats-pagination">
                   <button type="button" disabled={statsChartOffset === 0} onclick={() => { statsChartOffset = Math.max(0, statsChartOffset - 90); }}>Earlier days</button>
-                  <span>{statsChartDates[0]} – {statsChartDates.at(-1)}</span>
                   <button type="button" disabled={statsChartOffset + 90 >= statsRange.chartDates.length} onclick={() => { statsChartOffset += 90; }}>Later days</button>
                 </div>
               {/if}
@@ -7550,6 +7551,20 @@
               <p class="stats-coverage-note">No dated plays in this chart period.</p>
             {/if}
           </section>
+          <details class="stats-coverage stats-library-summary">
+            <summary>Library totals</summary>
+            <dl>
+              {#each [
+                { label: "Songs", value: tracks.length },
+                { label: "Albums", value: displayAlbums.length },
+                { label: "Artists", value: displayArtists.length },
+                { label: "Genres", value: displayGenres.length },
+                { label: "Liked songs", value: favoriteTracks.length },
+              ] as item (item.label)}
+                <div><dt>{item.label}</dt><dd>{hasLoadedCache ? item.value.toLocaleString() : "—"}</dd></div>
+              {/each}
+            </dl>
+          </details>
           {/if}
 
           {#if !statsDetailSection || statsDetailSection === "tracks"}
@@ -7861,6 +7876,17 @@
                     Add to Queue
                   </button>
                 </div>
+                <div class="album-detail-actions cover-edit-actions">
+                  <button type="button" disabled={!!editingCoverForAlbum || !selectedAlbumTracks.length} onclick={() => void changeSelectedAlbumCover()}>
+                    {editingCoverForAlbum === selectedAlbum.id ? "Saving artwork…" : "Edit album art"}
+                  </button>
+                  {#if customAlbumCovers[selectedAlbum.id]}
+                    <button type="button" disabled={!!editingCoverForAlbum} onclick={() => void changeSelectedAlbumCover(true)}>Restore original art</button>
+                  {/if}
+                </div>
+                {#if albumCoverFeedback?.albumId === selectedAlbum.id}
+                  <p class="form-message" class:error={albumCoverFeedback.error} role={albumCoverFeedback.error ? "alert" : "status"}>{albumCoverFeedback.message}</p>
+                {/if}
               </div>
             </div>
 
@@ -10042,12 +10068,6 @@
                 <span class="settings-pill">Version {appVersion}</span>
               </div>
 
-              {#if isWindows}
-                <p class="settings-note">Download and run the latest Windows installer from GitHub Releases to update Cassette.</p>
-                <div class="settings-actions">
-                  <button type="button" onclick={handleViewUpdateDownload}>Open GitHub Releases</button>
-                </div>
-              {:else}
                 <div class="settings-control-list">
                   <label class="settings-toggle-row">
                     <span>Automatic update checks</span>
@@ -10064,8 +10084,8 @@
                     <strong>{updatePackageLabel}</strong>
                     <small>
                       {updateRuntime?.canSelfInstall
-                        ? "This AppImage can install a verified update after you confirm."
-                        : "Cassette will open the release page and will not replace a system package."}
+                        ? "Cassette installs verified updates after you confirm."
+                        : "You can download a new installer from GitHub Releases."}
                     </small>
                   </div>
                 </div>
@@ -10074,6 +10094,7 @@
                   <button type="button" disabled={!updateRuntime || updateIsBusy} onclick={handleManualUpdateCheck}>
                     {updateCheckState === "checking" ? "Checking..." : "Check for updates"}
                   </button>
+                  <button type="button" onclick={handleViewUpdateDownload}>GitHub Releases</button>
                 </div>
 
                 {#if updateRuntime?.packageKind === "appimage" && !updateRuntime.development}
@@ -10144,7 +10165,7 @@
                     {:else}
                       <div class="settings-actions">
                         {#if updateRuntime?.canSelfInstall}
-                          <button class="primary" type="button" disabled={updateIsBusy} onclick={handleInstallAppImageUpdate}>
+                          <button class="primary" type="button" disabled={updateIsBusy} onclick={handleInstallCassetteUpdate}>
                             Update and restart
                           </button>
                         {:else}
@@ -10157,7 +10178,6 @@
                     {/if}
                   </article>
                 {/if}
-              {/if}
 
               {#if updateStatusMessage}
                 <p class="form-message" class:error={updateStatusIsError} role={updateStatusIsError ? "alert" : "status"}>
@@ -10208,7 +10228,7 @@
     <aside class="update-notice" aria-live="polite" aria-label="Cassette update available">
       <div>
         <strong>Cassette {availableUpdateVersion} is available</strong>
-        <span>{updateRuntime?.canSelfInstall ? "Signed AppImage update" : "Linux package download"}</span>
+        <span>{updateRuntime?.canSelfInstall ? "Signed update" : "Package download"}</span>
       </div>
       <button type="button" onclick={handleReviewAvailableUpdate}>Review</button>
       <button type="button" onclick={handleUpdateLater}>Later</button>
@@ -10258,8 +10278,8 @@
               <button class="queue-row-main" type="button" onclick={() => playQueuedTrackAtIndex(entry.queueIndex)}>
                 <span class="queue-row-position">{queuePositionLabel(entry.offset)}</span>
                 <span class="queue-row-art" aria-hidden="true">
-                  {#if entry.track.coverArtPath}
-                    <img src={localImageSource(entry.track.coverArtPath) ?? ""} alt="" loading="lazy" onload={showLoadedImage} onerror={hideBrokenImage} />
+                  {#if trackCoverPath(entry.track)}
+                    <img src={localImageSource(trackCoverPath(entry.track)) ?? ""} alt="" loading="lazy" onload={showLoadedImage} onerror={hideBrokenImage} />
                   {:else}
                     <span>{entry.track.title.slice(0, 1)}</span>
                   {/if}
@@ -11048,6 +11068,11 @@
     justify-content: space-between;
     gap: 24px;
     margin-bottom: 32px;
+  }
+
+  .home-header > div:first-child {
+    min-width: 0;
+    overflow-wrap: anywhere;
   }
 
   .eyebrow {
@@ -12163,6 +12188,7 @@
 
   .detail-view {
     display: grid;
+    grid-template-columns: minmax(0, 1fr);
     gap: 22px;
   }
 
@@ -13235,6 +13261,12 @@
 
   .detail-copy {
     min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .album-detail-actions.cover-edit-actions button {
+    background: var(--panel-soft);
+    color: var(--text);
   }
 
   .album-detail-copy {
@@ -14445,6 +14477,7 @@
 
   .stats-page {
     display: grid;
+    grid-template-columns: minmax(0, 1fr);
     gap: 22px;
     max-width: 1120px;
   }
@@ -14500,9 +14533,47 @@
     padding: 16px;
   }
 
-  .stats-chart-panel h2 {
-    margin: 0 0 12px;
+  .stats-chart-heading {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 6px 16px;
+    margin-bottom: 12px;
+  }
+
+  .stats-chart-heading h2 {
+    margin: 0;
     font-size: 1rem;
+  }
+
+  .stats-chart-heading span,
+  .stats-coverage {
+    color: var(--text-soft);
+    font-size: 0.86rem;
+  }
+
+  .stats-coverage summary {
+    width: fit-content;
+    cursor: pointer;
+    font-weight: 750;
+  }
+
+  .stats-coverage[open] > :not(summary) {
+    margin-top: 8px;
+  }
+
+  .stats-library-summary dl {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px 24px;
+    margin-bottom: 0;
+  }
+
+  .stats-library-summary dd {
+    margin: 0;
+    color: var(--text);
+    font-weight: 750;
   }
 
   .stats-chart-scroll {
@@ -14511,11 +14582,12 @@
   }
 
   .stats-chart-bars {
-    display: flex;
+    display: grid;
+    grid-template-columns: repeat(var(--chart-days), minmax(36px, 1fr));
     align-items: end;
     gap: 5px;
     min-height: 128px;
-    width: max-content;
+    min-width: 100%;
   }
 
   .stats-chart-day {
@@ -14523,7 +14595,7 @@
     align-items: end;
     justify-items: center;
     gap: 4px;
-    width: 44px;
+    min-width: 0;
     color: var(--text-soft);
     font-size: 0.68rem;
     background: transparent;
@@ -14539,6 +14611,16 @@
     width: 26px;
     border-radius: 4px 4px 0 0;
     background: var(--accent);
+  }
+
+  .stats-chart-bar.zero {
+    background: var(--border-strong);
+  }
+
+  .stats-chart-day[aria-pressed="true"] {
+    color: var(--text);
+    background: var(--panel-hover);
+    border-radius: 4px;
   }
 
   .stats-transfer-panel,
@@ -14582,6 +14664,7 @@
     display: grid;
     grid-template-columns: repeat(4, minmax(0, 1fr));
     gap: 12px;
+    margin: 0;
   }
 
   .stats-overview-card {
@@ -14592,11 +14675,11 @@
     padding: 16px;
   }
 
-  .stats-overview-card.muted {
-    background: var(--bg-soft);
+  .stats-overview-card.highlight {
+    border-color: var(--accent-strong);
   }
 
-  .stats-overview-card span {
+  .stats-overview-card dt {
     display: block;
     margin-bottom: 8px;
     color: var(--text-soft);
@@ -14605,7 +14688,8 @@
     text-transform: uppercase;
   }
 
-  .stats-overview-card strong {
+  .stats-overview-card dd {
+    margin: 0;
     display: block;
     overflow: hidden;
     color: var(--text);
@@ -14614,11 +14698,6 @@
     line-height: 1.1;
     text-overflow: ellipsis;
     white-space: nowrap;
-  }
-
-  .stats-overview-card.muted strong {
-    color: var(--text-soft);
-    font-size: 1rem;
   }
 
   .stats-section-grid {

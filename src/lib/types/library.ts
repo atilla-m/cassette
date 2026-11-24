@@ -288,6 +288,7 @@ export type VideoCodecInfo = {
 
 export type LibraryCache = {
   tracks: Track[];
+  albumCovers?: Record<string, string>;
   playlists: Playlist[];
   lastScannedFolder: string | null;
   lastScannedAt: number | null;

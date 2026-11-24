@@ -19,7 +19,7 @@ export type StoredUpdaterState = {
 export type UpdateRuntimeInfo = {
   development: boolean;
   platform: string;
-  packageKind: "appimage" | "native-or-unknown" | "unsupported";
+  packageKind: "appimage" | "nsis" | "native-or-unknown" | "unsupported";
   canSelfInstall: boolean;
   updaterAvailable: boolean;
 };
@@ -124,8 +124,9 @@ export function persistUpdaterStorage(
   }
 }
 
-export function updateReleaseUrl(version: string): string {
-  return `https://github.com/atilla-m/cassette/releases/tag/v${encodeURIComponent(version)}`;
+export function updateReleaseUrl(version: string, platform = "linux"): string {
+  const prefix = platform === "windows" ? "windows-v" : "v";
+  return `https://github.com/atilla-m/cassette/releases/tag/${prefix}${encodeURIComponent(version)}`;
 }
 
 export async function getUpdateRuntimeInfo(): Promise<UpdateRuntimeInfo> {
@@ -147,26 +148,21 @@ export async function checkForCassetteUpdate(runtime: UpdateRuntimeInfo): Promis
     throw new Error("Update checks are unavailable in development builds.");
   }
 
-  if (runtime.platform !== "linux") {
-    throw new Error("Update checks are available only in Linux builds for this beta.");
-  }
-
   if (!runtime.updaterAvailable) throw new Error("Updater configuration is unavailable in this build or session.");
   return invoke<CassetteUpdate | null>("check_cassette_update");
 }
 
-export async function installAppImageUpdate(
+export async function installCassetteUpdate(
   update: CassetteUpdate,
   onProgress: (progress: UpdateDownloadProgress) => void,
 ): Promise<void> {
   const currentRuntime = await getUpdateRuntimeInfo();
   if (
     currentRuntime.development
-    || currentRuntime.platform !== "linux"
-    || currentRuntime.packageKind !== "appimage"
+    || (currentRuntime.packageKind !== "appimage" && currentRuntime.packageKind !== "nsis")
     || !currentRuntime.canSelfInstall
   ) {
-    throw new Error("The AppImage runtime could not be verified immediately before installation.");
+    throw new Error("The current installation could not be verified immediately before updating.");
   }
 
   const progress = new Channel<{ downloadedBytes: number; totalBytes: number | null; installing: boolean }>();
@@ -177,6 +173,8 @@ export async function installAppImageUpdate(
   };
   await invoke("install_cassette_update", { operationId: update.operationId, progress });
 
-  const { relaunch } = await import("@tauri-apps/plugin-process");
-  await relaunch();
+  if (currentRuntime.packageKind === "appimage") {
+    const { relaunch } = await import("@tauri-apps/plugin-process");
+    await relaunch();
+  }
 }

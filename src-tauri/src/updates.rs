@@ -5,12 +5,38 @@ use tauri::{AppHandle, Manager};
 #[derive(Default)]
 pub struct UpdateSession {
     available: std::sync::atomic::AtomicBool,
-    #[cfg(all(target_os = "linux", feature = "signed-updater"))]
+    #[cfg(any(windows, all(target_os = "linux", feature = "signed-updater")))]
     busy: std::sync::atomic::AtomicBool,
     #[cfg(all(target_os = "linux", feature = "signed-updater"))]
     next_operation: std::sync::atomic::AtomicU64,
     #[cfg(all(target_os = "linux", feature = "signed-updater"))]
     pending: std::sync::Mutex<Option<PendingUpdate>>,
+    #[cfg(windows)]
+    pending_windows: std::sync::Mutex<Option<(String, tauri_plugin_updater::Update)>>,
+}
+
+#[cfg(any(windows, all(target_os = "linux", feature = "signed-updater")))]
+struct Busy<'a>(&'a std::sync::atomic::AtomicBool);
+
+#[cfg(any(windows, all(target_os = "linux", feature = "signed-updater")))]
+impl Drop for Busy<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
+#[cfg(any(windows, all(target_os = "linux", feature = "signed-updater")))]
+impl UpdateSession {
+    fn enter(&self) -> Result<Busy<'_>, String> {
+        use std::sync::atomic::Ordering;
+        if cfg!(debug_assertions) || !self.available.load(Ordering::Acquire) {
+            return Err("Updates are unavailable in this build or session.".into());
+        }
+        self.busy
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| "An update operation is already in progress.".to_string())?;
+        Ok(Busy(&self.busy))
+    }
 }
 
 #[derive(Serialize)]
@@ -731,7 +757,7 @@ mod pending_authorization_tests {
 
 pub fn initialize(app: &AppHandle) {
     app.manage(UpdateSession::default());
-    #[cfg(all(target_os = "linux", feature = "signed-updater"))]
+    #[cfg(any(windows, all(target_os = "linux", feature = "signed-updater")))]
     {
         use tauri_plugin_updater::UpdaterExt;
         // Do not interpolate configuration/error values: they may contain secrets.
@@ -749,7 +775,7 @@ pub fn initialize(app: &AppHandle) {
     }
 }
 
-#[cfg(all(target_os = "linux", feature = "signed-updater"))]
+#[cfg(any(windows, all(target_os = "linux", feature = "signed-updater")))]
 fn valid_configuration(value: Option<&serde_json::Value>) -> bool {
     use base64::Engine;
     let Some(value) = value else {
@@ -806,17 +832,18 @@ pub fn get_update_runtime_info(app: AppHandle) -> RuntimeInfo {
     RuntimeInfo {
         development: cfg!(debug_assertions),
         platform: std::env::consts::OS,
-        package_kind: if !cfg!(target_os = "linux") {
+        package_kind: if cfg!(all(windows, target_arch = "x86_64")) {
+            "nsis"
+        } else if !cfg!(target_os = "linux") {
             "unsupported"
         } else if appimage {
             "appimage"
         } else {
             "native-or-unknown"
         },
-        can_self_install: cfg!(target_os = "linux")
+        can_self_install: (appimage || cfg!(all(windows, target_arch = "x86_64")))
             && !cfg!(debug_assertions)
-            && available
-            && appimage,
+            && available,
         updater_available: available,
     }
 }
@@ -826,25 +853,9 @@ mod enabled {
     use super::*;
     use std::sync::atomic::Ordering;
     use tauri_plugin_updater::UpdaterExt;
-    pub(super) struct Busy<'a>(&'a std::sync::atomic::AtomicBool);
-    impl Drop for Busy<'_> {
-        fn drop(&mut self) {
-            self.0.store(false, Ordering::Release);
-        }
-    }
-    pub(super) fn enter(session: &UpdateSession) -> Result<Busy<'_>, String> {
-        if cfg!(debug_assertions) || !session.available.load(Ordering::Acquire) {
-            return Err("Updates are unavailable in this build or session; updater configuration could not be initialized.".into());
-        }
-        session
-            .busy
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .map_err(|_| "An update operation is already in progress.".to_string())?;
-        Ok(Busy(&session.busy))
-    }
     pub(super) async fn check(app: AppHandle) -> Result<Option<UpdateInfo>, String> {
         let session = app.state::<UpdateSession>();
-        let _busy = enter(&session)?;
+        let _busy = session.enter()?;
         let image = detection::current();
         let executable = image
             .as_ref()
@@ -912,7 +923,7 @@ mod enabled {
         progress: tauri::ipc::Channel<Progress>,
     ) -> Result<(), String> {
         let session = app.state::<UpdateSession>();
-        let _busy = enter(&session)?;
+        let _busy = session.enter()?;
         let image = detection::current().ok_or(
             "This installation is not a verified AppImage. Use the release download page.",
         )?;
@@ -972,11 +983,15 @@ mod enabled {
 
 #[tauri::command]
 pub async fn check_cassette_update(app: AppHandle) -> Result<Option<UpdateInfo>, String> {
+    #[cfg(windows)]
+    {
+        windows_updates::check(app).await
+    }
     #[cfg(all(target_os = "linux", feature = "signed-updater"))]
     {
         enabled::check(app).await
     }
-    #[cfg(not(all(target_os = "linux", feature = "signed-updater")))]
+    #[cfg(not(any(windows, all(target_os = "linux", feature = "signed-updater"))))]
     {
         let _ = app;
         Err("Updates are unavailable in this build; signed Linux updater configuration is required.".into())
@@ -989,13 +1004,21 @@ pub async fn install_cassette_update(
     operation_id: String,
     progress: tauri::ipc::Channel<Progress>,
 ) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        windows_updates::install(app, operation_id, progress).await
+    }
     #[cfg(all(target_os = "linux", feature = "signed-updater"))]
     {
         enabled::install(app, operation_id, progress).await
     }
-    #[cfg(not(all(target_os = "linux", feature = "signed-updater")))]
+    #[cfg(not(any(windows, all(target_os = "linux", feature = "signed-updater"))))]
     {
         let _ = (app, operation_id, progress);
         Err("Update installation is unavailable on this platform/build.".into())
     }
 }
+
+#[cfg(windows)]
+#[path = "windows_updates.rs"]
+mod windows_updates;

@@ -459,6 +459,7 @@ dependencies = [
  "minisign-verify",
  "reqwest",
  "rusqlite",
+ "semver",
  "serde",
  "serde_json",
  "sha1",

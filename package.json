@@ -24,6 +24,7 @@
     "release:linux": "node scripts/build-release.mjs --bundles deb,rpm",
     "release:linux:signed": "node scripts/build-release.mjs --features signed-updater --bundles appimage,deb,rpm --config src-tauri/tauri.updater.conf.json --ci",
     "release:windows": "node scripts/build-release.mjs --target x86_64-pc-windows-msvc --bundles nsis",
+    "release:windows:signed": "node scripts/build-release.mjs --target x86_64-pc-windows-msvc --bundles nsis --config src-tauri/tauri.updater.conf.json --ci",
     "tauri": "node scripts/tauri.mjs"
   },
   "license": "GPL-3.0-or-later",

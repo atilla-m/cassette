@@ -1,0 +1,8 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "windows-theme",
+  "description": "Match the Windows title bar to Cassette's active theme",
+  "windows": ["main"],
+  "platforms": ["windows"],
+  "permissions": ["core:window:allow-set-theme"]
+}

@@ -33,6 +33,8 @@
 <style>
   .library-section {
     display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    min-width: 0;
     gap: 14px;
   }
 
@@ -40,6 +42,7 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
+    flex-wrap: wrap;
     gap: 16px;
   }
 
@@ -53,6 +56,7 @@
   .section-actions {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: 8px;
   }
 
