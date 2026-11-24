@@ -52,7 +52,7 @@ Cassette requires WebKitGTK and GStreamer with the base, good, bad/codec, ugly/r
 
 Linux notifications call the external `notify-send` command. The package recommends `libnotify-bin` on Debian/Ubuntu or `libnotify` on Fedora, but it is optional: when absent, notification attempts report that notification support is unavailable without preventing Cassette from launching or using the music library.
 
-CD detection and ripping remain an optional Linux feature and use `cdparanoia`, `flac`, and `libdiscid`. Missing CD tools produce a feature-specific error and do not affect the core music library. Experimental video/DVD functionality is disabled for this beta, so its external tools are neither required nor advertised as available beta features.
+Cassette can detect and rip audio CDs to FLAC on Windows and Linux. Windows uses the optical drive and the bundled FLAC encoder. It supports discs containing only audio tracks. Linux uses `cdparanoia`, `flac`, and `libdiscid`. Missing CD tools only affect CD features. Experimental video/DVD functionality is disabled for this beta.
 
 ### Data and uninstall
 

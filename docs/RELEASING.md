@@ -122,7 +122,8 @@ Do not block the Linux beta.3 on this section. Perform these checks on clean x86
 - [ ] Play representative FLAC, MP3, OGG/Vorbis, Opus, WAV, and M4A/AAC files.
 - [ ] Test queue, playlists, favorites, lyrics, themes, and restart persistence.
 - [ ] Edit FLAC tags only on disposable copies; verify rollback safety and confirm other formats remain read-only.
-- [ ] Confirm Linux notifications, MPRIS, and CD ripping are unavailable without application errors.
+- [ ] Confirm Linux notifications and MPRIS are unavailable without application errors.
+- [ ] On a standard Windows user account with an optical drive, detect an audio-only CD, look up its metadata, and rip it to a disposable output folder. Verify every FLAC plays and has the expected length and tags. Check the messages for an empty drive and a data disc.
 - [ ] Confirm experimental video/DVD navigation is absent.
 
 ## 7. Privacy and package inspection

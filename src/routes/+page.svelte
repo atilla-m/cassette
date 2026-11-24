@@ -9247,7 +9247,7 @@
           <div class="settings-intro">
             <p class="eyebrow">System Tools</p>
             <h3 id="cd-ripper-title">CD Ripper</h3>
-            <p>Cassette uses system tools like cdparanoia and flac for CD ripping on Linux.</p>
+            <p>{isWindows ? "Save an audio CD to your computer as lossless FLAC files." : "Cassette uses cdparanoia and flac to rip audio CDs on Linux."}</p>
           </div>
 
           <section class="cd-status-card" aria-labelledby="cd-status-title">
@@ -9507,7 +9507,7 @@
 
           {#if cdRawOutput}
             <details class="cd-debug-output">
-              <summary>cdparanoia output</summary>
+              <summary>Drive details</summary>
               <pre>{cdRawOutput}</pre>
             </details>
           {/if}

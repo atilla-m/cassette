@@ -43,7 +43,7 @@ function Add-StagedFile {
 $elements = @(
   "playbin", "uridecodebin", "decodebin3", "filesrc", "typefind",
   "audioconvert", "audioresample", "autoaudiosink", "id3demux",
-  "flacdec", "oggdemux", "vorbisdec", "opusdec", "wavparse",
+  "flacdec", "flacenc", "oggdemux", "vorbisdec", "opusdec", "wavparse",
   "qtdemux", "avdec_mp3", "avdec_aac", "wasapi2sink", "wasapisink",
   "flacparse", "mpegaudioparse", "aacparse", "vorbisparse", "opusparse"
 )

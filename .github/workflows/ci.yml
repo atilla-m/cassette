@@ -140,7 +140,7 @@ jobs:
           $elements = @(
             "playbin", "uridecodebin", "decodebin3", "filesrc", "typefind",
             "audioconvert", "audioresample", "autoaudiosink",
-            "flacdec", "oggdemux", "vorbisdec", "opusdec", "wavparse", "qtdemux"
+            "flacdec", "flacenc", "oggdemux", "vorbisdec", "opusdec", "wavparse", "qtdemux"
           )
           foreach ($element in $elements) {
             & gst-inspect-1.0.exe $element *> $null

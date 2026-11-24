@@ -34,6 +34,8 @@ use std::sync::MutexGuard;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
 
+#[cfg(target_os = "windows")]
+mod cd_windows;
 mod listening_stats;
 mod mpris;
 mod portable_history;
@@ -833,7 +835,7 @@ fn get_platform_capabilities() -> PlatformCapabilities {
         os: std::env::consts::OS,
         linux_notifications: is_linux,
         mpris: is_linux,
-        cd_ripping: is_linux,
+        cd_ripping: cfg!(any(target_os = "linux", target_os = "windows")),
         dvd_video: is_linux,
     }
 }
@@ -2049,22 +2051,24 @@ fn set_track_lyrics_offset(
 #[tauri::command]
 async fn detect_audio_cd() -> Result<CdDetectResult, String> {
     #[cfg(target_os = "linux")]
+    let detect = run_cdparanoia_query;
+    #[cfg(target_os = "windows")]
+    let detect = cd_windows::detect_audio_cd;
+
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     {
-        return tauri::async_runtime::spawn_blocking(run_cdparanoia_query)
+        return tauri::async_runtime::spawn_blocking(detect)
             .await
             .map_err(|error| format!("Could not detect audio CD: {error}"))?;
     }
 
-    #[cfg(not(target_os = "linux"))]
-    Err(
-        "Audio CD detection and ripping are available only on Linux in Cassette 0.1.0-beta.5.1."
-            .to_owned(),
-    )
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    Err("Audio CD detection and ripping are unavailable on this platform.".to_owned())
 }
 
 #[tauri::command]
 async fn lookup_cd_metadata() -> Result<CdMetadataLookupResult, String> {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     {
         let disc_info = tauri::async_runtime::spawn_blocking(read_musicbrainz_disc)
             .await
@@ -2073,11 +2077,8 @@ async fn lookup_cd_metadata() -> Result<CdMetadataLookupResult, String> {
         return lookup_musicbrainz_disc(&disc_info).await;
     }
 
-    #[cfg(not(target_os = "linux"))]
-    Err(
-        "Audio CD metadata lookup is available only on Linux in Cassette 0.1.0-beta.5.1."
-            .to_owned(),
-    )
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    Err("Audio CD metadata lookup is unavailable on this platform.".to_owned())
 }
 
 #[tauri::command]
@@ -2098,7 +2099,7 @@ async fn rip_cd_to_flac(
     metadata: Option<CdRipMetadata>,
     app: AppHandle,
 ) -> Result<CdRipResult, String> {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     {
         return tauri::async_runtime::spawn_blocking(move || {
             rip_cd_to_flac_blocking(output_folder, metadata, app)
@@ -2107,13 +2108,10 @@ async fn rip_cd_to_flac(
         .map_err(|error| format!("Could not rip audio CD: {error}"))?;
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     {
         let _ = (output_folder, metadata, app);
-        Err(
-            "Audio CD detection and ripping are available only on Linux in Cassette 0.1.0-beta.5.1."
-                .to_owned(),
-        )
+        Err("Audio CD detection and ripping are unavailable on this platform.".to_owned())
     }
 }
 
@@ -2121,6 +2119,11 @@ async fn rip_cd_to_flac(
 struct MusicBrainzDisc {
     id: String,
     toc: String,
+}
+
+#[cfg(target_os = "windows")]
+fn read_musicbrainz_disc() -> Result<MusicBrainzDisc, String> {
+    Ok(cd_windows::AudioDisc::detect()?.musicbrainz_disc())
 }
 
 #[cfg(target_os = "linux")]
@@ -2710,18 +2713,12 @@ fn cdparanoia_query_error(lower_output: &str) -> Option<String> {
     Some("No audio CD tracks were found. Insert an audio CD and try again.".to_owned())
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 fn rip_cd_to_flac_blocking(
     output_folder: String,
     metadata: Option<CdRipMetadata>,
     app: AppHandle,
 ) -> Result<CdRipResult, String> {
-    ensure_command_available(
-        "cdparanoia",
-        "cdparanoia is not installed. Install cdparanoia and try again.",
-    )?;
-    ensure_command_available("flac", "flac is not installed. Install flac and try again.")?;
-
     let output_root = PathBuf::from(output_folder);
     if !output_root.exists() {
         return Err("Selected output folder does not exist.".to_owned());
@@ -2730,22 +2727,35 @@ fn rip_cd_to_flac_blocking(
         return Err("Selected output path is not a folder.".to_owned());
     }
 
-    let detection = run_cdparanoia_query()?;
-    if !detection.drive_found {
-        return Err(detection.error.unwrap_or_else(|| {
-            "No CD drive was found or the drive could not be opened.".to_owned()
-        }));
-    }
-    if !detection.disc_found {
-        return Err(detection
-            .error
-            .unwrap_or_else(|| "No audio CD was detected in the drive.".to_owned()));
-    }
+    #[cfg(target_os = "windows")]
+    let disc = cd_windows::AudioDisc::detect()?;
+    #[cfg(target_os = "windows")]
+    let tracks = disc.rip_tracks();
+    #[cfg(target_os = "windows")]
+    let encode_track =
+        |number, wav_path: &Path, flac_path: &Path| disc.rip_track(number, wav_path, flac_path);
+
+    #[cfg(target_os = "linux")]
+    let tracks = {
+        ensure_command_available(
+            "cdparanoia",
+            "cdparanoia is not installed. Install cdparanoia and try again.",
+        )?;
+        ensure_command_available("flac", "flac is not installed. Install flac and try again.")?;
+
+        let detection = run_cdparanoia_query()?;
+        if !detection.drive_found || !detection.disc_found {
+            return Err(detection
+                .error
+                .unwrap_or_else(|| "No audio CD was detected in the drive.".to_owned()));
+        }
+        detection.tracks
+    };
+    #[cfg(target_os = "linux")]
+    let encode_track = rip_track_with_system_tools;
 
     let (rip_folder_name, folder_warning) = cd_rip_folder_name(metadata.as_ref());
-    let rip_folder = unique_child_folder(&output_root, &rip_folder_name);
-    fs::create_dir_all(&rip_folder)
-        .map_err(|error| format!("Could not create rip folder: {error}"))?;
+    let rip_folder = create_cd_rip_folder(&output_root, &rip_folder_name)?;
     let rip_folder_string = rip_folder.to_string_lossy().to_string();
     let (prepared_cover, cover_warning) = prepare_cd_cover(metadata.as_ref(), &rip_folder);
 
@@ -2761,10 +2771,10 @@ fn rip_cd_to_flac_blocking(
         },
     );
 
-    let track_total = detection.tracks.len() as u32;
-    let mut ripped_tracks = Vec::with_capacity(detection.tracks.len());
+    let track_total = tracks.len() as u32;
+    let mut ripped_tracks = Vec::with_capacity(tracks.len());
 
-    for detected_track in detection.tracks {
+    for detected_track in tracks {
         let metadata_track = metadata.as_ref().and_then(|metadata| {
             metadata
                 .tracks
@@ -2774,10 +2784,8 @@ fn rip_cd_to_flac_blocking(
         let (output_filename, filename_warning) =
             cd_track_filename_from_metadata(detected_track.number, metadata_track);
         let output_path = rip_folder.join(&output_filename);
-        let wav_path = rip_folder.join(format!(
-            "{:02} - Track {:02}.wav",
-            detected_track.number, detected_track.number
-        ));
+        let wav_path = rip_folder.join(format!(".track-{:02}.wav", detected_track.number));
+        let staged_flac = wav_path.with_extension("flac.part");
         let output_path_string = output_path.to_string_lossy().to_string();
 
         emit_cd_rip_event(
@@ -2800,15 +2808,29 @@ fn rip_cd_to_flac_blocking(
             cover_warning.clone(),
         );
 
-        match rip_single_track_to_flac(
-            detected_track.number,
-            &wav_path,
-            &output_path,
-            metadata.as_ref(),
-            metadata_track,
-            track_total,
-            prepared_cover.as_ref(),
-        ) {
+        let result = encode_track(detected_track.number, &wav_path, &staged_flac).and_then(|()| {
+            fs::rename(&staged_flac, &output_path)
+                .map_err(|error| format!("Could not save the encoded track: {error}"))
+        });
+        let _ = fs::remove_file(&wav_path);
+        if result.is_err() {
+            let _ = fs::remove_file(&staged_flac);
+        }
+        let result = result.map(|()| {
+            let (Some(metadata), Some(metadata_track)) = (metadata.as_ref(), metadata_track) else {
+                return None;
+            };
+            write_flac_tags(
+                &output_path,
+                metadata,
+                metadata_track,
+                track_total,
+                prepared_cover.as_ref(),
+            )
+            .err()
+            .map(|error| format!("Rip succeeded, but metadata tags could not be written: {error}"))
+        });
+        match result {
             Ok(tag_warning) => {
                 track_result.status = Some("done".to_owned());
                 track_result.error = None;
@@ -2866,15 +2888,11 @@ fn rip_cd_to_flac_blocking(
 }
 
 #[cfg(target_os = "linux")]
-fn rip_single_track_to_flac(
+fn rip_track_with_system_tools(
     track_number: u32,
     wav_path: &Path,
     flac_path: &Path,
-    metadata: Option<&CdRipMetadata>,
-    metadata_track: Option<&CdRipMetadataTrack>,
-    track_total: u32,
-    cover: Option<&PreparedCdCover>,
-) -> Result<Option<String>, String> {
+) -> Result<(), String> {
     let rip_output = Command::new("cdparanoia")
         .arg(track_number.to_string())
         .arg(wav_path)
@@ -2882,7 +2900,6 @@ fn rip_single_track_to_flac(
         .map_err(|error| format!("Could not rip track {track_number:02}: {error}"))?;
 
     if !rip_output.status.success() {
-        let _ = fs::remove_file(wav_path);
         return Err(format!(
             "Track {track_number:02} rip failed: {}",
             short_command_error(&rip_output)
@@ -2904,17 +2921,7 @@ fn rip_single_track_to_flac(
         ));
     }
 
-    fs::remove_file(wav_path)
-        .map_err(|error| format!("Track {track_number:02} was encoded, but the temporary WAV could not be removed: {error}"))?;
-
-    let tag_warning = if let (Some(metadata), Some(metadata_track)) = (metadata, metadata_track) {
-        write_flac_tags(flac_path, metadata, metadata_track, track_total, cover).err()
-    } else {
-        None
-    };
-
-    Ok(tag_warning
-        .map(|error| format!("Rip succeeded, but metadata tags could not be written: {error}")))
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -3416,6 +3423,23 @@ fn unique_child_folder(parent: &Path, folder_name: &str) -> PathBuf {
     parent.join(format!("{folder_name} {}", rip_folder_timestamp()))
 }
 
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+fn create_cd_rip_folder(parent: &Path, name: &str) -> Result<PathBuf, String> {
+    for index in 1..1000 {
+        let folder = if index == 1 {
+            parent.join(name)
+        } else {
+            parent.join(format!("{name} ({index})"))
+        };
+        match fs::create_dir(&folder) {
+            Ok(()) => return Ok(folder),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(format!("Could not create rip folder: {error}")),
+        }
+    }
+    Err("Too many rip folders have this name. Choose a different output folder.".to_owned())
+}
+
 fn prepare_cd_cover(
     metadata: Option<&CdRipMetadata>,
     rip_folder: &Path,
@@ -3462,7 +3486,10 @@ fn sanitize_path_component(raw: &str, fallback: &str) -> (String, Option<String>
     let mut safe = String::with_capacity(raw.len());
 
     for character in raw.chars() {
-        if character == '/' || character == '\\' {
+        if matches!(character, '/' | '\\')
+            || (cfg!(target_os = "windows")
+                && matches!(character, '<' | '>' | ':' | '"' | '|' | '?' | '*'))
+        {
             safe.push('-');
         } else if !character.is_control() {
             safe.push(character);
@@ -3479,6 +3506,38 @@ fn sanitize_path_component(raw: &str, fallback: &str) -> (String, Option<String>
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
+
+    #[cfg(target_os = "windows")]
+    let safe = {
+        let stem = safe.split('.').next().unwrap_or_default().trim_end();
+        let reserved = matches!(
+            stem.to_ascii_uppercase().as_str(),
+            "CON" | "PRN" | "AUX" | "NUL"
+        ) || ["COM", "LPT"].iter().any(|prefix| {
+            stem.to_ascii_uppercase()
+                .strip_prefix(prefix)
+                .is_some_and(|suffix| {
+                    matches!(
+                        suffix,
+                        "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+                    )
+                })
+        });
+        let mut units = 0;
+        let name_end = safe
+            .char_indices()
+            .find_map(|(index, character)| {
+                units += character.len_utf16();
+                (units > 240).then_some(index)
+            })
+            .unwrap_or(safe.len());
+        let name = safe[..name_end].trim_end_matches(['.', ' ']);
+        if reserved {
+            format!("_{name}")
+        } else {
+            name.to_owned()
+        }
+    };
 
     if safe.is_empty() {
         return (
