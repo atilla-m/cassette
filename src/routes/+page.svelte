@@ -4056,15 +4056,30 @@
   function openAlbumMoreMenu(event: MouseEvent) {
     event.preventDefault();
     event.stopPropagation();
+    const album = selectedAlbum;
+    if (!album) return;
     const button = event.currentTarget as HTMLElement;
     const bounds = button.getBoundingClientRect();
-    openContextMenu(Math.max(8, bounds.right - 210), bounds.bottom + 6, [
+    const items: ContextMenuItem[] = [
       {
         label: "Edit album tags…",
         disabled: selectedAlbumTracks.length === 0,
         action: () => openAlbumTagEditor(),
       },
-    ]);
+      {
+        label: "Edit album art",
+        disabled: !!editingCoverForAlbum || selectedAlbumTracks.length === 0,
+        action: () => changeAlbumCover(album.id),
+      },
+    ];
+    if (customAlbumCovers[album.id]) {
+      items.push({
+        label: "Restore original art",
+        disabled: !!editingCoverForAlbum,
+        action: () => changeAlbumCover(album.id, true),
+      });
+    }
+    openContextMenu(Math.max(8, bounds.right - 210), bounds.bottom + 6, items);
   }
 
   function viewOriginalAlbumAfterTagEdit() {
@@ -5672,9 +5687,8 @@
     return cached ? cached.coverArtPath : track.coverArtPath;
   }
 
-  async function changeSelectedAlbumCover(reset = false) {
-    const albumId = selectedAlbum?.id;
-    if (!albumId || editingCoverForAlbum) return;
+  async function changeAlbumCover(albumId: string, reset = false) {
+    if (editingCoverForAlbum) return;
     editingCoverForAlbum = albumId;
     albumCoverFeedback = null;
     try {
@@ -7912,15 +7926,9 @@
                     Add to Queue
                   </button>
                 </div>
-                <div class="album-detail-actions cover-edit-actions">
-                  <button type="button" disabled={!!editingCoverForAlbum || !selectedAlbumTracks.length} onclick={() => void changeSelectedAlbumCover()}>
-                    {editingCoverForAlbum === selectedAlbum.id ? "Saving artwork…" : "Edit album art"}
-                  </button>
-                  {#if customAlbumCovers[selectedAlbum.id]}
-                    <button type="button" disabled={!!editingCoverForAlbum} onclick={() => void changeSelectedAlbumCover(true)}>Restore original art</button>
-                  {/if}
-                </div>
-                {#if albumCoverFeedback?.albumId === selectedAlbum.id}
+                {#if editingCoverForAlbum === selectedAlbum.id}
+                  <p class="form-message" role="status">Updating artwork…</p>
+                {:else if albumCoverFeedback?.albumId === selectedAlbum.id}
                   <p class="form-message" class:error={albumCoverFeedback.error} role={albumCoverFeedback.error ? "alert" : "status"}>{albumCoverFeedback.message}</p>
                 {/if}
               </div>
@@ -13309,11 +13317,6 @@
   .detail-copy {
     min-width: 0;
     overflow-wrap: anywhere;
-  }
-
-  .album-detail-actions.cover-edit-actions button {
-    background: var(--panel-soft);
-    color: var(--text);
   }
 
   .album-detail-copy {
