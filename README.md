@@ -1,30 +1,26 @@
 # Cassette
 
-Cassette is a private, local-first desktop music library and player for Linux. It scans folders you choose, keeps its library and listening history locally, and provides albums, artists, genres, songs, playlists, queue management, synced lyrics, statistics, themes, and guarded metadata editing.
+Cassette is a private, local-first desktop music library and player for Windows and Linux. It scans folders you choose, keeps its library and listening history locally, and provides albums, artists, genres, songs, playlists, queue management, synced lyrics, statistics, themes, and guarded metadata editing.
 
 ## Beta status
 
-Cassette [0.1.0-beta.5.1](https://github.com/atilla-m/cassette/releases/tag/v0.1.0-beta.5.1) is the current Linux x86_64 prerelease. Windows distribution is deferred pending its separate manual check.
+Cassette 0.1.0-beta.6 is the current prerelease. Both platform packages use the same source commit. See the [beta.6 release notes](docs/RELEASE-NOTES-0.1.0-beta.6.md).
 
-Choose the beta.5.1 file matching your installation method:
+Download `Cassette_0.1.0-beta.6_x64-setup.exe` from the [Windows x64 release](https://github.com/atilla-m/cassette/releases/tag/windows-v0.1.0-beta.6).
 
-- `Cassette_0.1.0-beta.5.1_amd64.AppImage` is the portable, signed AppImage and the recommended download.
-- `Cassette_0.1.0-beta.5.1_amd64.deb` is for the Ubuntu 24.04 package path.
-- `Cassette-0.1.0-beta.5.1-1.x86_64.rpm` is for the Fedora package path.
+Choose the package matching your installation method from the [Linux x86_64 release](https://github.com/atilla-m/cassette/releases/tag/v0.1.0-beta.6).
 
-The previous [beta.4 release](https://github.com/atilla-m/cassette/releases/tag/v0.1.0-beta.4) remains available with `Cassette_0.1.0-beta.4_amd64.AppImage`, `Cassette_0.1.0-beta.4_amd64.deb`, and `Cassette-0.1.0-beta.4-1.x86_64.rpm`; the beta.5 candidate remains an unpublished draft.
+- `Cassette_0.1.0-beta.6_amd64.AppImage` is the portable AppImage and the recommended download.
+- `Cassette_0.1.0-beta.6_amd64.deb` is for the Ubuntu package path.
+- `Cassette-0.1.0-beta.6-1.x86_64.rpm` is for the Fedora package path.
 
-Beta.5.1 adds local-calendar Stats periods, a daily play chart, dedicated period-filtered ranking pages, and portable listening-history export/import in Settings. It also adds artist/genre top-song lists and sortable full lists, persistent Songs search/sort, optional numbered Songs positions, player-bar artist/album links, and corrected Lyrics click behavior. See [beta.5.1 release notes](docs/RELEASE-NOTES-0.1.0-beta.5.1.md) for details and limitations. Lyrics editing is deferred. Cassette Teal remains the default user-selectable theme, alongside Glacier and Obsidian.
+Earlier Linux releases include [beta.5.1](https://github.com/atilla-m/cassette/releases/tag/v0.1.0-beta.5.1) and [beta.4](https://github.com/atilla-m/cassette/releases/tag/v0.1.0-beta.4). Beta.4 shipped `Cassette_0.1.0-beta.4_amd64.AppImage`, `Cassette_0.1.0-beta.4_amd64.deb`, and `Cassette-0.1.0-beta.4-1.x86_64.rpm`.
 
-Modern UI work is reserved for a future release. This beta does not include a Modern/Legacy interface switch or promise the rejected Modern design. Experimental video and DVD functionality is disabled and unsupported in this beta; hidden backend code and tools such as `lsdvd`, `ffmpeg`, `ffprobe`, and `mpv` are not part of the beta runtime contract.
-
-The Linux beta formats are DEB, RPM, and AppImage. AppImage updates are signed and require explicit user confirmation. DEB and RPM stay under the system package manager: Cassette may notify those users about a newer version and open its GitHub release page, but it will not invoke `sudo`, `apt`, `dpkg`, `dnf`, or `rpm`, and it will not convert an installation to AppImage. Download a newer DEB or RPM from Releases and install it with APT or DNF; no automatic package repository is configured. Windows NSIS work remains available in CI but is not a beta.5.1 release asset. MSI is excluded because WiX/MSI cannot faithfully represent the authoritative `0.1.0-beta.5.1` prerelease identifier.
-
-The beta uses the stock Tauri desktop icons as an accepted known limitation. DEB and RPM packages are not repository-signed, and planned Windows installers remain unsigned; package managers or desktop security tools may warn about an unrecognized publisher. Tauri updater signatures are a separate mandatory verification layer for AppImage updates.
+Obsidian is the default theme for new installations. Choose Light, Glacier, or Cassette Teal in Settings. The album page’s **⋯** menu includes **Edit album art** and, when a custom cover is set, **Restore original art**. Custom covers are stored in Cassette’s library.
 
 ## Linux x86_64
 
-The AppImage is the recommended download. It can run without replacing a system package. The production updater public key and beta endpoint remain configured; updates are never forced, and development builds do not contact the update feed. The [production beta feed](https://atilla-m.github.io/cassette/updates/beta/latest.json) now serves the signed beta.5.1 AppImage.
+The AppImage is the recommended download. It runs without replacing a system package. AppImage updates require confirmation and verification with Cassette’s bundled updater key. DEB and RPM users can check for an update in Settings and install the newer package with APT or DNF. See the [Linux beta update feed](https://atilla-m.github.io/cassette/updates/beta/latest.json).
 
 A clean Ubuntu 24.04 installation required the FUSE 2 compatibility library before the AppImage could mount and run:
 
@@ -79,9 +75,11 @@ Run only the command appropriate for the installed package. Package removal does
 rm -r -- "${XDG_DATA_HOME:-$HOME/.local/share}/io.github.atilla.cassette"
 ```
 
-## Windows 10/11 x86_64 (deferred)
+## Windows 10/11 x86_64
 
-Windows installer work remains on a separate feature branch and is not part of the Linux beta.5.1 release. Its remaining manual loaded-track editing check must pass before Windows distribution. No Windows installer is among beta.5.1's four Linux assets. See [docs/GSTREAMER-WINDOWS.md](docs/GSTREAMER-WINDOWS.md) for development context; it is not a Windows installation guide.
+Run the installer from the Windows release. It includes Cassette’s GStreamer playback runtime and the WebView2 offline installer. Supported headphone buttons use Windows system media controls when Cassette has an active playback session.
+
+Use **Settings → Updates** to check for Windows prereleases. Cassette verifies the installer with its bundled updater key before launching it with your confirmation. Windows may show an unknown publisher prompt.
 
 ## Tag editors
 
@@ -110,7 +108,7 @@ The 13 ignored real-media fixture tests are intentionally excluded from normal v
 
 Report beta problems through [Cassette GitHub Issues](https://github.com/atilla-m/cassette/issues). Include the operating system, package format, Cassette version, relevant GStreamer/runtime details, reproduction steps, and sanitized logs; do not attach private library databases or personal media.
 
-The active release process is documented in [docs/RELEASING-beta.5.1.md](docs/RELEASING-beta.5.1.md), with release-path and artifact-scanner details in [docs/ARTIFACT-SAFETY.md](docs/ARTIFACT-SAFETY.md). Earlier checklists remain historical evidence.
+See the [beta.6 release checklist](docs/RELEASING-beta.6.md) and [artifact scanner documentation](docs/ARTIFACT-SAFETY.md).
 Updater security, signing-key custody, and beta-feed publication are documented in [docs/UPDATES.md](docs/UPDATES.md).
 
 Cassette is free software licensed under the [GNU General Public License version 3 or later](LICENSE) (`GPL-3.0-or-later`). The full license is included in application bundle resources.

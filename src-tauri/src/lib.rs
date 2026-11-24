@@ -57,7 +57,7 @@ const MAX_FOLDER_COVER_BYTES: u64 = 25 * 1024 * 1024;
 const MAX_LYRICS_BYTES: u64 = 1024 * 1024;
 const GENRE_SCOPE_ALBUM: &str = "album";
 const GENRE_SCOPE_ARTIST: &str = "artist";
-const MUSICBRAINZ_USER_AGENT: &str = "Cassette/0.1.0-beta.5.1 (local music player; contact: none)";
+const MUSICBRAINZ_USER_AGENT: &str = "Cassette/0.1.0-beta.6 (local music player; contact: none)";
 const SUPPORTED_TAG_FORMATS_LABEL: &str = "FLAC, MP3, Ogg/Vorbis, Opus, WAV, and M4A/AAC";
 
 #[derive(Debug, Clone, Serialize)]
@@ -1108,7 +1108,7 @@ fn send_linux_playback_notification(
     {
         let _ = (title, body, notifications);
         Err(
-            "Desktop notifications are available only on Linux in Cassette 0.1.0-beta.5.1."
+            "Desktop notifications are available only on Linux in Cassette 0.1.0-beta.6."
                 .to_owned(),
         )
     }
@@ -1405,7 +1405,7 @@ async fn detect_dvd() -> Result<DvdDetectResult, String> {
 
     #[cfg(not(target_os = "linux"))]
     Err(
-        "DVD detection and import are available only on Linux in Cassette 0.1.0-beta.5.1."
+        "DVD detection and import are available only on Linux in Cassette 0.1.0-beta.6."
             .to_owned(),
     )
 }
@@ -1423,7 +1423,7 @@ async fn scan_dvd_titles(source: String) -> Result<DvdTitleScanResult, String> {
     {
         let _ = source;
         Err(
-            "DVD detection and import are available only on Linux in Cassette 0.1.0-beta.5.1."
+            "DVD detection and import are available only on Linux in Cassette 0.1.0-beta.6."
                 .to_owned(),
         )
     }
@@ -1462,7 +1462,7 @@ async fn import_dvd_title(
     {
         let _ = (source, title_number, output_folder, metadata, app, library);
         Err(
-            "DVD detection and import are available only on Linux in Cassette 0.1.0-beta.5.1."
+            "DVD detection and import are available only on Linux in Cassette 0.1.0-beta.6."
                 .to_owned(),
         )
     }
@@ -6661,7 +6661,7 @@ impl VideoPlaybackState {
         _start_position_seconds: Option<f64>,
     ) -> Result<VideoPlaybackStatus, String> {
         Err(
-            "Cassette-controlled video playback is available only on Linux in Cassette 0.1.0-beta.5.1."
+            "Cassette-controlled video playback is available only on Linux in Cassette 0.1.0-beta.6."
                 .to_owned(),
         )
     }
@@ -6694,14 +6694,14 @@ impl VideoPlaybackState {
 
     fn bring_to_front(&mut self) -> Result<VideoPlaybackStatus, String> {
         Err(
-            "Cassette-controlled video playback is available only on Linux in Cassette 0.1.0-beta.5.1."
+            "Cassette-controlled video playback is available only on Linux in Cassette 0.1.0-beta.6."
                 .to_owned(),
         )
     }
 
     fn toggle_fullscreen(&mut self) -> Result<VideoPlaybackStatus, String> {
         Err(
-            "Cassette-controlled video playback is available only on Linux in Cassette 0.1.0-beta.5.1."
+            "Cassette-controlled video playback is available only on Linux in Cassette 0.1.0-beta.6."
                 .to_owned(),
         )
     }
@@ -6750,7 +6750,7 @@ impl VideoPlaybackState {
             is_fullscreen: self.is_fullscreen,
             backend: "unavailable".to_owned(),
             error: Some(
-                "Cassette-controlled video playback is available only on Linux in Cassette 0.1.0-beta.5.1."
+                "Cassette-controlled video playback is available only on Linux in Cassette 0.1.0-beta.6."
                     .to_owned(),
             ),
         }
@@ -7151,7 +7151,7 @@ fn ffprobe_video_codec_info(_path: &Path) -> VideoCodecInfo {
         resolution: None,
         duration_seconds: None,
         error: Some(
-            "Video inspection is available only on Linux in Cassette 0.1.0-beta.5.1.".to_owned(),
+            "Video inspection is available only on Linux in Cassette 0.1.0-beta.6.".to_owned(),
         ),
     }
 }
@@ -10214,7 +10214,7 @@ fn lyrics_metadata_path(lyrics_path: &Path) -> Option<PathBuf> {
 async fn search_lrclib_lyrics_results(track: &Track) -> Result<Vec<LrclibLyricsResult>, String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(12))
-        .user_agent("Cassette/0.1.0-beta.5.1 local lyrics lookup")
+        .user_agent("Cassette/0.1.0-beta.6 local lyrics lookup")
         .build()
         .map_err(|error| format!("Could not prepare lyrics lookup: {error}"))?;
     let query = lrclib_query(track);
