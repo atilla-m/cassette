@@ -95,6 +95,15 @@ test("signed path stops without production configuration before invoking builder
   assert.throws(() => validateReleaseArguments(args, config, overlay, { TAURI_CONFIG: "override" }, "linux"), /TAURI_CONFIG/);
 });
 
+test("Windows signing requires the exact NSIS command and a signing key", () => {
+  const args = pkg.scripts["release:windows:signed"].split(" ").slice(2);
+  assert.throws(() => validateReleaseArguments(args, config, overlay, {}, "win32"), /signing credentials/);
+  const fixture = { TAURI_SIGNING_PRIVATE_KEY: "fixture" };
+  assert.equal(validateReleaseArguments(args, config, overlay, fixture, "win32"), true);
+  assert.throws(() => validateReleaseArguments(args, config, overlay, fixture, "linux"));
+  assert.throws(() => validateReleaseArguments([...args, "--config", "arbitrary"], config, overlay, fixture, "win32"));
+});
+
 test("npm tauri wrapper finds build and bundle after every supported global verbosity form", () => {
   for (const args of [
     ["-v", "build"],
@@ -179,7 +188,7 @@ test("native-only installation and recoverable initialization remain mandatory",
   assert.match(frontend, /operationId: update\.operationId/);
   const page = read("src/routes/+page.svelte");
   assert.match(page, /const confirmedUpdate = availableUpdate/);
-  assert.match(page, /installAppImageUpdate\(confirmedUpdate/);
+  assert.match(page, /installCassetteUpdate\(confirmedUpdate/);
   const native = read("src-tauri/src/updates.rs");
   assert.match(native, /application startup continues/);
   assert.match(native, /valid_configuration/);

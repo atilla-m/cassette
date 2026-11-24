@@ -268,6 +268,9 @@
 
   .track-list {
     display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    container: track-list / inline-size;
+    min-width: 0;
     gap: 8px;
   }
 
@@ -649,7 +652,7 @@
     background: color-mix(in srgb, var(--accent-soft) 72%, transparent);
   }
 
-  @media (max-width: 760px) {
+  @container track-list (max-width: 760px) {
     .track-row {
       grid-template-columns: auto minmax(0, 1fr) auto auto;
     }
@@ -708,7 +711,7 @@
     }
   }
 
-  @media (max-width: 520px) {
+  @container track-list (max-width: 520px) {
     .track-row.library {
       grid-template-columns: 42px minmax(0, 1fr) 34px minmax(46px, auto);
     }

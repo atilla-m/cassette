@@ -10,7 +10,7 @@ use lofty::iff::wav::WavFile;
 use lofty::mp4::{Ilst, Mp4File};
 use lofty::mpeg::MpegFile;
 use lofty::ogg::{OpusFile, VorbisComments, VorbisFile};
-use lofty::picture::{MimeType, Picture, PictureInformation, PictureType};
+use lofty::picture::{MimeType, Picture, PictureType};
 use lofty::probe::Probe;
 use lofty::tag::{Accessor, ItemKey, MergeTag, SplitTag, Tag, TagExt, TagType};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -896,7 +896,9 @@ async fn set_album_cover(
             .map(|path| read_custom_cover(Path::new(path)))
             .transpose()?;
         let library = app.state::<Mutex<LibraryDatabase>>();
-        let mut library = library.lock().map_err(|_| "Library cache is unavailable.")?;
+        let mut library = library
+            .lock()
+            .map_err(|_| "Library cache is unavailable.")?;
         library.set_album_cover(&album_id, &directory, image)
     })
     .await
@@ -905,7 +907,7 @@ async fn set_album_cover(
 
 fn read_custom_cover(path: &Path) -> Result<(Vec<u8>, &'static str), String> {
     if !path.is_file() {
-        return Err("Select an existing JPEG or PNG image.".into());
+        return Err("Select an existing JPEG, PNG, or WebP image.".into());
     }
     let mut data = Vec::new();
     fs::File::open(path)
@@ -914,15 +916,24 @@ fn read_custom_cover(path: &Path) -> Result<(Vec<u8>, &'static str), String> {
     if data.len() as u64 > MAX_FOLDER_COVER_BYTES {
         return Err("Choose an image smaller than 25 MB.".into());
     }
-    let (info, extension) = if data.starts_with(b"\x89PNG\r\n\x1a\n") {
-        (PictureInformation::from_png(&data), "png")
-    } else {
-        (PictureInformation::from_jpeg(&data), "jpg")
+    let (format, extension) = match image::guess_format(&data) {
+        Ok(image::ImageFormat::Jpeg) => (image::ImageFormat::Jpeg, "jpg"),
+        Ok(image::ImageFormat::Png) => (image::ImageFormat::Png, "png"),
+        Ok(image::ImageFormat::WebP) => (image::ImageFormat::WebP, "webp"),
+        _ => return Err("Select a valid JPEG, PNG, or WebP image.".into()),
     };
-    let info = info.map_err(|_| "Select a valid JPEG or PNG image.")?;
-    if info.width == 0 || info.height == 0 || u64::from(info.width) * u64::from(info.height) > 36_000_000 {
-        return Err("Choose an image with at most 36 million pixels.".into());
-    }
+    let mut reader = image::ImageReader::with_format(io::Cursor::new(&data), format);
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(6000);
+    limits.max_image_height = Some(6000);
+    limits.max_alloc = Some(192 * 1024 * 1024);
+    reader.limits(limits);
+    reader.decode().map_err(|error| match error {
+        image::ImageError::Limits(_) => {
+            "Choose an image no larger than 6000 × 6000 pixels.".to_owned()
+        }
+        _ => "Could not decode the selected image.".to_owned(),
+    })?;
     Ok((data, extension))
 }
 
@@ -4235,8 +4246,11 @@ impl LibraryDatabase {
 
     fn album_covers(&self) -> Result<HashMap<String, String>, String> {
         let read = || -> rusqlite::Result<HashMap<String, String>> {
-            let mut statement = self.connection.prepare("SELECT album_id, cover_path FROM album_covers")?;
-            let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get::<_, String>(1)?)))?;
+            let mut statement = self
+                .connection
+                .prepare("SELECT album_id, cover_path FROM album_covers")?;
+            let rows =
+                statement.query_map([], |row| Ok((row.get(0)?, row.get::<_, String>(1)?)))?;
             rows.collect()
         };
         read().map_err(|error| format!("Could not load album artwork: {error}"))
@@ -4248,20 +4262,27 @@ impl LibraryDatabase {
         directory: &Path,
         image: Option<(Vec<u8>, &'static str)>,
     ) -> Result<HashMap<String, String>, String> {
+        if self.connection.path().is_none_or(str::is_empty) {
+            return Err(
+                "Artwork cannot be saved while Cassette is using a temporary library.".into(),
+            );
+        }
         cached_album_tracks(self, album_id)?;
         let mut covers = self.album_covers()?;
         let previous = covers.remove(album_id);
         let image_file = image
-            .map(|(bytes, extension)| -> io::Result<tempfile::NamedTempFile> {
-                fs::create_dir_all(directory)?;
-                let mut output = tempfile::Builder::new()
-                    .prefix("user-cover-")
-                    .suffix(&format!(".{extension}"))
-                    .tempfile_in(directory)?;
-                output.write_all(&bytes)?;
-                output.as_file().sync_all()?;
-                Ok(output)
-            })
+            .map(
+                |(bytes, extension)| -> io::Result<tempfile::NamedTempFile> {
+                    fs::create_dir_all(directory)?;
+                    let mut output = tempfile::Builder::new()
+                        .prefix("user-cover-")
+                        .suffix(&format!(".{extension}"))
+                        .tempfile_in(directory)?;
+                    output.write_all(&bytes)?;
+                    output.as_file().sync_all()?;
+                    Ok(output)
+                },
+            )
             .transpose()
             .map_err(|error| format!("Could not copy album artwork: {error}"))?;
         let new_path = image_file
@@ -4276,7 +4297,8 @@ impl LibraryDatabase {
                 params![album_id, path],
             )
         } else {
-            self.connection.execute("DELETE FROM album_covers WHERE album_id = ?1", [album_id])
+            self.connection
+                .execute("DELETE FROM album_covers WHERE album_id = ?1", [album_id])
         };
         if let Err(error) = result {
             if let Some(path) = new_path {
@@ -4287,7 +4309,9 @@ impl LibraryDatabase {
         if let Some(path) = previous {
             let path = Path::new(&path);
             if path.parent() == Some(directory)
-                && path.file_name().is_some_and(|name| name.to_string_lossy().starts_with("user-cover-"))
+                && path
+                    .file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with("user-cover-"))
             {
                 let _ = fs::remove_file(path);
             }
@@ -10646,6 +10670,51 @@ mod play_history_tests {
         database
             .replace_library(Path::new("/synthetic-music"), tracks, 1_700_000_000)
             .expect("seed tracks");
+    }
+
+    #[test]
+    fn custom_cover_survives_rescan_and_restores_original_art() {
+        let fixture = TestLibrary::new("custom-cover");
+        let mut database = fixture.open();
+        let mut track = test_track("/synthetic-music/test.flac");
+        track.cover_art_path = Some("original.png".into());
+        seed_tracks(&mut database, std::slice::from_mut(&mut track));
+        let album_id = album_key_for_track(&track);
+        let directory = fixture.directory.join("cover-art");
+        let source = fixture.directory.join("cover");
+        image::RgbImage::from_pixel(2, 2, image::Rgb([16, 32, 64]))
+            .save_with_format(&source, image::ImageFormat::Png)
+            .unwrap();
+        let custom = database
+            .set_album_cover(
+                &album_id,
+                &directory,
+                Some(read_custom_cover(&source).unwrap()),
+            )
+            .unwrap()
+            .remove(&album_id)
+            .unwrap();
+        assert_eq!(fs::read(&custom).unwrap(), fs::read(&source).unwrap());
+        fs::write(&source, b"not an image").unwrap();
+        assert!(read_custom_cover(&source).is_err());
+        seed_tracks(&mut database, std::slice::from_mut(&mut track));
+        drop(database);
+        let mut database = fixture.open();
+        assert_eq!(
+            database.load_cache().unwrap().album_covers[&album_id],
+            custom
+        );
+        assert!(database
+            .set_album_cover(&album_id, &directory, None)
+            .unwrap()
+            .is_empty());
+        assert!(!Path::new(&custom).exists());
+        assert_eq!(
+            database.load_cache().unwrap().tracks[0]
+                .cover_art_path
+                .as_deref(),
+            Some("original.png")
+        );
     }
 
     #[test]

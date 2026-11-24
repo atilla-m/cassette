@@ -187,6 +187,30 @@ jobs:
       - run: cargo test --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc
       - run: cargo check --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc
 
+      - name: Verify Windows update signatures with a disposable key
+        if: "!startsWith(github.ref, 'refs/tags/windows-v')"
+        shell: pwsh
+        run: |
+          $fixture = Join-Path $env:RUNNER_TEMP "cassette-update-fixture"
+          New-Item -Path $fixture -ItemType Directory | Out-Null
+          $key = Join-Path $fixture "fixture.key"
+          $config = Join-Path $fixture "tauri.conf.json"
+          $installer = Join-Path $fixture "Cassette_${env:RELEASE_VERSION}_x64-setup.exe"
+          $password = [guid]::NewGuid().ToString()
+          node node_modules/@tauri-apps/cli/tauri.js signer generate --ci -w $key -p $password | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "Could not create disposable updater key." }
+          Set-Content -LiteralPath $installer -Value "synthetic Windows updater payload"
+          node node_modules/@tauri-apps/cli/tauri.js signer sign -f $key -p $password $installer | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "Could not sign Windows updater fixture." }
+          @{ plugins = @{ updater = @{ pubkey = (Get-Content -LiteralPath "$key.pub" -Raw).Trim() } } } |
+            ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $config -Encoding utf8
+          cargo run --locked --quiet --manifest-path scripts/update-verifier/Cargo.toml -- $installer "$installer.sig" $config $env:RELEASE_VERSION --windows
+          if ($LASTEXITCODE -ne 0) { throw "Valid Windows signature was rejected." }
+          Add-Content -LiteralPath $installer -Value "altered"
+          cargo run --locked --quiet --manifest-path scripts/update-verifier/Cargo.toml -- $installer "$installer.sig" $config $env:RELEASE_VERSION --windows
+          if ($LASTEXITCODE -eq 0) { throw "An altered Windows update passed signature verification." }
+          exit 0
+
       - name: Build current-version NSIS bundle
         if: "!startsWith(github.ref, 'refs/tags/windows-v')"
         run: npm run release:windows

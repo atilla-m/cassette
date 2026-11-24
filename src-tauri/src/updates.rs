@@ -829,10 +829,14 @@ pub fn get_update_runtime_info(app: AppHandle) -> RuntimeInfo {
     let appimage = detection::current().is_some();
     #[cfg(not(target_os = "linux"))]
     let appimage = false;
+    #[cfg(windows)]
+    let windows_installer = windows_updates::is_installed_package();
+    #[cfg(not(windows))]
+    let windows_installer = false;
     RuntimeInfo {
         development: cfg!(debug_assertions),
         platform: std::env::consts::OS,
-        package_kind: if cfg!(all(windows, target_arch = "x86_64")) {
+        package_kind: if windows_installer {
             "nsis"
         } else if !cfg!(target_os = "linux") {
             "unsupported"
@@ -841,10 +845,8 @@ pub fn get_update_runtime_info(app: AppHandle) -> RuntimeInfo {
         } else {
             "native-or-unknown"
         },
-        can_self_install: (appimage || cfg!(all(windows, target_arch = "x86_64")))
-            && !cfg!(debug_assertions)
-            && available,
-        updater_available: available,
+        can_self_install: (appimage || windows_installer) && !cfg!(debug_assertions) && available,
+        updater_available: available && (!cfg!(windows) || windows_installer),
     }
 }
 

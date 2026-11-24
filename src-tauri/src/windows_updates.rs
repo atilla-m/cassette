@@ -17,6 +17,7 @@ struct GithubRelease {
     tag_name: String,
     draft: bool,
     prerelease: bool,
+    body: Option<String>,
     assets: Vec<ReleaseAsset>,
 }
 
@@ -57,18 +58,28 @@ fn signature_matches_filename(signature: &str, installer: &str) -> bool {
             .and_then(|signature| Signature::decode(signature).ok())
             .is_some_and(|signature| {
                 let expected = format!("file:{installer}");
-                signature.trusted_comment().split('\t').any(|field| field == expected)
+                signature
+                    .trusted_comment()
+                    .split('\t')
+                    .any(|field| field == expected)
             })
     })
 }
 
-async fn latest_beta(current: &Version) -> Result<Option<Version>, reqwest::Error> {
+pub(super) fn is_installed_package() -> bool {
+    use tauri::utils::platform::{bundle_type, BundleType};
+    cfg!(target_arch = "x86_64") && matches!(bundle_type(), Some(BundleType::Nsis))
+}
+
+async fn latest_beta(
+    current: &Version,
+) -> Result<Option<(Version, Option<String>)>, reqwest::Error> {
     let client = reqwest::Client::builder()
         .https_only(true)
         .timeout(Duration::from_secs(15))
         .user_agent("Cassette Windows Updater")
         .build()?;
-    let mut latest = None;
+    let mut latest: Option<(Version, Option<String>)> = None;
     let mut page = 1u32;
     loop {
         let releases: Vec<GithubRelease> = client
@@ -80,15 +91,15 @@ async fn latest_beta(current: &Version) -> Result<Option<Version>, reqwest::Erro
             .error_for_status()?
             .json()
             .await?;
-        if let Some(candidate) = releases
-            .iter()
-            .filter_map(GithubRelease::update_version)
-            .filter(|version| version > current)
-            .max()
-        {
-            latest = latest.max(Some(candidate));
+        let page_size = releases.len();
+        for release in releases {
+            if let Some(version) = release.update_version() {
+                if &version > current && latest.as_ref().is_none_or(|(best, _)| &version > best) {
+                    latest = Some((version, release.body));
+                }
+            }
         }
-        if releases.len() < 100 {
+        if page_size < 100 {
             return Ok(latest);
         }
         page += 1;
@@ -98,26 +109,36 @@ async fn latest_beta(current: &Version) -> Result<Option<Version>, reqwest::Erro
 pub(super) async fn check(app: AppHandle) -> Result<Option<UpdateInfo>, String> {
     let session = app.state::<UpdateSession>();
     let _busy = session.enter()?;
-    if !cfg!(target_arch = "x86_64") {
-        return Err("This Windows architecture does not support in-app updates.".into());
+    if !is_installed_package() {
+        return Err("In-app updates require an installed x64 Windows package.".into());
     }
-    let Some(version) = latest_beta(&app.package_info().version)
+    let Some((version, notes)) = latest_beta(&app.package_info().version)
         .await
-        .map_err(|_| "Could not reach the Windows beta channel. Check your connection and retry.")?
+        .map_err(|_| {
+            "Could not reach the Windows beta channel. Check your connection and retry."
+        })?
     else {
-        *session.pending_windows.lock().map_err(|_| "Updater state unavailable.")? = None;
+        *session
+            .pending_windows
+            .lock()
+            .map_err(|_| "Updater state unavailable.")? = None;
         return Ok(None);
     };
     let release = format!("{RELEASE_DOWNLOAD}/windows-v{version}");
-    let endpoint = Url::parse(&format!("{release}/{MANIFEST}"))
-        .map_err(|_| "Invalid update endpoint.")?;
+    let endpoint =
+        Url::parse(&format!("{release}/{MANIFEST}")).map_err(|_| "Invalid update endpoint.")?;
     let installer = installer_name(&version);
     let expected_payload = format!("{release}/{installer}");
     let update = app
         .updater_builder()
         .target("windows-x86_64")
         .endpoints(vec![endpoint])
-        .and_then(|builder| builder.timeout(Duration::from_secs(20)).build())
+        .and_then(|builder| {
+            builder
+                .timeout(Duration::from_secs(20))
+                .configure_client(|client| client.https_only(true))
+                .build()
+        })
         .map_err(|_| "Updater configuration is unavailable.")?
         .check()
         .await
@@ -131,11 +152,15 @@ pub(super) async fn check(app: AppHandle) -> Result<Option<UpdateInfo>, String> 
     let operation_id = uuid::Uuid::new_v4().to_string();
     let info = UpdateInfo {
         version: update.version.clone(),
-        body: update.body.clone(),
+        body: notes
+            .or_else(|| update.body.clone())
+            .map(|body| body.chars().take(10_000).collect()),
         operation_id: operation_id.clone(),
     };
-    *session.pending_windows.lock().map_err(|_| "Updater state unavailable.")? =
-        Some((operation_id, update));
+    *session
+        .pending_windows
+        .lock()
+        .map_err(|_| "Updater state unavailable.")? = Some((operation_id, update));
     Ok(Some(info))
 }
 
@@ -146,6 +171,9 @@ pub(super) async fn install(
 ) -> Result<(), String> {
     let session = app.state::<UpdateSession>();
     let _busy = session.enter()?;
+    if !is_installed_package() {
+        return Err("In-app updates require an installed x64 Windows package.".into());
+    }
     let mut update = session
         .pending_windows
         .lock()
@@ -177,7 +205,9 @@ pub(super) async fn install(
     });
     // Tauri launches the signed NSIS installer, exits Cassette, and lets
     // the installer relaunch the app after replacement completes.
-    update.install(installer).map_err(|_| "Could not start the verified Windows installer.".into())
+    update
+        .install(installer)
+        .map_err(|_| "Could not start the verified Windows installer.".into())
 }
 
 #[cfg(test)]
@@ -191,10 +221,15 @@ mod tests {
             tag_name: tag_name.into(),
             draft: false,
             prerelease: true,
-            assets: [MANIFEST.to_owned(), installer.clone(), format!("{installer}.sig")]
-                .into_iter()
-                .map(|name| ReleaseAsset { name })
-                .collect(),
+            body: None,
+            assets: [
+                MANIFEST.to_owned(),
+                installer.clone(),
+                format!("{installer}.sig"),
+            ]
+            .into_iter()
+            .map(|name| ReleaseAsset { name })
+            .collect(),
         }
     }
 
@@ -205,7 +240,9 @@ mod tests {
         assert!(recent.update_version().unwrap() > earlier.update_version().unwrap());
         assert!(release("v0.1.0-beta.10").update_version().is_none());
         assert!(release("windows-v0.1.0").update_version().is_none());
-        assert!(release("windows-v0.1.0-beta.10+a").update_version().is_none());
+        assert!(release("windows-v0.1.0-beta.10+a")
+            .update_version()
+            .is_none());
         let mut draft = recent;
         draft.draft = true;
         assert!(draft.update_version().is_none());

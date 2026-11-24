@@ -168,7 +168,6 @@
   } from "$lib/utils/playStats";
   import { listen } from "@tauri-apps/api/event";
   import { isTauri } from "@tauri-apps/api/core";
-  import { getCurrentWindow } from "@tauri-apps/api/window";
   import { ask } from "@tauri-apps/plugin-dialog";
   import { openPath, openUrl } from "@tauri-apps/plugin-opener";
   import { onMount, untrack } from "svelte";
@@ -882,6 +881,8 @@
   let volumePercentLabel = $derived(`${Math.round(volume * 100)}%`);
   let lastScanLabel = $derived(lastScannedAt ? formatDateTime(lastScannedAt) : "Not available");
   let updateIsBusy = $derived(updateCheckState === "checking" || updateCheckState === "confirming" || updateCheckState === "downloading" || updateCheckState === "installing");
+  let updateWaitsForLibrary = $derived(isScanning || isRippingCd || isImportingDvd
+    || isSavingTagEditor || isSavingAlbumTagEditor || !!editingCoverForAlbum || historyBusy);
   let updatePackageLabel = $derived(
     !updateRuntime
       ? "Detecting..."
@@ -1109,10 +1110,21 @@
 
   $effect(() => {
     if (isWindows && isTauri()) {
-      void getCurrentWindow().setTheme(selectedTheme === "light" ? "light" : "dark")
-        .catch((error) => console.warn("Could not apply the Windows title bar theme:", error));
+      const theme = selectedTheme === "light" ? "light" : "dark";
+      void applyWindowsTheme(theme);
     }
   });
+
+  async function applyWindowsTheme(theme: "light" | "dark") {
+    try {
+      const { getCurrentWindow } = await import("@tauri-apps/api/window");
+      if (theme === (selectedTheme === "light" ? "light" : "dark")) {
+        await getCurrentWindow().setTheme(theme);
+      }
+    } catch (error) {
+      console.warn("Could not apply the Windows title bar theme:", error);
+    }
+  }
 
   $effect(() => {
     void loadCurrentTrackLyrics(currentTrack?.filePath ?? null);
@@ -1871,7 +1883,7 @@
   }
 
   async function handleInstallCassetteUpdate() {
-    if (updateIsBusy || !availableUpdate || !availableUpdateVersion || !updateRuntime?.canSelfInstall) {
+    if (updateIsBusy || updateWaitsForLibrary || !availableUpdate || !availableUpdateVersion || !updateRuntime?.canSelfInstall) {
       return;
     }
 
@@ -1898,7 +1910,7 @@
       return;
     }
 
-    if (!confirmed) {
+    if (!confirmed || updateWaitsForLibrary) {
       updateCheckState = "available";
       showUpdateNotice = false;
       return;
@@ -5660,7 +5672,7 @@
     editingCoverForAlbum = albumId;
     albumCoverFeedback = null;
     try {
-      const imagePath = reset ? null : await chooseCoverImage("album");
+      const imagePath = reset ? null : await chooseCoverImage();
       if (!reset && !imagePath) return;
       customAlbumCovers = await setAlbumCover(albumId, imagePath);
       albumCoverFeedback = { albumId, message: reset ? "Original artwork restored." : "Album artwork saved in Cassette.", error: false };
@@ -10165,7 +10177,7 @@
                     {:else}
                       <div class="settings-actions">
                         {#if updateRuntime?.canSelfInstall}
-                          <button class="primary" type="button" disabled={updateIsBusy} onclick={handleInstallCassetteUpdate}>
+                          <button class="primary" type="button" disabled={updateIsBusy || updateWaitsForLibrary} onclick={handleInstallCassetteUpdate}>
                             Update and restart
                           </button>
                         {:else}
@@ -10175,6 +10187,9 @@
                         {/if}
                         <button type="button" onclick={handleUpdateLater}>Later</button>
                       </div>
+                      {#if updateWaitsForLibrary}
+                        <p class="settings-note">Finish the library operation before installing the update.</p>
+                      {/if}
                     {/if}
                   </article>
                 {/if}

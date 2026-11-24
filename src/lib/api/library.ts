@@ -88,7 +88,7 @@ export async function chooseDvdImportOutputFolder(): Promise<string | null> {
   return typeof selected === "string" ? selected : null;
 }
 
-export async function chooseCoverImage(purpose: "cd" | "album" = "cd"): Promise<string | null> {
+export async function chooseCoverImage(): Promise<string | null> {
   const selected = await open({
     directory: false,
     multiple: false,
@@ -96,7 +96,7 @@ export async function chooseCoverImage(purpose: "cd" | "album" = "cd"): Promise<
     filters: [
       {
         name: "Cover images",
-        extensions: purpose === "album" ? ["jpg", "jpeg", "png"] : ["jpg", "jpeg", "png", "webp"],
+        extensions: ["jpg", "jpeg", "png", "webp"],
       },
     ],
   });

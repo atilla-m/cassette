@@ -5,7 +5,13 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use minisign_verify::{PublicKey, Signature};
 use std::{fs, path::Path};
 
-fn verify(image: &Path, signature: &Path, config: &Path, version: &str, windows: bool) -> Result<(), String> {
+fn verify(
+    image: &Path,
+    signature: &Path,
+    config: &Path,
+    version: &str,
+    windows: bool,
+) -> Result<(), String> {
     let image_name = if windows {
         format!("Cassette_{version}_x64-setup.exe")
     } else {
