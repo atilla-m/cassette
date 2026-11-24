@@ -37,11 +37,17 @@ use tauri::{AppHandle, Emitter, Manager, State};
 #[cfg(target_os = "windows")]
 mod cd_windows;
 mod listening_stats;
+#[cfg(not(target_os = "windows"))]
 mod mpris;
 mod portable_history;
 mod updates;
+#[cfg(target_os = "windows")]
+mod windows_media_controls;
 
-use mpris::{MprisState, MprisTrack};
+#[cfg(not(target_os = "windows"))]
+use mpris::MprisState as MediaControls;
+#[cfg(target_os = "windows")]
+use windows_media_controls::WindowsMediaControls as MediaControls;
 
 const SUPPORTED_EXTENSIONS: &[&str] = &["flac", "mp3", "ogg", "opus", "wav", "m4a"];
 const SUPPORTED_VIDEO_EXTENSIONS: &[&str] = &["mp4", "mkv", "webm", "mov", "m4v", "avi"];
@@ -1101,7 +1107,7 @@ async fn play_video(
     video_playback: State<'_, Mutex<VideoPlaybackState>>,
     library: State<'_, Mutex<LibraryDatabase>>,
     playback: State<'_, Mutex<PlaybackState>>,
-    mpris: State<'_, MprisState>,
+    media_controls: State<'_, MediaControls>,
 ) -> Result<VideoPlaybackStatus, String> {
     let video = {
         let library = library
@@ -1115,7 +1121,7 @@ async fn play_video(
 
     if let Ok(mut playback) = playback.lock() {
         let status = playback.pause()?;
-        mpris.update_playback(status.is_playing, status.position_seconds, status.volume);
+        media_controls.update_playback(status.is_playing, status.position_seconds, status.volume);
     }
 
     let mut video_playback = video_playback
@@ -1506,7 +1512,7 @@ fn update_album_tags(
     app: AppHandle,
     library: State<'_, Mutex<LibraryDatabase>>,
     playback: State<'_, Mutex<PlaybackState>>,
-    mpris: State<'_, MprisState>,
+    media_controls: State<'_, MediaControls>,
     tag_writes: State<'_, Mutex<TagWriteState>>,
 ) -> Result<AlbumTagUpdateResult, String> {
     #[cfg(target_os = "windows")]
@@ -1572,8 +1578,8 @@ fn update_album_tags(
                 .iter()
                 .find(|track| track.file_path == current_path)
             {
-                mpris.update_track(
-                    Some(MprisTrack::from(updated_track)),
+                media_controls.update_track(
+                    Some(MediaTrack::from(updated_track)),
                     current_status
                         .map(|status| status.is_playing)
                         .unwrap_or(false),
@@ -1592,7 +1598,7 @@ fn update_track_tags(
     app: AppHandle,
     library: State<'_, Mutex<LibraryDatabase>>,
     playback: State<'_, Mutex<PlaybackState>>,
-    mpris: State<'_, MprisState>,
+    media_controls: State<'_, MediaControls>,
     tag_writes: State<'_, Mutex<TagWriteState>>,
 ) -> Result<Track, String> {
     validate_update_track_tags_request(&request)?;
@@ -1671,8 +1677,8 @@ fn update_track_tags(
         .and_then(|status| status.file_path.as_deref())
         == Some(updated_track.file_path.as_str())
     {
-        mpris.update_track(
-            Some(MprisTrack::from(&updated_track)),
+        media_controls.update_track(
+            Some(MediaTrack::from(&updated_track)),
             current_status
                 .map(|status| status.is_playing)
                 .unwrap_or(false),
@@ -5275,7 +5281,7 @@ fn play_track(
     file_path: String,
     playback: State<'_, Mutex<PlaybackState>>,
     library: State<'_, Mutex<LibraryDatabase>>,
-    mpris: State<'_, MprisState>,
+    media_controls: State<'_, MediaControls>,
 ) -> Result<PlaybackStatus, String> {
     let status = {
         let mut playback = playback
@@ -5288,8 +5294,19 @@ fn play_track(
         .lock()
         .ok()
         .and_then(|library| library.track_by_id(&file_path).ok().flatten())
-        .map(|track| MprisTrack::from(&track));
-    mpris.update_track(track, status.is_playing);
+        .map(|track| MediaTrack::from(&track));
+    #[cfg(target_os = "windows")]
+    let track = Some(track.unwrap_or_else(|| {
+        MediaTrack {
+            title: Path::new(&file_path)
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or(&file_path)
+                .to_owned(),
+            ..MediaTrack::default()
+        }
+    }));
+    media_controls.update_track(track, status.is_playing);
 
     Ok(status)
 }
@@ -5297,14 +5314,14 @@ fn play_track(
 #[tauri::command]
 fn pause_playback(
     playback: State<'_, Mutex<PlaybackState>>,
-    mpris: State<'_, MprisState>,
+    media_controls: State<'_, MediaControls>,
 ) -> Result<PlaybackStatus, String> {
     let mut playback = playback
         .lock()
         .map_err(|_| "Playback state is unavailable.".to_owned())?;
 
     let status = playback.pause()?;
-    mpris.update_playback(status.is_playing, status.position_seconds, status.volume);
+    media_controls.update_playback(status.is_playing, status.position_seconds, status.volume);
 
     Ok(status)
 }
@@ -5312,14 +5329,14 @@ fn pause_playback(
 #[tauri::command]
 fn resume_playback(
     playback: State<'_, Mutex<PlaybackState>>,
-    mpris: State<'_, MprisState>,
+    media_controls: State<'_, MediaControls>,
 ) -> Result<PlaybackStatus, String> {
     let mut playback = playback
         .lock()
         .map_err(|_| "Playback state is unavailable.".to_owned())?;
 
     let status = playback.resume()?;
-    mpris.update_playback(status.is_playing, status.position_seconds, status.volume);
+    media_controls.update_playback(status.is_playing, status.position_seconds, status.volume);
 
     Ok(status)
 }
@@ -5327,7 +5344,7 @@ fn resume_playback(
 #[tauri::command]
 fn get_playback_status(
     playback: State<'_, Mutex<PlaybackState>>,
-    mpris: State<'_, MprisState>,
+    media_controls: State<'_, MediaControls>,
 ) -> Result<PlaybackStatus, String> {
     let mut playback = playback
         .lock()
@@ -5335,7 +5352,7 @@ fn get_playback_status(
 
     playback.refresh()?;
     let status = playback.status();
-    mpris.update_playback(status.is_playing, status.position_seconds, status.volume);
+    media_controls.update_playback(status.is_playing, status.position_seconds, status.volume);
 
     Ok(status)
 }
@@ -5345,14 +5362,14 @@ fn seek_playback(
     position_seconds: f64,
     expected_file_path: String,
     playback: State<'_, Mutex<PlaybackState>>,
-    mpris: State<'_, MprisState>,
+    media_controls: State<'_, MediaControls>,
 ) -> Result<PlaybackStatus, String> {
     let mut playback = playback
         .lock()
         .map_err(|_| "Playback state is unavailable.".to_owned())?;
 
     let status = playback.seek(position_seconds, &expected_file_path)?;
-    mpris.update_playback(status.is_playing, status.position_seconds, status.volume);
+    media_controls.update_playback(status.is_playing, status.position_seconds, status.volume);
 
     Ok(status)
 }
@@ -5361,14 +5378,14 @@ fn seek_playback(
 fn set_playback_volume(
     volume: f64,
     playback: State<'_, Mutex<PlaybackState>>,
-    mpris: State<'_, MprisState>,
+    media_controls: State<'_, MediaControls>,
 ) -> Result<PlaybackStatus, String> {
     let mut playback = playback
         .lock()
         .map_err(|_| "Playback state is unavailable.".to_owned())?;
 
     let status = playback.set_volume(volume)?;
-    mpris.update_playback(status.is_playing, status.position_seconds, status.volume);
+    media_controls.update_playback(status.is_playing, status.position_seconds, status.volume);
 
     Ok(status)
 }
@@ -6229,6 +6246,11 @@ fn cleanup_playback_for_exit(app: &AppHandle) {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         playback.shutdown();
     }
+
+    #[cfg(target_os = "windows")]
+    if let Some(controls) = app.try_state::<MediaControls>() {
+        controls.update_track(None, false);
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -6597,13 +6619,26 @@ fn row_to_video(row: &rusqlite::Row<'_>) -> rusqlite::Result<VideoEntry> {
     })
 }
 
-impl From<&Track> for MprisTrack {
+#[derive(Debug, Clone, Default)]
+struct MediaTrack {
+    title: String,
+    artist: Option<String>,
+    album: Option<String>,
+    #[cfg(target_os = "linux")]
+    duration_seconds: Option<u64>,
+    #[cfg(target_os = "linux")]
+    art_path: Option<String>,
+}
+
+impl From<&Track> for MediaTrack {
     fn from(track: &Track) -> Self {
         Self {
             title: track.title.clone(),
             artist: track.artist.clone().or_else(|| track.album_artist.clone()),
             album: track.album.clone(),
+            #[cfg(target_os = "linux")]
             duration_seconds: track.duration_seconds.map(u64::from),
+            #[cfg(target_os = "linux")]
             art_path: track.cover_art_path.clone(),
         }
     }
@@ -12890,10 +12925,10 @@ pub fn run() {
                 })?
                 .join("library.sqlite3");
             let library = LibraryDatabase::open(db_path).map_err(io::Error::other)?;
-            let mpris = MprisState::new(app.handle().clone());
+            let media_controls = MediaControls::new(app.handle().clone());
 
             app.manage(Mutex::new(library));
-            app.manage(mpris);
+            app.manage(media_controls);
 
             updates::initialize(app.handle());
 

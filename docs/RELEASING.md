@@ -121,6 +121,7 @@ Do not block the Linux beta.3 on this section. Perform these checks on clean x86
 - [ ] Scan disposable libraries on `C:`, another drive, and Unicode paths.
 - [ ] Play representative FLAC, MP3, OGG/Vorbis, Opus, WAV, and M4A/AAC files.
 - [ ] Test queue, playlists, favorites, lyrics, themes, and restart persistence.
+- [ ] With Cassette minimized on Windows, use headphone or keyboard media buttons to pause, resume, skip to the next track, and return to the previous track. Confirm the Windows media panel shows the current song.
 - [ ] Edit FLAC tags only on disposable copies; verify rollback safety and confirm other formats remain read-only.
 - [ ] Confirm Linux notifications and MPRIS are unavailable without application errors.
 - [ ] On a standard Windows user account with an optical drive, detect an audio-only CD, look up its metadata, and rip it to a disposable output folder. Verify every FLAC plays and has the expected length and tags. Check the messages for an empty drive and a data disc.

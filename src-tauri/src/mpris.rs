@@ -1,5 +1,6 @@
 #[cfg(target_os = "linux")]
 mod platform {
+    use crate::MediaTrack;
     use std::collections::HashMap;
     use std::path::Path;
 
@@ -11,15 +12,6 @@ mod platform {
 
     const MPRIS_BUS_NAME: &str = "org.mpris.MediaPlayer2.Cassette";
     const MPRIS_PATH: &str = "/org/mpris/MediaPlayer2";
-
-    #[derive(Debug, Clone, Default)]
-    pub struct MprisTrack {
-        pub title: String,
-        pub artist: Option<String>,
-        pub album: Option<String>,
-        pub duration_seconds: Option<u64>,
-        pub art_path: Option<String>,
-    }
 
     #[derive(Debug, Clone)]
     struct MprisSnapshot {
@@ -68,7 +60,7 @@ mod platform {
             }
         }
 
-        pub fn update_track(&self, track: Option<MprisTrack>, is_playing: bool) {
+        pub fn update_track(&self, track: Option<MediaTrack>, is_playing: bool) {
             let Some(connection) = &self.connection else {
                 return;
             };
@@ -189,34 +181,34 @@ mod platform {
     #[interface(name = "org.mpris.MediaPlayer2.Player")]
     impl PlayerInterface {
         fn next(&self) {
-            let _ = self.app.emit("mpris-next", ());
+            let _ = self.app.emit("media-next", ());
         }
 
         fn previous(&self) {
-            let _ = self.app.emit("mpris-previous", ());
+            let _ = self.app.emit("media-previous", ());
         }
 
         fn pause(&self) {
-            let _ = self.app.emit("mpris-pause", ());
+            let _ = self.app.emit("media-pause", ());
         }
 
         fn play_pause(&self) {
-            let _ = self.app.emit("mpris-play-pause", ());
+            let _ = self.app.emit("media-play-pause", ());
         }
 
         fn stop(&self) {
-            let _ = self.app.emit("mpris-stop", ());
+            let _ = self.app.emit("media-stop", ());
         }
 
         fn play(&self) {
-            let _ = self.app.emit("mpris-play", ());
+            let _ = self.app.emit("media-play", ());
         }
 
         fn seek(&self, _offset: i64) {}
 
         fn set_position(&self, _track_id: ObjectPath<'_>, position: i64) {
             let seconds = (position / 1_000_000).max(0) as u64;
-            let _ = self.app.emit("mpris-seek", seconds);
+            let _ = self.app.emit("media-seek", seconds);
         }
 
         fn open_uri(&self, _uri: &str) {}
@@ -300,7 +292,7 @@ mod platform {
         async fn seeked(emitter: &SignalEmitter<'_>, position: i64) -> zbus::Result<()>;
     }
 
-    fn metadata_for_track(track: &MprisTrack) -> HashMap<String, OwnedValue> {
+    fn metadata_for_track(track: &MediaTrack) -> HashMap<String, OwnedValue> {
         let mut metadata = empty_metadata();
         insert_value(&mut metadata, "xesam:title", track.title.clone());
 
@@ -366,16 +358,8 @@ mod platform {
 
 #[cfg(not(target_os = "linux"))]
 mod platform {
+    use crate::MediaTrack;
     use tauri::AppHandle;
-
-    #[derive(Debug, Clone, Default)]
-    pub struct MprisTrack {
-        pub title: String,
-        pub artist: Option<String>,
-        pub album: Option<String>,
-        pub duration_seconds: Option<u64>,
-        pub art_path: Option<String>,
-    }
 
     pub struct MprisState;
 
@@ -384,10 +368,10 @@ mod platform {
             Self
         }
 
-        pub fn update_track(&self, _track: Option<MprisTrack>, _is_playing: bool) {}
+        pub fn update_track(&self, _track: Option<MediaTrack>, _is_playing: bool) {}
 
         pub fn update_playback(&self, _is_playing: bool, _position_seconds: u64, _volume: f64) {}
     }
 }
 
-pub use platform::{MprisState, MprisTrack};
+pub use platform::MprisState;

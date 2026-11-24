@@ -1140,14 +1140,14 @@
     if (ENABLE_EXPERIMENTAL_VIDEOS) {
       void loadVideoLibrary();
     }
-    const mprisUnlisteners = [
-      listen("mpris-play-pause", () => void handleTogglePlayback()),
-      listen("mpris-play", () => void handleMprisPlay()),
-      listen("mpris-pause", () => void handleMprisPause()),
-      listen("mpris-stop", () => void handleMprisStop()),
-      listen("mpris-next", () => void handleNextTrack()),
-      listen("mpris-previous", () => void handlePreviousTrack()),
-      listen<number>("mpris-seek", (event) => void handleSeek(event.payload)),
+    const mediaControlUnlisteners = [
+      listen("media-play-pause", () => void handleTogglePlayback()),
+      listen("media-play", () => void handleMediaPlay()),
+      listen("media-pause", () => void handleMediaPause()),
+      listen("media-stop", () => void handleMediaStop()),
+      listen("media-next", () => void handleNextTrack()),
+      listen("media-previous", () => void handlePreviousTrack()),
+      listen<number>("media-seek", (event) => void handleSeek(event.payload)),
       listen<CdRipEvent>("cd-rip-started", (event) => handleCdRipStarted(event.payload)),
       listen<CdRipEvent>("cd-rip-track-started", (event) => handleCdRipTrackStarted(event.payload)),
       listen<CdRipEvent>("cd-rip-track-finished", (event) => handleCdRipTrackFinished(event.payload)),
@@ -1314,7 +1314,7 @@
         window.clearInterval(videoProgressIntervalId);
       }
       window.removeEventListener("keydown", handleKeydown, true);
-      for (const unlisten of mprisUnlisteners) {
+      for (const unlisten of mediaControlUnlisteners) {
         void unlisten.then((cleanup) => cleanup());
       }
     };
@@ -5372,7 +5372,7 @@
     }
   }
 
-  async function handleMprisPlay() {
+  async function handleMediaPlay() {
     if (!currentTrack || isPlaying) {
       return;
     }
@@ -5380,7 +5380,7 @@
     await handleTogglePlayback();
   }
 
-  async function handleMprisPause() {
+  async function handleMediaPause() {
     if (!currentTrack || !isPlaying) {
       return;
     }
@@ -5388,7 +5388,7 @@
     await handleTogglePlayback();
   }
 
-  async function handleMprisStop() {
+  async function handleMediaStop() {
     if (!currentTrack) {
       return;
     }
