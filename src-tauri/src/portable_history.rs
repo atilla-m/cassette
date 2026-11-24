@@ -3,10 +3,10 @@ use rusqlite::{params, OptionalExtension, Transaction};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::hash::Hasher;
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use tauri::State;
 use uuid::Uuid;
@@ -185,9 +185,43 @@ impl LibraryDatabase {
         }
     }
 
+    pub(super) fn history_paths_for_scan(
+        &self,
+        new_tracks: &[Track],
+    ) -> Result<Vec<(String, PathBuf)>, String> {
+        let retained: HashSet<&str> = new_tracks.iter().map(|track| track.id.as_str()).collect();
+        let mut paths: Vec<_> = self
+            .load_cache()?
+            .tracks
+            .into_iter()
+            .filter(|track| track.play_count > 0 && !retained.contains(track.id.as_str()))
+            .map(|track| (track.id, PathBuf::from(track.file_path)))
+            .collect();
+        let mut query = self
+            .connection
+            .prepare("SELECT track_id FROM history_pending_tracks")
+            .map_err(|error| error.to_string())?;
+        let pending_ids = query
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|error| error.to_string())?
+            .collect::<rusqlite::Result<HashSet<_>>>()
+            .map_err(|error| error.to_string())?;
+        if !pending_ids.is_empty() {
+            let source = self.source_id()?;
+            for track in new_tracks {
+                let id = history_reference_id(&self.connection, &source, &track.id)?;
+                if pending_ids.contains(&pending_id(&source, &id)) {
+                    paths.push((track.id.clone(), PathBuf::from(&track.file_path)));
+                }
+            }
+        }
+        Ok(paths)
+    }
+
     pub(super) fn removed_history_references(
         &self,
         new_tracks: &[Track],
+        fingerprints: &HashMap<String, String>,
     ) -> Result<Vec<(String, String)>, String> {
         let retained: HashSet<&str> = new_tracks.iter().map(|track| track.id.as_str()).collect();
         let source = self.source_id()?;
@@ -196,43 +230,15 @@ impl LibraryDatabase {
             if track.play_count == 0 || retained.contains(track.id.as_str()) {
                 continue;
             }
-            let mut reference = track_reference(&source, &track).or_else(|_| {
-                self.connection
-                    .query_row(
-                        "SELECT reference_json FROM history_track_references WHERE track_id = ?1",
-                        [&track.id],
-                        |row| row.get::<_, String>(0),
-                    )
-                    .optional()
-                    .map_err(|error| error.to_string())?
-                    .map(|json| serde_json::from_str(&json).map_err(|error| error.to_string()))
-                    .unwrap_or_else(|| {
-                        Ok(PortableRef {
-                            reference_id: sha256_text(&format!("{source}\0{}", track.id)),
-                            audio_key: format!("unavailable:{}", sha256_text(&track.id)),
-                            title: track.title.clone(),
-                            artist: track.artist.clone(),
-                            album: track.album.clone(),
-                            album_artist: track.album_artist.clone(),
-                            genres: track.genres.clone(),
-                            track_number: track.track_number,
-                            disc_number: track.disc_number,
-                            duration_seconds: track.duration_seconds,
-                        })
-                    })
-            })?;
-            if let Ok(Some(json)) = self
-                .connection
-                .query_row(
-                    "SELECT reference_json FROM history_track_references WHERE track_id = ?1",
-                    [&track.id],
-                    |row| row.get::<_, String>(0),
-                )
-                .optional()
-            {
-                if let Ok(cached) = serde_json::from_str::<PortableRef>(&json) {
-                    reference.reference_id = cached.reference_id;
-                }
+            let cached = cached_history_reference(&self.connection, &track.id)?;
+            let key = fingerprints
+                .get(&track.id)
+                .cloned()
+                .or_else(|| cached.as_ref().map(|reference| reference.audio_key.clone()))
+                .unwrap_or_else(|| format!("unavailable:{}", sha256_text(&track.id)));
+            let mut reference = reference_with_audio_key(&source, &track, key);
+            if let Some(cached) = cached {
+                reference.reference_id = cached.reference_id;
             }
             removed.push((
                 track.id,
@@ -614,6 +620,7 @@ pub(super) fn archive_removed_history(
 pub(super) fn restore_readded_history(
     transaction: &Transaction<'_>,
     tracks: &mut [Track],
+    fingerprints: &HashMap<String, String>,
 ) -> Result<(), String> {
     let source: String = transaction
         .query_row(
@@ -623,18 +630,10 @@ pub(super) fn restore_readded_history(
         )
         .map_err(|error| error.to_string())?;
     for track in tracks {
-        let cached: Option<String> = transaction
-            .query_row(
-                "SELECT reference_json FROM history_track_references WHERE track_id = ?1",
-                [&track.id],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|error| error.to_string())?;
-        let reference_id = cached
-            .and_then(|json| serde_json::from_str::<PortableRef>(&json).ok())
-            .map(|reference| reference.reference_id)
-            .unwrap_or_else(|| sha256_text(&format!("{source}\0{}", track.id)));
+        let Some(audio_key) = fingerprints.get(&track.id) else {
+            continue;
+        };
+        let reference_id = history_reference_id(transaction, &source, &track.id)?;
         let pending = pending_id(&source, &reference_id);
         let json: Option<String> = transaction
             .query_row(
@@ -647,7 +646,7 @@ pub(super) fn restore_readded_history(
         if let Some(json) = json {
             let reference: PortableRef =
                 serde_json::from_str(&json).map_err(|error| error.to_string())?;
-            if audio_key(Path::new(&track.file_path)).is_ok_and(|key| key == reference.audio_key) {
+            if *audio_key == reference.audio_key {
                 promote_pending(transaction, &pending, &track.id)?;
                 let (count, date): (i64, Option<i64>) = transaction
                     .query_row(
@@ -871,10 +870,47 @@ fn validate_backup(backup: &PortableBackup) -> Result<(), String> {
     Ok(())
 }
 
+pub(super) fn fingerprint_scan_history(paths: Vec<(String, PathBuf)>) -> HashMap<String, String> {
+    paths
+        .into_iter()
+        .filter_map(|(id, path)| audio_key(&path).ok().map(|key| (id, key)))
+        .collect()
+}
+
+fn cached_history_reference(
+    connection: &Connection,
+    track_id: &str,
+) -> Result<Option<PortableRef>, String> {
+    let json: Option<String> = connection
+        .query_row(
+            "SELECT reference_json FROM history_track_references WHERE track_id = ?1",
+            [track_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    Ok(json.and_then(|json| serde_json::from_str(&json).ok()))
+}
+
+fn history_reference_id(
+    connection: &Connection,
+    source_id: &str,
+    track_id: &str,
+) -> Result<String, String> {
+    Ok(cached_history_reference(connection, track_id)?
+        .map(|reference| reference.reference_id)
+        .unwrap_or_else(|| sha256_text(&format!("{source_id}\0{track_id}"))))
+}
+
 fn track_reference(source_id: &str, track: &Track) -> Result<PortableRef, String> {
-    Ok(PortableRef {
+    let key = audio_key(Path::new(&track.file_path))?;
+    Ok(reference_with_audio_key(source_id, track, key))
+}
+
+fn reference_with_audio_key(source_id: &str, track: &Track, audio_key: String) -> PortableRef {
+    PortableRef {
         reference_id: sha256_text(&format!("{source_id}\0{}", track.id)),
-        audio_key: audio_key(Path::new(&track.file_path))?,
+        audio_key,
         title: track.title.clone(),
         artist: track.artist.clone(),
         album: track.album.clone(),
@@ -883,7 +919,7 @@ fn track_reference(source_id: &str, track: &Track) -> Result<PortableRef, String
         track_number: track.track_number,
         disc_number: track.disc_number,
         duration_seconds: track.duration_seconds,
-    })
+    }
 }
 
 fn reference_metadata_matches(source: &PortableRef, candidate: &PortableRef) -> bool {
@@ -1419,25 +1455,38 @@ pub(crate) fn export_listening_history(
         .lock()
         .map_err(|_| "Library cache is unavailable.".to_owned())?;
     let (backup, result) = library.export_backup()?;
+    drop(library);
     validate_backup(&backup)?;
     let bytes = serde_json::to_vec_pretty(&backup)
         .map_err(|error| format!("Could not encode history backup: {error}"))?;
     if bytes.len() as u64 > MAX_BACKUP_BYTES {
         return Err("History backup exceeds the 256 MiB safety limit.".to_owned());
     }
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&path)
-        .map_err(|error| {
-            format!(
-                "Could not create history backup (existing files are never overwritten): {error}"
-            )
-        })?;
-    file.write_all(&bytes)
-        .and_then(|_| file.sync_all())
-        .map_err(|error| format!("Could not finish writing history backup: {error}"))?;
+    write_history_backup(Path::new(&path), &bytes)?;
     Ok(result)
+}
+
+fn write_history_backup(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let directory = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut staged = tempfile::Builder::new()
+        .prefix(".cassette-history-")
+        .suffix(".part")
+        .tempfile_in(directory)
+        .map_err(|error| format!("Could not stage the history backup: {error}"))?;
+    staged
+        .write_all(bytes)
+        .and_then(|_| staged.as_file().sync_all())
+        .map_err(|error| format!("Could not finish writing the history backup: {error}"))?;
+    staged.persist_noclobber(path).map_err(|error| {
+        format!(
+            "Could not publish the history backup (existing files are never overwritten): {}",
+            error.error
+        )
+    })?;
+    Ok(())
 }
 
 #[tauri::command(async)]
@@ -1517,6 +1566,16 @@ pub(crate) fn associate_listening_history_track(
 pub(super) mod tests {
     use super::super::{track_from_path, unique_timestamp_nanos};
     use super::*;
+
+    #[test]
+    fn history_export_publishes_complete_bytes_without_replacing_existing_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("history.json");
+        write_history_backup(&destination, b"complete backup").unwrap();
+        assert!(write_history_backup(&destination, b"another backup").is_err());
+        assert_eq!(fs::read(&destination).unwrap(), b"complete backup");
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
 
     pub(super) struct Fixture {
         directory: std::path::PathBuf,

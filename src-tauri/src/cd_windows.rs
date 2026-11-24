@@ -118,6 +118,7 @@ pub(super) fn detect_audio_cd() -> Result<CdDetectResult, String> {
         Ok(disc) => Ok(CdDetectResult {
             drive_found: true,
             disc_found: true,
+            disc_key: Some(disc.musicbrainz_disc().id),
             tracks: disc.rip_tracks(),
             raw_output: format!("Audio CD in drive {}:", disc.drive),
             error: None,
@@ -125,6 +126,7 @@ pub(super) fn detect_audio_cd() -> Result<CdDetectResult, String> {
         Err((drive_found, error)) => Ok(CdDetectResult {
             drive_found,
             disc_found: false,
+            disc_key: None,
             tracks: Vec::new(),
             raw_output: String::new(),
             error: Some(error),

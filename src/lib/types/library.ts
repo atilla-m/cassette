@@ -291,6 +291,7 @@ export type LibraryCache = {
   playlists: Playlist[];
   lastScannedFolder: string | null;
   lastScannedAt: number | null;
+  recoveryNotice?: string | null;
 };
 
 export type TrackLyrics = {
@@ -394,6 +395,7 @@ export type CdCoverLookupResult = {
 export type CdDetectResult = {
   driveFound: boolean;
   discFound: boolean;
+  discKey?: string | null;
   tracks: CdRipTrack[];
   rawOutput: string;
   error: string | null;

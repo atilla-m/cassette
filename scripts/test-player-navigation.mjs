@@ -136,8 +136,8 @@ test("Songs list positions follow the displayed order and have a persistent visi
   assert.equal(songLists.length, 2); // Scanning and loaded states use the same setting.
   assert.ok(songLists.every(({ node }) => expression(page.source, node, "showOrder") === "showSongListNumbers"));
   assert.match(page.source, /let showSongListNumbers = \$state\(true\)/);
-  assert.match(page.source, /showSongListNumbers = window\.localStorage\.getItem\(SONG_LIST_NUMBERS_SETTING_KEY\) !== "off"/);
-  assert.match(page.source, /window\.localStorage\.setItem\(SONG_LIST_NUMBERS_SETTING_KEY, showSongListNumbers \? "on" : "off"\)/);
+  assert.match(page.source, /showSongListNumbers = readPreference\(SONG_LIST_NUMBERS_SETTING_KEY\) !== "off"/);
+  assert.match(page.source, /writePreference\(SONG_LIST_NUMBERS_SETTING_KEY, showSongListNumbers \? "on" : "off"\)/);
   assert.ok(page.elements.some(({ node }) => node.name === "input"
     && expression(page.source, node, "checked") === "showSongListNumbers"
     && expression(page.source, node, "onchange") === "handleSongListNumbersSettingChange"));

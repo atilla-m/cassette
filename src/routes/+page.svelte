@@ -468,6 +468,7 @@
   let isScanning = $state(false);
   let isScanningVideos = $state(false);
   let scanError = $state<string | null>(null);
+  let libraryRecoveryNotice = $state<string | null>(null);
   let videoError = $state<string | null>(null);
   let videoMessage = $state<string | null>(null);
   let videoFolder = $state<string | null>(null);
@@ -512,6 +513,9 @@
   let audioCdFound = $state<boolean | null>(null);
   let cdTracks = $state<CdRipTrack[]>([]);
   let cdRawOutput = $state("");
+  let detectedCdKey: string | null = null;
+  let cdDetectionRevision = 0;
+  let cdCoverRequest = 0;
   let cdOutputFolder = $state<string | null>(null);
   let lastRippedFolder = $state<string | null>(null);
   let isLookingUpCdMetadata = $state(false);
@@ -570,6 +574,11 @@
   let lastNotifiedPlaybackStartId: number | null = null;
   let playbackStartId = 0;
   let isStartingTrack = false;
+  let playbackControlRevision = 0;
+  let isChangingPlayback = false;
+  let isPollingPlayback = false;
+  let volumeRequestId = 0;
+  let isSettingVolume = false;
   let mainElement: HTMLElement | undefined = $state();
   let activeView = $state("Albums");
   let statsDetailSection = $state<StatsSectionId | null>(null);
@@ -1023,6 +1032,30 @@
     });
   });
 
+  function readPreference(key: string): string | null {
+    try {
+      return window.localStorage.getItem(key);
+    } catch {
+      return null;
+    }
+  }
+
+  function writePreference(key: string, value: string) {
+    try {
+      window.localStorage.setItem(key, value);
+    } catch {
+      // A denied or full store does not prevent using the current selection.
+    }
+  }
+
+  function removePreference(key: string) {
+    try {
+      window.localStorage.removeItem(key);
+    } catch {
+      // Storage can be unavailable even if the rest of the interface works.
+    }
+  }
+
   function isThemeId(value: string | null): value is ThemeId {
     return themePresets.some((theme) => theme.id === value);
   }
@@ -1040,7 +1073,7 @@
   function handleThemeSelect(theme: ThemeId) {
     selectedTheme = theme;
     applyTheme(theme);
-    window.localStorage.setItem(THEME_SETTING_KEY, theme);
+    writePreference(THEME_SETTING_KEY, theme);
   }
 
   function initializeSavedTheme() {
@@ -1048,23 +1081,10 @@
       return;
     }
 
-    let storedTheme: string | null = null;
-    try {
-      storedTheme = window.localStorage.getItem(THEME_SETTING_KEY);
-    } catch {
-      // A denied Storage object must not prevent the default theme rendering.
-    }
-
+    const storedTheme = readPreference(THEME_SETTING_KEY);
     selectedTheme = savedThemeOrDefault(storedTheme);
     applyTheme(selectedTheme);
-
-    if (storedTheme !== selectedTheme) {
-      try {
-        window.localStorage.setItem(THEME_SETTING_KEY, selectedTheme);
-      } catch {
-        // The in-memory default still applies for this session.
-      }
-    }
+    if (storedTheme !== selectedTheme) writePreference(THEME_SETTING_KEY, selectedTheme);
   }
 
   // Normalize hidden legacy selections before the component is mounted, so
@@ -1115,13 +1135,13 @@
     };
     const statsCalendarIntervalId = window.setInterval(refreshStatsCalendar, 60_000);
     window.addEventListener("focus", refreshStatsCalendar);
-    autoFindLyricsEnabled = window.localStorage.getItem(AUTO_LYRICS_SETTING_KEY) !== "off";
-    trackNotificationsEnabled = window.localStorage.getItem(TRACK_NOTIFICATIONS_SETTING_KEY) === "on";
-    showAlbumPlayCounts = window.localStorage.getItem(ALBUM_PLAY_COUNTS_SETTING_KEY) !== "off";
-    showArtistPlayCounts = window.localStorage.getItem(ARTIST_PLAY_COUNTS_SETTING_KEY) !== "off";
-    showGenrePlayCounts = window.localStorage.getItem(GENRE_PLAY_COUNTS_SETTING_KEY) !== "off";
-    showAlbumTrackPlayCounts = window.localStorage.getItem(ALBUM_TRACK_PLAY_COUNTS_SETTING_KEY) !== "off";
-    showSongListNumbers = window.localStorage.getItem(SONG_LIST_NUMBERS_SETTING_KEY) !== "off";
+    autoFindLyricsEnabled = readPreference(AUTO_LYRICS_SETTING_KEY) !== "off";
+    trackNotificationsEnabled = readPreference(TRACK_NOTIFICATIONS_SETTING_KEY) === "on";
+    showAlbumPlayCounts = readPreference(ALBUM_PLAY_COUNTS_SETTING_KEY) !== "off";
+    showArtistPlayCounts = readPreference(ARTIST_PLAY_COUNTS_SETTING_KEY) !== "off";
+    showGenrePlayCounts = readPreference(GENRE_PLAY_COUNTS_SETTING_KEY) !== "off";
+    showAlbumTrackPlayCounts = readPreference(ALBUM_TRACK_PLAY_COUNTS_SETTING_KEY) !== "off";
+    showSongListNumbers = readPreference(SONG_LIST_NUMBERS_SETTING_KEY) !== "off";
     try {
       const updaterStorage = loadUpdaterStorage(window.localStorage);
       automaticUpdateChecksEnabled = updaterStorage.automaticChecksEnabled;
@@ -1168,19 +1188,21 @@
     ];
 
     const statusIntervalId = window.setInterval(async () => {
-      if (isStartingTrack || isTagWriteSuspendingPlayback || !currentTrack || !isPlaying) {
+      if (isStartingTrack || isChangingPlayback || isPollingPlayback || isTagWriteSuspendingPlayback || !currentTrack || !isPlaying) {
         return;
       }
 
       const statusTrackPath = currentTrack.filePath;
       const startId = playbackStartId;
+      const controlRevision = playbackControlRevision;
       const tagWriteGeneration = tagWritePlaybackGeneration;
       const positionSnapshot = playbackSeekCoordinator.capturePositionUpdate(statusTrackPath);
+      isPollingPlayback = true;
 
       try {
         const status = await getPlaybackStatus();
 
-        if (isStartingTrack || startId !== playbackStartId || isTagWriteSuspendingPlayback
+        if (isStartingTrack || startId !== playbackStartId || controlRevision !== playbackControlRevision || isTagWriteSuspendingPlayback
           || tagWriteGeneration !== tagWritePlaybackGeneration || currentTrack?.filePath !== statusTrackPath
           || status.filePath !== statusTrackPath || !playbackSeekCoordinator.allowsPositionUpdate(positionSnapshot)) {
           return;
@@ -1189,10 +1211,12 @@
         applyPlaybackStatus(status);
         await handlePlaybackStatusUpdate(status);
       } catch (error) {
-        if (!isStartingTrack && startId === playbackStartId && !isTagWriteSuspendingPlayback
+        if (!isStartingTrack && startId === playbackStartId && controlRevision === playbackControlRevision && !isTagWriteSuspendingPlayback
           && tagWriteGeneration === tagWritePlaybackGeneration) {
           playbackError = error instanceof Error ? error.message : String(error);
         }
+      } finally {
+        isPollingPlayback = false;
       }
     }, 1000);
 
@@ -1324,7 +1348,7 @@
 
       if (!platformCapabilities.linuxNotifications) {
         trackNotificationsEnabled = false;
-        window.localStorage.setItem(TRACK_NOTIFICATIONS_SETTING_KEY, "off");
+        writePreference(TRACK_NOTIFICATIONS_SETTING_KEY, "off");
       }
     } catch {
       // Older backends do not expose capabilities. Keep the established Linux UI.
@@ -1334,6 +1358,7 @@
   async function loadLibraryCache() {
     try {
       const cache = await getLibraryCache();
+      libraryRecoveryNotice = cache.recoveryNotice ?? null;
       tracks = cache.tracks;
       playlists = cache.playlists;
       scannedFolder = cache.lastScannedFolder;
@@ -1517,7 +1542,7 @@
   }
 
   function isAutoLyricsCoolingDown(track: Track) {
-    const stored = window.localStorage.getItem(autoLyricsCooldownKey(track));
+    const stored = readPreference(autoLyricsCooldownKey(track));
 
     if (!stored) {
       return false;
@@ -1534,12 +1559,12 @@
       // Ignore unreadable cooldown entries and replace them on the next failed lookup.
     }
 
-    window.localStorage.removeItem(autoLyricsCooldownKey(track));
+    removePreference(autoLyricsCooldownKey(track));
     return false;
   }
 
   function setAutoLyricsCooldown(track: Track, status: "not_found" | "failed", message: string | null = null) {
-    window.localStorage.setItem(autoLyricsCooldownKey(track), JSON.stringify({
+    writePreference(autoLyricsCooldownKey(track), JSON.stringify({
       status,
       message,
       attemptedAt: Date.now(),
@@ -1547,7 +1572,7 @@
   }
 
   function clearAutoLyricsCooldown(track: Track) {
-    window.localStorage.removeItem(autoLyricsCooldownKey(track));
+    removePreference(autoLyricsCooldownKey(track));
   }
 
   function hashString(value: string) {
@@ -1565,7 +1590,7 @@
     autoFindLyricsEnabled = event.currentTarget instanceof HTMLInputElement
       ? event.currentTarget.checked
       : autoFindLyricsEnabled;
-    window.localStorage.setItem(AUTO_LYRICS_SETTING_KEY, autoFindLyricsEnabled ? "on" : "off");
+    writePreference(AUTO_LYRICS_SETTING_KEY, autoFindLyricsEnabled ? "on" : "off");
   }
 
   function handleTrackNotificationsSettingChange(event: Event) {
@@ -1574,7 +1599,7 @@
       : trackNotificationsEnabled;
     trackNotificationStatus = null;
     trackNotificationStatusIsError = false;
-    window.localStorage.setItem(TRACK_NOTIFICATIONS_SETTING_KEY, trackNotificationsEnabled ? "on" : "off");
+    writePreference(TRACK_NOTIFICATIONS_SETTING_KEY, trackNotificationsEnabled ? "on" : "off");
   }
 
   function updatePlayCountVisibility(
@@ -1589,23 +1614,23 @@
 
     if (setting === "albums") {
       showAlbumPlayCounts = enabled;
-      window.localStorage.setItem(ALBUM_PLAY_COUNTS_SETTING_KEY, enabled ? "on" : "off");
+      writePreference(ALBUM_PLAY_COUNTS_SETTING_KEY, enabled ? "on" : "off");
     } else if (setting === "artists") {
       showArtistPlayCounts = enabled;
-      window.localStorage.setItem(ARTIST_PLAY_COUNTS_SETTING_KEY, enabled ? "on" : "off");
+      writePreference(ARTIST_PLAY_COUNTS_SETTING_KEY, enabled ? "on" : "off");
     } else if (setting === "genres") {
       showGenrePlayCounts = enabled;
-      window.localStorage.setItem(GENRE_PLAY_COUNTS_SETTING_KEY, enabled ? "on" : "off");
+      writePreference(GENRE_PLAY_COUNTS_SETTING_KEY, enabled ? "on" : "off");
     } else {
       showAlbumTrackPlayCounts = enabled;
-      window.localStorage.setItem(ALBUM_TRACK_PLAY_COUNTS_SETTING_KEY, enabled ? "on" : "off");
+      writePreference(ALBUM_TRACK_PLAY_COUNTS_SETTING_KEY, enabled ? "on" : "off");
     }
   }
 
   function handleSongListNumbersSettingChange(event: Event) {
     if (!(event.currentTarget instanceof HTMLInputElement)) return;
     showSongListNumbers = event.currentTarget.checked;
-    window.localStorage.setItem(SONG_LIST_NUMBERS_SETTING_KEY, showSongListNumbers ? "on" : "off");
+    writePreference(SONG_LIST_NUMBERS_SETTING_KEY, showSongListNumbers ? "on" : "off");
   }
 
   function handleAutomaticUpdateSettingChange(event: Event) {
@@ -2905,6 +2930,8 @@
     }
 
     isDetectingCd = true;
+    cdDetectionRevision += 1;
+    cdCoverRequest += 1;
     cdRipError = null;
     cdRipMessage = null;
     resetCdMetadataLookup();
@@ -2919,6 +2946,10 @@
         cdRipMessage = null;
       }
     } catch (error) {
+      detectedCdKey = null;
+      audioCdFound = false;
+      cdTracks = [];
+      cdRipMetadata = null;
       cdRipError = error instanceof Error ? error.message : String(error);
     } finally {
       isDetectingCd = false;
@@ -2926,6 +2957,9 @@
   }
 
   function applyCdDetection(result: CdDetectResult) {
+    const key = result.discFound ? result.discKey ?? null : null;
+    const sameDisc = key !== null && key === detectedCdKey;
+    detectedCdKey = key;
     cdDriveFound = result.driveFound;
     audioCdFound = result.discFound;
     cdTracks = result.tracks.map((track) => ({
@@ -2936,7 +2970,7 @@
     }));
     cdRawOutput = result.rawOutput;
     cdRipError = result.error;
-    cdRipMetadata = defaultCdRipMetadata(cdTracks, cdRipMetadata);
+    cdRipMetadata = defaultCdRipMetadata(cdTracks, sameDisc ? cdRipMetadata : null);
   }
 
   function resetCdMetadataLookup() {
@@ -2948,10 +2982,11 @@
     cdCoverError = null;
     cdCoverMessage = null;
     isLookingUpCdCover = false;
+    isLookingUpCdMetadata = false;
   }
 
   async function handleLookupCdMetadata() {
-    if (isLookingUpCdMetadata || isRippingCd) {
+    if (isLookingUpCdMetadata || isDetectingCd || isRippingCd) {
       return;
     }
 
@@ -2963,6 +2998,7 @@
       }
     }
 
+    const revision = cdDetectionRevision;
     isLookingUpCdMetadata = true;
     cdMetadataError = null;
     cdMetadataMessage = "Looking up metadata...";
@@ -2970,12 +3006,14 @@
     selectedCdReleaseId = null;
 
     try {
-      applyCdMetadataLookup(await lookupCdMetadata());
+      const result = await lookupCdMetadata(detectedCdKey);
+      if (revision === cdDetectionRevision && !isRippingCd) applyCdMetadataLookup(result);
     } catch (error) {
+      if (revision !== cdDetectionRevision || isRippingCd) return;
       cdMetadataMessage = null;
       cdMetadataError = error instanceof Error ? error.message : String(error);
     } finally {
-      isLookingUpCdMetadata = false;
+      if (revision === cdDetectionRevision) isLookingUpCdMetadata = false;
     }
   }
 
@@ -3002,6 +3040,8 @@
       return;
     }
 
+    cdCoverRequest += 1;
+    isLookingUpCdCover = false;
     const existingManualCover = cdRipMetadata?.cover?.source === "manual" ? cdRipMetadata.cover : null;
     selectedCdReleaseId = release.id;
     cdRipMetadata = {
@@ -3018,21 +3058,24 @@
   }
 
   async function handleLookupCdCover(releaseId: string) {
-    if (isLookingUpCdCover || isRippingCd) {
+    if (isDetectingCd || isRippingCd) {
       return;
     }
 
+    const request = ++cdCoverRequest;
     isLookingUpCdCover = true;
     cdCoverError = null;
     cdCoverMessage = "Loading cover...";
 
     try {
-      applyCdCoverLookup(await lookupCdCover(releaseId), "cover-art-archive");
+      const result = await lookupCdCover(releaseId);
+      if (request === cdCoverRequest && !isRippingCd) applyCdCoverLookup(result, "cover-art-archive");
     } catch (error) {
+      if (request !== cdCoverRequest || isRippingCd) return;
       cdCoverMessage = null;
       cdCoverError = error instanceof Error ? error.message : String(error);
     } finally {
-      isLookingUpCdCover = false;
+      if (request === cdCoverRequest) isLookingUpCdCover = false;
     }
   }
 
@@ -3041,17 +3084,22 @@
       return;
     }
 
+    const revision = cdDetectionRevision;
     const path = await chooseCoverImage();
-    if (!path) {
+    if (!path || revision !== cdDetectionRevision || isRippingCd) {
       return;
     }
 
+    const request = ++cdCoverRequest;
+    isLookingUpCdCover = false;
     cdCoverError = null;
     cdCoverMessage = "Loading cover...";
 
     try {
-      applyCdCoverLookup(await inspectCoverImage(path), "manual");
+      const result = await inspectCoverImage(path);
+      if (request === cdCoverRequest && !isRippingCd) applyCdCoverLookup(result, "manual");
     } catch (error) {
+      if (request !== cdCoverRequest || isRippingCd) return;
       cdCoverMessage = null;
       cdCoverError = error instanceof Error ? error.message : String(error);
     }
@@ -3114,7 +3162,7 @@
     cdTracks = cdTracks.map((track) => ({ ...track, status: "pending", error: null }));
 
     try {
-      const result = await ripCdToFlac(cdOutputFolder, ripMetadataSnapshot);
+      const result = await ripCdToFlac(cdOutputFolder, ripMetadataSnapshot, detectedCdKey);
       cdTracks = result.tracks;
       lastRippedFolder = result.outputFolder;
       cdRipMessage = result.tracks.some((track) => track.status === "error")
@@ -5335,13 +5383,7 @@
   }
 
   async function handleTogglePlayback() {
-    if (!currentTrack || isStartingTrack || isTagWriteSuspendingPlayback) {
-      return;
-    }
-
-    const playbackTrackPath = currentTrack.filePath;
-    const positionSnapshot = playbackSeekCoordinator.capturePositionUpdate(playbackTrackPath);
-    playbackError = null;
+    if (!currentTrack || isStartingTrack || isChangingPlayback || isTagWriteSuspendingPlayback) return;
 
     if (!isPlaying && hasCurrentTrackEnded) {
       if (currentQueueIndex === null) {
@@ -5352,66 +5394,54 @@
       return;
     }
 
-    try {
-      if (!isPlaying && videoBackendStatus?.videoId) {
-        await saveActiveVideoProgress(true);
-        videoBackendStatus = await stopVideo();
-      }
-
-      const status = isPlaying ? await pausePlayback() : await resumePlayback();
-
-      if (currentTrack?.filePath !== playbackTrackPath || status.filePath !== playbackTrackPath) {
-        return;
-      }
-
-      applyPlaybackStatus(status, {
-        applyPosition: playbackSeekCoordinator.allowsPositionUpdate(positionSnapshot),
-      });
-      await maybeRecordTrackPlay();
-    } catch (error) {
-      playbackError = error instanceof Error ? error.message : String(error);
-    }
+    await changePlayback(isPlaying ? "pause" : "resume");
   }
 
   async function handleMediaPlay() {
-    if (!currentTrack || isPlaying) {
-      return;
-    }
-
-    await handleTogglePlayback();
+    if (currentTrack && !isPlaying) await handleTogglePlayback();
   }
 
   async function handleMediaPause() {
-    if (!currentTrack || !isPlaying) {
-      return;
-    }
-
-    await handleTogglePlayback();
+    if (currentTrack && isPlaying) await changePlayback("pause");
   }
 
   async function handleMediaStop() {
-    if (!currentTrack || isStartingTrack || isTagWriteSuspendingPlayback) {
-      return;
-    }
+    await changePlayback("stop");
+  }
 
-    const playbackTrackPath = currentTrack.filePath;
-    const positionSnapshot = playbackSeekCoordinator.capturePositionUpdate(playbackTrackPath);
+  async function changePlayback(action: "pause" | "resume" | "stop") {
+    if (!currentTrack || isStartingTrack || isChangingPlayback || isTagWriteSuspendingPlayback) return;
+
+    const trackPath = currentTrack.filePath;
+    const startId = playbackStartId;
+    const tagWriteGeneration = tagWritePlaybackGeneration;
+    const positionSnapshot = playbackSeekCoordinator.capturePositionUpdate(trackPath);
+    const isCurrent = () => startId === playbackStartId && currentTrack?.filePath === trackPath
+      && tagWriteGeneration === tagWritePlaybackGeneration;
+    playbackControlRevision += 1;
+    isChangingPlayback = true;
     playbackError = null;
 
     try {
-      const status = await pausePlayback();
-
-      if (currentTrack?.filePath !== playbackTrackPath || status.filePath !== playbackTrackPath) {
-        return;
+      if (action === "resume" && videoBackendStatus?.videoId) {
+        await saveActiveVideoProgress(true);
+        videoBackendStatus = await stopVideo();
+        if (!isCurrent()) return;
       }
+      const status = action === "resume" ? await resumePlayback() : await pausePlayback();
+      if (!isCurrent() || status.filePath !== trackPath) return;
 
       applyPlaybackStatus(status, {
         applyPosition: playbackSeekCoordinator.allowsPositionUpdate(positionSnapshot),
       });
+      if (action === "stop" && playbackSeekCoordinator.allowsPositionUpdate(positionSnapshot)) {
+        await handleSeek(0);
+      }
       await maybeRecordTrackPlay();
-      await handleSeek(0);
     } catch (error) {
-      playbackError = error instanceof Error ? error.message : String(error);
+      if (isCurrent()) playbackError = error instanceof Error ? error.message : String(error);
+    } finally {
+      isChangingPlayback = false;
     }
   }
 
@@ -5505,25 +5535,18 @@
   }
 
   async function handleVolumeChange(nextVolume: number) {
-    const playbackTrackPath = currentTrack?.filePath ?? null;
-    const positionSnapshot = playbackTrackPath
-      ? playbackSeekCoordinator.capturePositionUpdate(playbackTrackPath)
-      : null;
+    const requestId = ++volumeRequestId;
+    isSettingVolume = true;
     playbackError = null;
     volume = nextVolume;
 
     try {
       const status = await setPlaybackVolume(nextVolume);
-      const applyPosition = Boolean(
-        playbackTrackPath
-        && positionSnapshot
-        && currentTrack?.filePath === playbackTrackPath
-        && status.filePath === playbackTrackPath
-        && playbackSeekCoordinator.allowsPositionUpdate(positionSnapshot),
-      );
-      applyPlaybackStatus(status, { applyPosition });
+      if (requestId === volumeRequestId) volume = status.volume;
     } catch (error) {
-      playbackError = error instanceof Error ? error.message : String(error);
+      if (requestId === volumeRequestId) playbackError = error instanceof Error ? error.message : String(error);
+    } finally {
+      if (requestId === volumeRequestId) isSettingVolume = false;
     }
   }
 
@@ -5541,7 +5564,7 @@
     }
 
     durationSeconds = status.durationSeconds ?? currentTrack?.durationSeconds ?? null;
-    volume = status.volume;
+    if (!isSettingVolume) volume = status.volume;
 
     if (status.isPlaying) {
       hasCurrentTrackEnded = false;
@@ -7107,6 +7130,9 @@
         </div>
       {/if}
 
+      {#if libraryRecoveryNotice}
+        <div class="scan-error" role="alert">{libraryRecoveryNotice}</div>
+      {/if}
       {#if scanError}
         <div class="scan-error" role="alert">{scanError}</div>
       {/if}

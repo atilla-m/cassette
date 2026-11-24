@@ -424,6 +424,7 @@ struct CdRipTrack {
 struct CdDetectResult {
     drive_found: bool,
     disc_found: bool,
+    disc_key: Option<String>,
     tracks: Vec<CdRipTrack>,
     raw_output: String,
     error: Option<String>,
@@ -751,6 +752,7 @@ struct LibraryCache {
     playlists: Vec<Playlist>,
     last_scanned_folder: Option<String>,
     last_scanned_at: Option<i64>,
+    recovery_notice: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -765,6 +767,27 @@ struct Playlist {
 
 struct LibraryDatabase {
     connection: Connection,
+    recovery_notice: Option<String>,
+}
+
+#[derive(Debug)]
+enum LibraryOpenError {
+    Directory(io::Error),
+    Sqlite(rusqlite::Error),
+}
+
+impl std::fmt::Display for LibraryOpenError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Directory(error) => write!(
+                formatter,
+                "Could not create the library data folder: {error}"
+            ),
+            Self::Sqlite(error) => {
+                write!(formatter, "Could not open the library database: {error}")
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -1362,10 +1385,12 @@ async fn scan_library(
             .map_err(|_| "Library scanning is unavailable.")?;
         let library = app.state::<Mutex<LibraryDatabase>>();
         let selected = PathBuf::from(root);
-        let (primary, extras, added) = library
+        let append = append.unwrap_or(false);
+        let (primary, extras) = library
             .lock()
             .map_err(|_| "Library cache is unavailable.")?
-            .plan_scan(&selected, append.unwrap_or(false))?;
+            .scan_roots(&selected, append)?;
+        let (extras, added) = plan_import_folders(&selected, append, &primary, extras)?;
         let cover_art_dir = app
             .path()
             .app_data_dir()
@@ -1377,14 +1402,54 @@ async fn scan_library(
             scanned_at,
             cover_art_dir.as_deref(),
         )?;
+        let history_paths = library
+            .lock()
+            .map_err(|_| "Library cache is unavailable.")?
+            .history_paths_for_scan(&tracks)?;
+        let fingerprints = portable_history::fingerprint_scan_history(history_paths);
         library
             .lock()
             .map_err(|_| "Library cache is unavailable.")?
-            .replace_library_with_import(&primary, &mut tracks, scanned_at, added.as_deref())?;
+            .replace_library_with_import(
+                &primary,
+                &mut tracks,
+                scanned_at,
+                added.as_deref(),
+                &fingerprints,
+            )?;
         Ok(tracks)
     })
     .await
     .map_err(|error| format!("Could not scan library: {error}"))?
+}
+
+fn plan_import_folders(
+    selected: &Path,
+    append: bool,
+    primary: &Path,
+    mut extras: Vec<PathBuf>,
+) -> Result<(Vec<PathBuf>, Option<PathBuf>), String> {
+    let added = if append && primary != selected {
+        let target = selected.canonicalize().map_err(|error| {
+            format!("Could not open rip folder {}: {error}", selected.display())
+        })?;
+        let already_in_library = std::iter::once(primary)
+            .chain(extras.iter().map(PathBuf::as_path))
+            .filter_map(|root| root.canonicalize().ok())
+            .any(|root| canonical_path_is_within_root(&target, &root));
+        if already_in_library {
+            None
+        } else {
+            extras.push(selected.to_path_buf());
+            Some(selected.to_path_buf())
+        }
+    } else {
+        None
+    };
+    // A missing import can return later. Keep its registration and favorites
+    // while refreshing the folders that are currently present.
+    extras.retain(|folder| added.as_ref() == Some(folder) || folder.try_exists().unwrap_or(true));
+    Ok((extras, added))
 }
 
 #[derive(Default)]
@@ -2097,18 +2162,33 @@ async fn detect_audio_cd() -> Result<CdDetectResult, String> {
 }
 
 #[tauri::command]
-async fn lookup_cd_metadata() -> Result<CdMetadataLookupResult, String> {
+async fn lookup_cd_metadata(
+    expected_disc_key: Option<String>,
+) -> Result<CdMetadataLookupResult, String> {
     #[cfg(any(target_os = "linux", target_os = "windows"))]
     {
-        let disc_info = tauri::async_runtime::spawn_blocking(read_musicbrainz_disc)
-            .await
-            .map_err(|error| format!("Could not read CD Disc ID: {error}"))??;
+        let disc_info = tauri::async_runtime::spawn_blocking(move || {
+            #[cfg(target_os = "linux")]
+            if expected_disc_key.is_some() {
+                let detection = run_cdparanoia_query()?;
+                verify_cd_identity(expected_disc_key.as_deref(), detection.disc_key.as_deref())?;
+            }
+            let disc = read_musicbrainz_disc()?;
+            #[cfg(target_os = "windows")]
+            verify_cd_identity(expected_disc_key.as_deref(), Some(&disc.id))?;
+            Ok::<_, String>(disc)
+        })
+        .await
+        .map_err(|error| format!("Could not read CD Disc ID: {error}"))??;
 
         return lookup_musicbrainz_disc(&disc_info).await;
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-    Err("Audio CD metadata lookup is unavailable on this platform.".to_owned())
+    {
+        let _ = expected_disc_key;
+        Err("Audio CD metadata lookup is unavailable on this platform.".to_owned())
+    }
 }
 
 #[tauri::command]
@@ -2127,12 +2207,13 @@ async fn inspect_cover_image(path: String) -> Result<CdCoverLookupResult, String
 async fn rip_cd_to_flac(
     output_folder: String,
     metadata: Option<CdRipMetadata>,
+    expected_disc_key: Option<String>,
     app: AppHandle,
 ) -> Result<CdRipResult, String> {
     #[cfg(any(target_os = "linux", target_os = "windows"))]
     {
         return tauri::async_runtime::spawn_blocking(move || {
-            rip_cd_to_flac_blocking(output_folder, metadata, app)
+            rip_cd_to_flac_blocking(output_folder, metadata, expected_disc_key, app)
         })
         .await
         .map_err(|error| format!("Could not rip audio CD: {error}"))?;
@@ -2140,7 +2221,7 @@ async fn rip_cd_to_flac(
 
     #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     {
-        let _ = (output_folder, metadata, app);
+        let _ = (output_folder, metadata, expected_disc_key, app);
         Err("Audio CD detection and ripping are unavailable on this platform.".to_owned())
     }
 }
@@ -2233,6 +2314,7 @@ unsafe fn c_string_from_ptr(value: *const c_char) -> Option<String> {
 
 async fn lookup_musicbrainz_disc(disc: &MusicBrainzDisc) -> Result<CdMetadataLookupResult, String> {
     let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(20))
         .user_agent(MUSICBRAINZ_USER_AGENT)
         .build()
         .map_err(|error| format!("Could not prepare MusicBrainz lookup: {error}"))?;
@@ -2463,6 +2545,7 @@ fn json_string(value: Option<&serde_json::Value>) -> Option<String> {
 
 async fn lookup_cover_art_archive(release_id: &str) -> Result<CdCoverLookupResult, String> {
     let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(20))
         .user_agent(MUSICBRAINZ_USER_AGENT)
         .build()
         .map_err(|error| format!("Could not prepare cover lookup: {error}"))?;
@@ -2637,6 +2720,7 @@ fn run_cdparanoia_query() -> Result<CdDetectResult, String> {
             return Ok(CdDetectResult {
                 drive_found: false,
                 disc_found: false,
+                disc_key: None,
                 tracks: Vec::new(),
                 raw_output: String::new(),
                 error: Some(
@@ -2648,6 +2732,7 @@ fn run_cdparanoia_query() -> Result<CdDetectResult, String> {
             return Ok(CdDetectResult {
                 drive_found: false,
                 disc_found: false,
+                disc_key: None,
                 tracks: Vec::new(),
                 raw_output: String::new(),
                 error: Some(format!("Could not run cdparanoia: {error}")),
@@ -2667,6 +2752,15 @@ fn parse_cdparanoia_query_output(output: Output) -> CdDetectResult {
         && !lower_output.contains("no cdrom")
         && !lower_output.contains("no such file or directory");
     let disc_found = !tracks.is_empty();
+    let disc_key = disc_found.then(|| {
+        let toc = raw_output
+            .lines()
+            .filter(|line| parse_cdparanoia_track_line(line).is_some())
+            .flat_map(str::split_whitespace)
+            .collect::<Vec<_>>()
+            .join(" ");
+        format!("{:016x}", stable_hash(&toc))
+    });
     let error = if disc_found {
         None
     } else {
@@ -2676,6 +2770,7 @@ fn parse_cdparanoia_query_output(output: Output) -> CdDetectResult {
     CdDetectResult {
         drive_found,
         disc_found,
+        disc_key,
         tracks,
         raw_output,
         error,
@@ -2747,6 +2842,7 @@ fn cdparanoia_query_error(lower_output: &str) -> Option<String> {
 fn rip_cd_to_flac_blocking(
     output_folder: String,
     metadata: Option<CdRipMetadata>,
+    expected_disc_key: Option<String>,
     app: AppHandle,
 ) -> Result<CdRipResult, String> {
     let output_root = PathBuf::from(output_folder);
@@ -2759,6 +2855,11 @@ fn rip_cd_to_flac_blocking(
 
     #[cfg(target_os = "windows")]
     let disc = cd_windows::AudioDisc::detect()?;
+    #[cfg(target_os = "windows")]
+    verify_cd_identity(
+        expected_disc_key.as_deref(),
+        Some(&disc.musicbrainz_disc().id),
+    )?;
     #[cfg(target_os = "windows")]
     let tracks = disc.rip_tracks();
     #[cfg(target_os = "windows")]
@@ -2774,6 +2875,7 @@ fn rip_cd_to_flac_blocking(
         ensure_command_available("flac", "flac is not installed. Install flac and try again.")?;
 
         let detection = run_cdparanoia_query()?;
+        verify_cd_identity(expected_disc_key.as_deref(), detection.disc_key.as_deref())?;
         if !detection.drive_found || !detection.disc_found {
             return Err(detection
                 .error
@@ -2915,6 +3017,14 @@ fn rip_cd_to_flac_blocking(
         output_folder: rip_folder_string,
         tracks: ripped_tracks,
     })
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+fn verify_cd_identity(expected: Option<&str>, actual: Option<&str>) -> Result<(), String> {
+    if expected.is_some() && expected != actual {
+        return Err("The audio CD changed. Detect the current disc before continuing.".to_owned());
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -3677,22 +3787,52 @@ fn emit_cd_rip_event(app: &AppHandle, event: &str, payload: CdRipEvent) {
 }
 
 impl LibraryDatabase {
-    fn open(path: PathBuf) -> Result<Self, String> {
+    fn open(path: PathBuf) -> Result<Self, LibraryOpenError> {
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|error| format!("Could not create app data directory: {error}"))?;
+            fs::create_dir_all(parent).map_err(LibraryOpenError::Directory)?;
         }
 
-        let connection = Connection::open(path)
-            .map_err(|error| format!("Could not open library cache: {error}"))?;
-        connection
-            .execute_batch("PRAGMA foreign_keys = ON;")
-            .map_err(|error| format!("Could not configure library cache: {error}"))?;
-        let mut database = Self { connection };
-        database
-            .migrate()
-            .map_err(|error| format!("Could not initialize library cache: {error}"))?;
+        Connection::open(path)
+            .and_then(Self::initialize)
+            .map_err(LibraryOpenError::Sqlite)
+    }
 
+    fn initialize(connection: Connection) -> rusqlite::Result<Self> {
+        connection.execute_batch("PRAGMA foreign_keys = ON;")?;
+        let mut database = Self {
+            connection,
+            recovery_notice: None,
+        };
+        database.migrate()?;
+        Ok(database)
+    }
+
+    fn open_startup(path: Result<PathBuf, String>) -> rusqlite::Result<Self> {
+        let problem = match path {
+            Ok(path) => match Self::open(path.clone()) {
+                Ok(database) => return Ok(database),
+                Err(error) => {
+                    let damaged = matches!(&error, LibraryOpenError::Sqlite(error)
+                        if matches!(error.sqlite_error_code(), Some(rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase)));
+                    if damaged {
+                        let recovery_path = path.with_file_name("library-recovered.sqlite3");
+                        if let Ok(mut database) = Self::open(recovery_path) {
+                            database.recovery_notice = Some(format!(
+                                "Cassette opened a separate recovery library. The damaged database is still at {}. Scan your music folder to rebuild the library.",
+                                path.display(),
+                            ));
+                            return Ok(database);
+                        }
+                    }
+                    format!("{error} ({})", path.display())
+                }
+            },
+            Err(error) => error,
+        };
+        let mut database = Connection::open_in_memory().and_then(Self::initialize)?;
+        database.recovery_notice = Some(format!(
+            "{problem}. Cassette is using a temporary library for this session. Restart to retry the saved library."
+        ));
         Ok(database)
     }
 
@@ -4023,6 +4163,7 @@ impl LibraryDatabase {
             last_scanned_at: self
                 .meta_value("last_scanned_at")?
                 .and_then(|value| value.parse::<i64>().ok()),
+            recovery_notice: self.recovery_notice.clone(),
         })
     }
 
@@ -4441,40 +4582,28 @@ impl LibraryDatabase {
         Ok(std::iter::once(primary).chain(extras).collect())
     }
 
-    fn plan_scan(
-        &self,
-        selected: &Path,
-        append: bool,
-    ) -> Result<(PathBuf, Vec<PathBuf>, Option<PathBuf>), String> {
+    fn scan_roots(&self, selected: &Path, append: bool) -> Result<(PathBuf, Vec<PathBuf>), String> {
         let current = self.meta_value("last_scanned_folder")?.map(PathBuf::from);
         let primary = if append {
             current.as_deref().unwrap_or(selected)
         } else {
             selected
         };
-        let mut extras = self.imported_library_folders(primary)?;
-        let added = if append && primary != selected {
-            let target = selected.canonicalize().map_err(|error| {
-                format!("Could not open rip folder {}: {error}", selected.display())
-            })?;
-            let already_in_library = std::iter::once(primary)
-                .chain(extras.iter().map(PathBuf::as_path))
-                .filter_map(|root| root.canonicalize().ok())
-                .any(|root| canonical_path_is_within_root(&target, &root));
-            if already_in_library {
-                None
-            } else {
-                extras.push(selected.to_path_buf());
-                Some(selected.to_path_buf())
-            }
-        } else {
-            None
-        };
-        // A missing import can return later. Keep its registration and favorites
-        // while refreshing the folders that are currently present.
-        extras
-            .retain(|folder| added.as_ref() == Some(folder) || folder.try_exists().unwrap_or(true));
-        Ok((primary.to_path_buf(), extras, added))
+        Ok((
+            primary.to_path_buf(),
+            self.imported_library_folders(primary)?,
+        ))
+    }
+
+    #[cfg(test)]
+    fn plan_scan(
+        &self,
+        selected: &Path,
+        append: bool,
+    ) -> Result<(PathBuf, Vec<PathBuf>, Option<PathBuf>), String> {
+        let (primary, extras) = self.scan_roots(selected, append)?;
+        let (extras, added) = plan_import_folders(selected, append, &primary, extras)?;
+        Ok((primary, extras, added))
     }
 
     #[cfg(test)]
@@ -4484,7 +4613,9 @@ impl LibraryDatabase {
         tracks: &mut [Track],
         scanned_at: i64,
     ) -> Result<(), String> {
-        self.replace_library_with_import(root_path, tracks, scanned_at, None)
+        let fingerprints =
+            portable_history::fingerprint_scan_history(self.history_paths_for_scan(tracks)?);
+        self.replace_library_with_import(root_path, tracks, scanned_at, None, &fingerprints)
     }
 
     fn replace_library_with_import(
@@ -4493,8 +4624,9 @@ impl LibraryDatabase {
         tracks: &mut [Track],
         scanned_at: i64,
         added_folder: Option<&Path>,
+        fingerprints: &HashMap<String, String>,
     ) -> Result<(), String> {
-        let removed_history = self.removed_history_references(tracks)?;
+        let removed_history = self.removed_history_references(tracks, fingerprints)?;
         let transaction = self
             .connection
             .transaction()
@@ -4584,7 +4716,7 @@ impl LibraryDatabase {
             [],
         ).map_err(|error| format!("Could not preserve favorite tracks: {error}"))?;
 
-        portable_history::restore_readded_history(&transaction, tracks)?;
+        portable_history::restore_readded_history(&transaction, tracks, fingerprints)?;
 
         upsert_meta(
             &transaction,
@@ -6948,6 +7080,18 @@ fn scan_directory(
         if file_type.is_dir() {
             scan_directory(&path, scanned_at, cover_art_dir, album_art_paths, tracks)?;
         } else if file_type.is_file() && is_supported_audio_file(&path) {
+            if let Some((original, kind)) = tag_sidecar(&path) {
+                if let (Some(original), "backup") = (original, kind) {
+                    let original_path = path.with_file_name(original);
+                    if !original_path.try_exists().map_err(scan_error)? {
+                        return Err(format!(
+                            "An earlier tag edit left the original track at {}. Restore it as {} and then rescan.",
+                            path.display(), original_path.display(),
+                        ));
+                    }
+                }
+                continue;
+            }
             if let Some((mut track, embedded_cover_art)) = track_from_path(path.clone(), scanned_at)
             {
                 let album_art_key = album_art_key_for_track(&track, &path);
@@ -8005,94 +8149,40 @@ fn rollback_prepared_album_tag_edit<F>(
 where
     F: FnMut(AlbumBatchStage) -> Result<(), String>,
 {
-    let failed_path = unique_sidecar_path(&item.path, "failed").map_err(|error| {
-        album_rollback_failure(
-            format!(
-                "Could not choose a recovery-copy path before restoring {}: {error}",
-                item.track.file_name
-            ),
-            &item.backup_path,
-            &item.path,
-        )
+    let failure = |message: String| album_rollback_failure(message, &item.backup_path, &item.path);
+    hook(AlbumBatchStage::BeforeRollback(index)).map_err(failure)?;
+    let recovery = unique_sidecar_path(&item.path, "failed").map_err(failure)?;
+    retain_tag_backup(&item.path, &recovery).map_err(|error| {
+        failure(format!(
+            "Could not retain the edited copy of {}: {error}",
+            item.track.file_name
+        ))
     })?;
-    fs::rename(&item.path, &failed_path).map_err(|error| {
-        album_rollback_failure(
-            format!(
-                "Could not preserve the edited file at {} before restoring {}: {error}",
-                failed_path.display(),
-                item.track.file_name,
-            ),
-            &item.backup_path,
-            &item.path,
-        )
-    })?;
-
-    if let Err(error) = hook(AlbumBatchStage::BeforeRollback(index)) {
-        let edited_restore = fs::rename(&failed_path, &item.path);
-        let recovery_path = if edited_restore.is_ok() {
-            &item.path
-        } else {
-            &failed_path
-        };
-        return Err(album_rollback_failure(
-            format!(
-                "Could not restore {}: {error}; edited-file preservation result: {}",
-                item.track.file_name,
-                edited_restore
-                    .err()
-                    .map(|error| error.to_string())
-                    .unwrap_or_else(|| "edited file returned to its original path".to_owned())
-            ),
-            &item.backup_path,
-            recovery_path,
-        ));
-    }
-
     if let Err(error) = fs::rename(&item.backup_path, &item.path) {
-        let edited_restore = fs::rename(&failed_path, &item.path);
-        let recovery_path = if edited_restore.is_ok() {
-            &item.path
+        return Err(if item.path.is_file() {
+            cleanup_file(&recovery);
+            failure(format!(
+                "Could not restore {}: {error}",
+                item.track.file_name
+            ))
         } else {
-            &failed_path
-        };
-        return Err(album_rollback_failure(
-            format!(
-                "Could not restore {} from {}: {error}; edited-file restore result: {}",
-                item.track.file_name,
-                item.backup_path.display(),
-                edited_restore
-                    .err()
-                    .map(|error| error.to_string())
-                    .unwrap_or_else(|| "edited file returned to its original path".to_owned())
-            ),
-            &item.backup_path,
-            recovery_path,
-        ));
+            album_rollback_failure(error.to_string(), &item.backup_path, &recovery)
+        });
     }
-
-    let restored_fingerprint = file_content_fingerprint(&item.path).map_err(|error| {
-        album_rollback_failure(
+    match file_content_fingerprint(&item.path) {
+        Ok(fingerprint) if fingerprint == item.original_fingerprint => {
+            cleanup_file(&recovery);
+            Ok(())
+        }
+        _ => Err(album_rollback_failure(
             format!(
-                "Could not verify restored bytes for {}: {error}",
+                "Could not verify restored bytes for {}.",
                 item.track.file_name
             ),
             &item.path,
-            &failed_path,
-        )
-    })?;
-    if restored_fingerprint != item.original_fingerprint {
-        return Err(album_rollback_failure(
-            format!(
-                "Restored bytes for {} could not be verified; both candidate files were preserved.",
-                item.track.file_name,
-            ),
-            &item.path,
-            &failed_path,
-        ));
+            &recovery,
+        )),
     }
-
-    cleanup_file(&failed_path);
-    Ok(())
 }
 
 fn album_tag_failure_result<F>(
@@ -8245,7 +8335,7 @@ where
                 ));
             }
         }
-        if let Err(error) = fs::rename(&item.path, &item.backup_path) {
+        if let Err(error) = retain_tag_backup(&item.path, &item.backup_path) {
             return Err(album_tag_failure_result(
                 prepared,
                 index,
@@ -8257,27 +8347,17 @@ where
             ));
         }
         if let Err(error) = fs::rename(&item.temp_path, &item.path) {
-            let restore = fs::rename(&item.backup_path, &item.path);
-            let (failure, current_recovery_required) = match restore {
-                Ok(()) => (
-                    format!("Could not install edited file; original was restored: {error}"),
-                    false,
-                ),
-                Err(restore_error) => (
-                    format!(
-                        "Could not install edited file and the original could not be restored: {error}; restore error: {restore_error}; backup remains at {}",
-                        item.backup_path.display()
-                    ),
-                    true,
-                ),
-            };
+            let original_available = item.path.is_file();
+            if original_available {
+                cleanup_file(&item.backup_path);
+            }
             return Err(album_tag_failure_result(
                 prepared,
                 index,
                 index,
-                failure,
+                format!("Could not install edited file: {error}"),
                 false,
-                current_recovery_required,
+                !original_available,
                 hook,
             ));
         }
@@ -8906,7 +8986,7 @@ where
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TagWriteStage {
     AfterTemporaryVerification,
-    AfterOriginalRenamed,
+    AfterBackupCreated,
     BeforeEditedFileBecomesFinal,
     DuringFinalVerification,
     BeforeBackupRestore,
@@ -9376,44 +9456,24 @@ fn replace_original_with_verified_temp<F>(
 where
     F: FnMut(TagWriteStage) -> Result<(), String>,
 {
-    if let Err(error) = fs::rename(original_path, backup_path) {
+    if let Err(error) = retain_tag_backup(original_path, backup_path) {
         cleanup_file(temp_path);
-        return Err(format!("Could not prepare safe replacement: {error}"));
+        return Err(format!("Could not create a retained backup: {error}"));
     }
 
-    if let Err(error) = hook(TagWriteStage::AfterOriginalRenamed) {
-        return restore_backup_before_replacement(
-            original_path,
-            temp_path,
-            backup_path,
-            error,
-            hook,
-        );
-    }
-
-    if let Err(error) = hook(TagWriteStage::BeforeEditedFileBecomesFinal) {
-        return restore_backup_before_replacement(
-            original_path,
-            temp_path,
-            backup_path,
-            error,
-            hook,
-        );
-    }
-
-    if let Err(error) = fs::rename(temp_path, original_path) {
-        let restore_result = restore_backup_rename(backup_path, original_path, hook);
-        if restore_result.is_ok() {
-            cleanup_file(temp_path);
+    let replacement = hook(TagWriteStage::AfterBackupCreated)
+        .and_then(|()| hook(TagWriteStage::BeforeEditedFileBecomesFinal))
+        .and_then(|()| fs::rename(temp_path, original_path).map_err(|error| error.to_string()));
+    if let Err(error) = replacement {
+        cleanup_file(temp_path);
+        if original_path.is_file() {
+            cleanup_file(backup_path);
+            return Err(format!("Could not replace the original file: {error}"));
         }
-        return match restore_result {
-            Ok(()) => Err(format!("Could not replace original file; original was restored: {error}")),
-            Err(restore_error) => Err(format!(
-                "Could not replace original file and automatic restore failed: {error}; restore error: {restore_error}; backup remains at {}; edited temporary file remains at {}",
-                backup_path.display(),
-                temp_path.display(),
-            )),
-        };
+        return Err(format!(
+            "Could not replace the original file: {error}. Backup remains at {}.",
+            backup_path.display()
+        ));
     }
 
     let final_verification = hook(TagWriteStage::DuringFinalVerification)
@@ -9430,31 +9490,6 @@ where
     cleanup_file(backup_path);
 
     Ok(())
-}
-
-fn restore_backup_before_replacement<F>(
-    original_path: &Path,
-    temp_path: &Path,
-    backup_path: &Path,
-    replacement_error: String,
-    hook: &mut F,
-) -> Result<(), String>
-where
-    F: FnMut(TagWriteStage) -> Result<(), String>,
-{
-    match restore_backup_rename(backup_path, original_path, hook) {
-        Ok(()) => {
-            cleanup_file(temp_path);
-            Err(format!(
-                "Safe replacement stopped; original was restored: {replacement_error}"
-            ))
-        }
-        Err(restore_error) => Err(format!(
-            "Safe replacement stopped and automatic restore failed: {replacement_error}; restore error: {restore_error}; backup remains at {}; edited temporary file remains at {}",
-            backup_path.display(),
-            temp_path.display(),
-        )),
-    }
 }
 
 fn restore_backup_rename<F>(
@@ -9477,62 +9512,61 @@ fn restore_backup_after_failed_replacement<F>(
 where
     F: FnMut(TagWriteStage) -> Result<(), String>,
 {
-    let failed_path = unique_sidecar_path(original_path, "failed")?;
-
-    fs::rename(original_path, &failed_path).map_err(|error| {
+    restore_backup_rename(backup_path, original_path, hook).map_err(|error| {
         format!(
-            "edited file remains at {}; backup remains at {}; could not move edited file aside: {error}",
+            "Backup remains at {}; edited file remains at {}: {error}",
+            backup_path.display(),
             original_path.display(),
-            backup_path.display()
         )
-    })?;
+    })
+}
 
-    if let Err(error) = restore_backup_rename(backup_path, original_path, hook) {
-        let restore_edited_result = fs::rename(&failed_path, original_path);
-        return match restore_edited_result {
-            Ok(()) => Err(format!(
-                "backup remains at {}; edited file was put back at {}; restore error: {error}",
-                backup_path.display(),
-                original_path.display()
-            )),
-            Err(edited_restore_error) => Err(format!(
-                "backup remains at {}; edited file remains at {}; restore error: {error}; edited file restore error: {edited_restore_error}",
-                backup_path.display(),
-                failed_path.display()
-            )),
-        };
+fn retain_tag_backup(original_path: &Path, backup_path: &Path) -> io::Result<()> {
+    // Keep the original path intact until a single replacement of the directory entry.
+    if fs::hard_link(original_path, backup_path).is_ok() {
+        return Ok(());
     }
 
-    cleanup_file(&failed_path);
-
-    Ok(())
+    let mut original = fs::File::open(original_path)?;
+    let permissions = original.metadata()?.permissions();
+    let mut backup = fs::File::create_new(backup_path)?;
+    let result = io::copy(&mut original, &mut backup)
+        .and_then(|_| backup.set_permissions(permissions))
+        .and_then(|()| backup.sync_all());
+    drop(backup);
+    if result.is_err() {
+        cleanup_file(backup_path);
+    }
+    result
 }
 
 fn unique_sidecar_path(original_path: &Path, kind: &str) -> Result<PathBuf, String> {
     let parent = original_path
         .parent()
         .ok_or_else(|| "Selected track has no parent folder.".to_owned())?;
-    let file_name = original_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| "Selected track filename is invalid.".to_owned())?;
     let extension = original_path
         .extension()
         .and_then(|extension| extension.to_str())
         .unwrap_or("audio");
-    let nonce = unique_timestamp_nanos();
+    let id = uuid::Uuid::new_v4();
+    Ok(parent.join(format!(".cassette-tag-{id}.{kind}.{extension}")))
+}
 
-    for attempt in 0..1000 {
-        let candidate = parent.join(format!(
-            ".{file_name}.cassette-{nonce}-{attempt}.{kind}.{extension}"
-        ));
-
-        if !candidate.exists() {
-            return Ok(candidate);
-        }
+fn tag_sidecar(path: &Path) -> Option<(Option<&str>, &str)> {
+    let name = path.file_name()?.to_str()?;
+    let (stem, _) = name.rsplit_once('.')?;
+    let (id, kind) = stem.rsplit_once('.')?;
+    if !matches!(kind, "tmp" | "backup" | "failed") {
+        return None;
     }
-
-    Err("Could not allocate a safe temporary filename.".to_owned())
+    if let Some(uuid) = id.strip_prefix(".cassette-tag-") {
+        return uuid::Uuid::parse_str(uuid).ok().map(|_| (None, kind));
+    }
+    let (original, nonce) = id.strip_prefix('.')?.rsplit_once(".cassette-")?;
+    let (time, attempt) = nonce.split_once('-')?;
+    time.parse::<u128>().ok()?;
+    attempt.parse::<u32>().ok()?;
+    Some((Some(original), kind))
 }
 
 fn cleanup_file(path: &Path) {
@@ -10526,7 +10560,13 @@ mod play_history_tests {
         let mut tracks =
             scan_audio_directory_roots([main.as_path(), extra.as_path()], 20, None).unwrap();
         database
-            .replace_library_with_import(&primary, &mut tracks, 20, added.as_deref())
+            .replace_library_with_import(
+                &primary,
+                &mut tracks,
+                20,
+                added.as_deref(),
+                &HashMap::new(),
+            )
             .unwrap();
         assert_eq!(database.load_cache().unwrap().tracks.len(), 2);
         drop(database);
@@ -10571,6 +10611,80 @@ mod play_history_tests {
                 tracks[0].id.clone()
             ]
         );
+    }
+
+    #[test]
+    fn corrupted_library_opens_a_separate_cache_and_preserves_original_bytes() {
+        let fixture = TestLibrary::new("corrupt-startup");
+        let invalid = b"This is not a SQLite database";
+        fs::write(&fixture.database_path, invalid).unwrap();
+        let mut recovered =
+            LibraryDatabase::open_startup(Ok(fixture.database_path.clone())).unwrap();
+        let cache = recovered.load_cache().unwrap();
+        assert!(cache
+            .recovery_notice
+            .unwrap()
+            .contains("separate recovery library"));
+        assert!(cache.tracks.is_empty());
+        assert_eq!(fs::read(&fixture.database_path).unwrap(), invalid);
+
+        seed_tracks(
+            &mut recovered,
+            &mut [test_track("/synthetic-music/recovered.flac")],
+        );
+        drop(recovered);
+        let reopened = LibraryDatabase::open_startup(Ok(fixture.database_path.clone())).unwrap();
+        assert_eq!(reopened.load_cache().unwrap().tracks.len(), 1);
+        assert_eq!(fs::read(&fixture.database_path).unwrap(), invalid);
+    }
+
+    #[test]
+    fn missing_data_folder_uses_a_temporary_library_with_notice() {
+        let database =
+            LibraryDatabase::open_startup(Err("Data folder is unavailable".into())).unwrap();
+        let notice = database.load_cache().unwrap().recovery_notice.unwrap();
+        assert!(notice.contains("temporary library"));
+    }
+
+    #[test]
+    fn tag_replacement_keeps_long_original_name_until_ready_and_scan_ignores_copies() {
+        let fixture = TestLibrary::new("tag-crash-window");
+        let original = fixture.directory.join(format!("{}.flac", "A".repeat(233)));
+        let staged = unique_sidecar_path(&original, "tmp").unwrap();
+        let backup = unique_sidecar_path(&original, "backup").unwrap();
+        fs::write(&original, b"original audio fixture").unwrap();
+        fs::write(&staged, b"edited audio fixture").unwrap();
+        retain_tag_backup(&original, &backup).unwrap();
+
+        assert_eq!(fs::read(&original).unwrap(), b"original audio fixture");
+        assert_eq!(fs::read(&backup).unwrap(), b"original audio fixture");
+        let tracks = scan_audio_directory_root(&fixture.directory, 1, None).unwrap();
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(Path::new(&tracks[0].file_path), original);
+
+        fs::rename(&staged, &original).unwrap();
+        assert_eq!(fs::read(&original).unwrap(), b"edited audio fixture");
+        assert_eq!(fs::read(&backup).unwrap(), b"original audio fixture");
+    }
+
+    #[test]
+    fn scanner_reports_legacy_orphan_backup_without_indexing_it() {
+        let fixture = TestLibrary::new("legacy-tag-recovery");
+        let backup = fixture
+            .directory
+            .join(".Song.flac.cassette-1234-0.backup.flac");
+        fs::write(&backup, b"retained original").unwrap();
+        let error = scan_audio_directory_root(&fixture.directory, 1, None).unwrap_err();
+        assert!(error.contains("Restore it as"));
+        assert_eq!(fs::read(backup).unwrap(), b"retained original");
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[test]
+    fn rip_rejects_a_different_disc_before_writing_tracks() {
+        assert!(verify_cd_identity(Some("first"), Some("second")).is_err());
+        assert!(verify_cd_identity(Some("first"), None).is_err());
+        assert!(verify_cd_identity(Some("first"), Some("first")).is_ok());
     }
 
     fn event_count(database: &LibraryDatabase) -> i64 {
@@ -11358,7 +11472,7 @@ mod tag_editor_tests {
     fn replacement_failpoints_restore_original_and_clean_sidecars() {
         for stage in [
             TagWriteStage::AfterTemporaryVerification,
-            TagWriteStage::AfterOriginalRenamed,
+            TagWriteStage::AfterBackupCreated,
             TagWriteStage::BeforeEditedFileBecomesFinal,
             TagWriteStage::DuringFinalVerification,
         ] {
@@ -11398,7 +11512,7 @@ mod tag_editor_tests {
         let mut hook = |stage| {
             if matches!(
                 stage,
-                TagWriteStage::BeforeEditedFileBecomesFinal | TagWriteStage::BeforeBackupRestore
+                TagWriteStage::DuringFinalVerification | TagWriteStage::BeforeBackupRestore
             ) {
                 Err(format!("simulated {stage:?}"))
             } else {
@@ -11409,30 +11523,19 @@ mod tag_editor_tests {
         let error = safe_update_track_tags_with_hook(&test_file.path, &request, &mut hook)
             .expect_err("simulated restoration failure must be returned");
         assert!(error.contains("automatic restore failed"));
-        assert!(!test_file.path.exists());
+        assert_eq!(values_for(&test_file.path).title, request.title);
         let sidecars = test_file.sidecars();
-        assert_eq!(
-            sidecars.len(),
-            2,
-            "backup and edited temporary copy must survive"
-        );
+        assert_eq!(sidecars.len(), 1, "the original backup must survive");
         let backup = sidecars
             .iter()
             .find(|path| path.to_string_lossy().contains(".backup.flac"))
             .expect("preserved backup")
             .clone();
-        let edited_temp = sidecars
-            .iter()
-            .find(|path| path.to_string_lossy().contains(".tmp.flac"))
-            .expect("preserved edited temporary copy")
-            .clone();
         assert_eq!(fs::read(&backup).expect("read preserved backup"), original);
-        assert_eq!(values_for(&edited_temp).title, request.title);
         assert_decodable(&backup);
-        assert_decodable(&edited_temp);
+        assert_decodable(&test_file.path);
 
         fs::rename(&backup, &test_file.path).expect("manually recover original from backup");
-        fs::remove_file(&edited_temp).expect("remove disposable edited recovery candidate");
         assert_eq!(
             fs::read(&test_file.path).expect("read manually restored file"),
             original
@@ -13146,7 +13249,7 @@ mod platform_path_tests {
             .file_name()
             .and_then(|name| name.to_str())
             .is_some_and(|name| {
-                name.starts_with(".Música 東京.flac.cassette-") && name.ends_with(".tmp.flac")
+                name.starts_with(".cassette-tag-") && name.ends_with(".tmp.flac")
             }));
     }
 }
@@ -13164,11 +13267,9 @@ pub fn run() {
             let db_path = app
                 .path()
                 .app_data_dir()
-                .map_err(|error| {
-                    io::Error::other(format!("Could not resolve app data dir: {error}"))
-                })?
-                .join("library.sqlite3");
-            let library = LibraryDatabase::open(db_path).map_err(io::Error::other)?;
+                .map(|path| path.join("library.sqlite3"))
+                .map_err(|error| format!("Could not find the library data folder: {error}"));
+            let library = LibraryDatabase::open_startup(db_path).map_err(io::Error::other)?;
             let media_controls = MediaControls::new(app.handle().clone());
 
             app.manage(Mutex::new(library));

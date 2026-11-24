@@ -225,10 +225,8 @@ pub(crate) fn get_listening_stats(
 mod tests {
     use super::*;
     fn database() -> LibraryDatabase {
-        let mut database = LibraryDatabase {
-            connection: rusqlite::Connection::open_in_memory().unwrap(),
-        };
-        database.migrate().unwrap();
+        let database =
+            LibraryDatabase::initialize(rusqlite::Connection::open_in_memory().unwrap()).unwrap();
         database.connection.execute_batch(
             "INSERT INTO tracks (id, title, file_path, file_name, extension, scanned_at, play_count) \
              VALUES ('a', 'A', '/isolated/a.wav', 'a.wav', 'wav', 1, 9), \

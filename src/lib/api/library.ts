@@ -284,8 +284,8 @@ export async function detectAudioCd(): Promise<CdDetectResult> {
   return invoke<CdDetectResult>("detect_audio_cd");
 }
 
-export async function lookupCdMetadata(): Promise<CdMetadataLookupResult> {
-  return invoke<CdMetadataLookupResult>("lookup_cd_metadata");
+export async function lookupCdMetadata(expectedDiscKey: string | null): Promise<CdMetadataLookupResult> {
+  return invoke<CdMetadataLookupResult>("lookup_cd_metadata", { expectedDiscKey });
 }
 
 export async function lookupCdCover(releaseId: string): Promise<CdCoverLookupResult> {
@@ -296,6 +296,6 @@ export async function inspectCoverImage(path: string): Promise<CdCoverLookupResu
   return invoke<CdCoverLookupResult>("inspect_cover_image", { path });
 }
 
-export async function ripCdToFlac(outputFolder: string, metadata: CdRipMetadata | null): Promise<CdRipResult> {
-  return invoke<CdRipResult>("rip_cd_to_flac", { outputFolder, metadata });
+export async function ripCdToFlac(outputFolder: string, metadata: CdRipMetadata | null, expectedDiscKey: string | null): Promise<CdRipResult> {
+  return invoke<CdRipResult>("rip_cd_to_flac", { outputFolder, metadata, expectedDiscKey });
 }
