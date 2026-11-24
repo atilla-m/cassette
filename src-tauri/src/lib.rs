@@ -12661,6 +12661,7 @@ mod tag_editor_tests {
             .build()
             .expect("create synthetic playbin");
         let sink = gst::ElementFactory::make("fakesink")
+            .property("sync", true)
             .build()
             .expect("create test-only audio sink");
         playbin.set_property("audio-sink", &sink);
