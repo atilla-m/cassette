@@ -3827,7 +3827,7 @@ impl LibraryDatabase {
                         let damaged = matches!(&error, LibraryOpenError::Sqlite(error)
                         if matches!(error.sqlite_error_code(), Some(rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase)));
                         if damaged && !use_recovery {
-                        if let Ok(mut database) = Self::open(recovery_path.clone()) {
+                            if let Ok(mut database) = Self::open(recovery_path.clone()) {
                                 database.recovery_notice = Some(format!(
                                 "Cassette opened a separate recovery library. The damaged database is still at {}. Scan your music folder to rebuild the library.",
                                 path.display(),
