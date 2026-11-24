@@ -3809,24 +3809,36 @@ impl LibraryDatabase {
 
     fn open_startup(path: Result<PathBuf, String>) -> rusqlite::Result<Self> {
         let problem = match path {
-            Ok(path) => match Self::open(path.clone()) {
-                Ok(database) => return Ok(database),
-                Err(error) => {
-                    let damaged = matches!(&error, LibraryOpenError::Sqlite(error)
+            Ok(path) => {
+                let recovery_path = path.with_file_name("library-recovered.sqlite3");
+                let use_recovery =
+                    matches!(path.try_exists(), Ok(false)) && recovery_path.is_file();
+                let active_path = if use_recovery { &recovery_path } else { &path };
+                match Self::open(active_path.clone()) {
+                    Ok(mut database) if use_recovery => {
+                        database.recovery_notice = Some(format!(
+                            "Cassette is using the saved recovery library at {}.",
+                            recovery_path.display()
+                        ));
+                        return Ok(database);
+                    }
+                    Ok(database) => return Ok(database),
+                    Err(error) => {
+                        let damaged = matches!(&error, LibraryOpenError::Sqlite(error)
                         if matches!(error.sqlite_error_code(), Some(rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase)));
-                    if damaged {
-                        let recovery_path = path.with_file_name("library-recovered.sqlite3");
-                        if let Ok(mut database) = Self::open(recovery_path) {
-                            database.recovery_notice = Some(format!(
+                        if damaged && !use_recovery {
+                        if let Ok(mut database) = Self::open(recovery_path.clone()) {
+                                database.recovery_notice = Some(format!(
                                 "Cassette opened a separate recovery library. The damaged database is still at {}. Scan your music folder to rebuild the library.",
                                 path.display(),
                             ));
-                            return Ok(database);
+                                return Ok(database);
+                            }
                         }
+                        format!("{error} ({})", active_path.display())
                     }
-                    format!("{error} ({})", path.display())
                 }
-            },
+            }
             Err(error) => error,
         };
         let mut database = Connection::open_in_memory().and_then(Self::initialize)?;
@@ -10636,6 +10648,12 @@ mod play_history_tests {
         let reopened = LibraryDatabase::open_startup(Ok(fixture.database_path.clone())).unwrap();
         assert_eq!(reopened.load_cache().unwrap().tracks.len(), 1);
         assert_eq!(fs::read(&fixture.database_path).unwrap(), invalid);
+        drop(reopened);
+
+        fs::remove_file(&fixture.database_path).unwrap();
+        let reopened = LibraryDatabase::open_startup(Ok(fixture.database_path.clone())).unwrap();
+        assert_eq!(reopened.load_cache().unwrap().tracks.len(), 1);
+        assert!(!fixture.database_path.exists());
     }
 
     #[test]

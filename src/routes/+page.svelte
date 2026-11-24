@@ -5483,18 +5483,23 @@
   }
 
   async function performPlaybackSeek(request: PlaybackSeekRequest) {
+    const startId = playbackStartId;
+    const controlRevision = playbackControlRevision;
     try {
       const status = await seekPlayback(request.positionSeconds, request.contextKey);
-      lastConfirmedPlaybackPositionSeconds = request.positionSeconds;
       const shouldApply = playbackSeekCoordinator.complete(request);
-
-      if (!shouldApply || currentTrack?.filePath !== request.contextKey || status.filePath !== request.contextKey) {
+      if (startId !== playbackStartId || currentTrack?.filePath !== request.contextKey || status.filePath !== request.contextKey) {
         return;
       }
+      lastConfirmedPlaybackPositionSeconds = request.positionSeconds;
+      if (!shouldApply) return;
 
-      applyPlaybackStatus(status, { positionOverride: request.positionSeconds });
-      await maybeRecordTrackPlay();
+      applyPlaybackStatus(status, {
+        positionOverride: request.positionSeconds,
+        applyTransport: controlRevision === playbackControlRevision && !isChangingPlayback,
+      });
       hasCurrentTrackEnded = false;
+      await maybeRecordTrackPlay();
     } catch (error) {
       await recoverFromFailedPlaybackSeek(request, error);
     }
@@ -5502,6 +5507,7 @@
 
   async function recoverFromFailedPlaybackSeek(request: PlaybackSeekRequest, seekError: unknown) {
     let recoveredStatus: PlaybackStatus | null = null;
+    const controlRevision = playbackControlRevision;
 
     try {
       const status = await getPlaybackStatus();
@@ -5526,7 +5532,10 @@
     );
 
     if (recoveredStatus) {
-      applyPlaybackStatus(recoveredStatus, { positionOverride: recoveryPositionSeconds });
+      applyPlaybackStatus(recoveredStatus, {
+        positionOverride: recoveryPositionSeconds,
+        applyTransport: controlRevision === playbackControlRevision && !isChangingPlayback,
+      });
     } else {
       positionSeconds = recoveryPositionSeconds;
     }
@@ -5552,10 +5561,13 @@
 
   function applyPlaybackStatus(
     status: PlaybackStatus,
-    options: { applyPosition?: boolean; positionOverride?: number } = {},
+    options: { applyPosition?: boolean; positionOverride?: number; applyTransport?: boolean } = {},
   ) {
-    updatePlaybackListenClock(status.isPlaying);
-    isPlaying = status.isPlaying;
+    if (options.applyTransport !== false) {
+      updatePlaybackListenClock(status.isPlaying);
+      isPlaying = status.isPlaying;
+      if (status.isPlaying) hasCurrentTrackEnded = false;
+    }
 
     if (options.applyPosition !== false) {
       const nextPositionSeconds = options.positionOverride ?? status.positionSeconds;
@@ -5566,9 +5578,6 @@
     durationSeconds = status.durationSeconds ?? currentTrack?.durationSeconds ?? null;
     if (!isSettingVolume) volume = status.volume;
 
-    if (status.isPlaying) {
-      hasCurrentTrackEnded = false;
-    }
   }
 
   function shouldIgnoreShortcut(target: EventTarget | null) {
