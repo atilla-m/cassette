@@ -1404,10 +1404,7 @@ async fn detect_dvd() -> Result<DvdDetectResult, String> {
     }
 
     #[cfg(not(target_os = "linux"))]
-    Err(
-        "DVD detection and import are available only on Linux in Cassette 0.1.0-beta.6."
-            .to_owned(),
-    )
+    Err("DVD detection and import are available only on Linux in Cassette 0.1.0-beta.6.".to_owned())
 }
 
 #[tauri::command]
