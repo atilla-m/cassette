@@ -1351,60 +1351,63 @@ async fn import_dvd_title(
 #[tauri::command]
 async fn scan_library(
     root: String,
+    append: Option<bool>,
     app: AppHandle,
-    library: State<'_, Mutex<LibraryDatabase>>,
 ) -> Result<Vec<Track>, String> {
-    let root_path = PathBuf::from(root);
-
-    if !root_path.exists() {
-        return Err("Selected folder does not exist.".into());
-    }
-
-    if !root_path.is_dir() {
-        return Err("Selected path is not a folder.".into());
-    }
-
-    let cover_art_dir = app
-        .path()
-        .app_data_dir()
-        .ok()
-        .map(|path| path.join("cover-art"));
-    let scanned_at = unix_timestamp();
-    let scan_root = root_path.clone();
-    let mut tracks = tauri::async_runtime::spawn_blocking(move || {
-        scan_audio_directory_root(&scan_root, scanned_at, cover_art_dir.as_deref())
+    tauri::async_runtime::spawn_blocking(move || {
+        let scan_lock = app.state::<LibraryScanLock>();
+        let _scan = scan_lock
+            .0
+            .lock()
+            .map_err(|_| "Library scanning is unavailable.")?;
+        let library = app.state::<Mutex<LibraryDatabase>>();
+        let selected = PathBuf::from(root);
+        let (primary, extras, added) = library
+            .lock()
+            .map_err(|_| "Library cache is unavailable.")?
+            .plan_scan(&selected, append.unwrap_or(false))?;
+        let cover_art_dir = app
+            .path()
+            .app_data_dir()
+            .ok()
+            .map(|path| path.join("cover-art"));
+        let scanned_at = unix_timestamp();
+        let mut tracks = scan_audio_directory_roots(
+            std::iter::once(primary.as_path()).chain(extras.iter().map(PathBuf::as_path)),
+            scanned_at,
+            cover_art_dir.as_deref(),
+        )?;
+        library
+            .lock()
+            .map_err(|_| "Library cache is unavailable.")?
+            .replace_library_with_import(&primary, &mut tracks, scanned_at, added.as_deref())?;
+        Ok(tracks)
     })
     .await
-    .map_err(|error| format!("Could not scan library: {error}"))??;
-
-    let mut library = library
-        .lock()
-        .map_err(|_| "Library cache is unavailable.".to_owned())?;
-    library.replace_library(&root_path, &mut tracks, scanned_at)?;
-
-    Ok(tracks)
+    .map_err(|error| format!("Could not scan library: {error}"))?
 }
+
+#[derive(Default)]
+struct LibraryScanLock(Mutex<()>);
 
 #[tauri::command]
 fn get_track_tag_editor_data(
     track_id: String,
     library: State<'_, Mutex<LibraryDatabase>>,
 ) -> Result<TrackTagEditorData, String> {
-    let (track, root_path, genre_assignments) = {
+    let (track, roots, genre_assignments) = {
         let library = library
             .lock()
             .map_err(|_| "Library cache is unavailable.".to_owned())?;
         let track = library
             .track_by_id(&track_id)?
             .ok_or_else(|| "Track is not in the library cache.".to_owned())?;
-        let root_path = library
-            .meta_value("last_scanned_folder")?
-            .ok_or_else(|| "No active library folder is configured.".to_owned())?;
+        let roots = library.active_library_roots()?;
         let genre_assignments = library.genre_assignments()?;
 
-        (track, PathBuf::from(root_path), genre_assignments)
+        (track, roots, genre_assignments)
     };
-    let target_path = validated_cached_track_path(&track, &root_path)?;
+    let target_path = validated_cached_track_path(&track, &roots)?;
     let tagged_file = read_tagged_file(&target_path)?;
     let file_values = track_tag_values_from_file(&tagged_file);
     let assessment = tag_editing_assessment(&target_path, &tagged_file);
@@ -1426,17 +1429,15 @@ fn get_album_tag_editor_data(
     album_id: String,
     library: State<'_, Mutex<LibraryDatabase>>,
 ) -> Result<AlbumTagEditorData, String> {
-    let (tracks, root_path, genre_assignments) = {
+    let (tracks, roots, genre_assignments) = {
         let library = library
             .lock()
             .map_err(|_| "Library cache is unavailable.".to_owned())?;
         let tracks = cached_album_tracks(&library, &album_id)?;
-        let root_path = library
-            .meta_value("last_scanned_folder")?
-            .ok_or_else(|| "No active library folder is configured.".to_owned())?;
+        let roots = library.active_library_roots()?;
         let genre_assignments = library.genre_assignments()?;
 
-        (tracks, PathBuf::from(root_path), genre_assignments)
+        (tracks, roots, genre_assignments)
     };
 
     let mut editor_tracks = Vec::with_capacity(tracks.len());
@@ -1444,7 +1445,7 @@ fn get_album_tag_editor_data(
     let mut preflight_errors = Vec::new();
 
     for track in tracks {
-        let inspection = validated_cached_track_path(&track, &root_path).and_then(|path| {
+        let inspection = validated_cached_track_path(&track, &roots).and_then(|path| {
             let tagged_file = read_tagged_file(&path)?;
             let assessment = tag_editing_assessment(&path, &tagged_file);
             Ok((assessment, track_tag_values_from_file(&tagged_file)))
@@ -1507,18 +1508,31 @@ fn get_album_tag_editor_data(
 }
 
 #[tauri::command]
-fn update_album_tags(
+async fn update_album_tags(
     request: UpdateAlbumTagsRequest,
     app: AppHandle,
-    library: State<'_, Mutex<LibraryDatabase>>,
-    playback: State<'_, Mutex<PlaybackState>>,
-    media_controls: State<'_, MediaControls>,
-    tag_writes: State<'_, Mutex<TagWriteState>>,
 ) -> Result<AlbumTagUpdateResult, String> {
+    tauri::async_runtime::spawn_blocking(move || update_album_tags_blocking(request, &app))
+        .await
+        .map_err(|error| format!("Could not update album tags: {error}"))?
+}
+
+fn update_album_tags_blocking(
+    request: UpdateAlbumTagsRequest,
+    app: &AppHandle,
+) -> Result<AlbumTagUpdateResult, String> {
+    let scan_lock = app.state::<LibraryScanLock>();
+    let _scan = scan_lock
+        .0
+        .lock()
+        .map_err(|_| "Library scanning is unavailable.")?;
+    let library = app.state::<Mutex<LibraryDatabase>>();
+    let playback = app.state::<Mutex<PlaybackState>>();
+    let tag_writes = app.state::<Mutex<TagWriteState>>();
     #[cfg(target_os = "windows")]
     let mut released_playback = None;
     let mut progress = |phase: &str, completed: usize, total: usize, file_name: Option<String>| {
-        emit_album_tag_progress(&app, phase, completed, total, file_name);
+        emit_album_tag_progress(app, phase, completed, total, file_name);
     };
     let mut hook = |stage| {
         #[cfg(target_os = "windows")]
@@ -1567,57 +1581,51 @@ fn update_album_tags(
         );
     }
 
-    if !result.updated_tracks.is_empty() {
-        let current_status = playback.lock().ok().map(|playback| playback.status());
-        if let Some(current_path) = current_status
-            .as_ref()
-            .and_then(|status| status.file_path.as_deref())
-        {
-            if let Some(updated_track) = result
-                .updated_tracks
-                .iter()
-                .find(|track| track.file_path == current_path)
-            {
-                media_controls.update_track(
-                    Some(MediaTrack::from(updated_track)),
-                    current_status
-                        .map(|status| status.is_playing)
-                        .unwrap_or(false),
-                );
-            }
-        }
-    }
+    refresh_media_control_tags(app, &result.updated_tracks);
 
     Ok(result)
 }
 
 #[tauri::command]
-fn update_track_tags(
+async fn update_track_tags(
     request: UpdateTrackTagsRequest,
     changed_fields: Vec<String>,
     app: AppHandle,
-    library: State<'_, Mutex<LibraryDatabase>>,
-    playback: State<'_, Mutex<PlaybackState>>,
-    media_controls: State<'_, MediaControls>,
-    tag_writes: State<'_, Mutex<TagWriteState>>,
 ) -> Result<Track, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        update_track_tags_blocking(request, changed_fields, &app)
+    })
+    .await
+    .map_err(|error| format!("Could not update track tags: {error}"))?
+}
+
+fn update_track_tags_blocking(
+    request: UpdateTrackTagsRequest,
+    changed_fields: Vec<String>,
+    app: &AppHandle,
+) -> Result<Track, String> {
+    let scan_lock = app.state::<LibraryScanLock>();
+    let _scan = scan_lock
+        .0
+        .lock()
+        .map_err(|_| "Library scanning is unavailable.")?;
+    let library = app.state::<Mutex<LibraryDatabase>>();
+    #[cfg(target_os = "windows")]
+    let playback = app.state::<Mutex<PlaybackState>>();
+    let tag_writes = app.state::<Mutex<TagWriteState>>();
     validate_update_track_tags_request(&request)?;
     let mask = tag_field_mask_from_names(&changed_fields)?;
 
-    let (cached_track, root_path) = {
+    let (cached_track, roots) = {
         let library = library
             .lock()
             .map_err(|_| "Library cache is unavailable.".to_owned())?;
         let track = library
             .track_by_id(&request.track_id)?
             .ok_or_else(|| "Track is not in the library cache.".to_owned())?;
-        let root_path = library
-            .meta_value("last_scanned_folder")?
-            .ok_or_else(|| "No active library folder is configured.".to_owned())?;
-
-        (track, PathBuf::from(root_path))
+        (track, library.active_library_roots()?)
     };
-    let target_path = validated_cached_track_path(&cached_track, &root_path)?;
+    let target_path = validated_cached_track_path(&cached_track, &roots)?;
     validate_album_target_preflight(&cached_track, &target_path)?;
     let canonical_key = target_path.to_string_lossy().into_owned();
     let _write_guard = TagWriteGuard::new(&tag_writes, canonical_key)?;
@@ -1671,19 +1679,7 @@ fn update_track_tags(
         library.update_cached_track(&mut updated_track)?;
     }
 
-    let current_status = playback.lock().ok().map(|playback| playback.status());
-    if current_status
-        .as_ref()
-        .and_then(|status| status.file_path.as_deref())
-        == Some(updated_track.file_path.as_str())
-    {
-        media_controls.update_track(
-            Some(MediaTrack::from(&updated_track)),
-            current_status
-                .map(|status| status.is_playing)
-                .unwrap_or(false),
-        );
-    }
+    refresh_media_control_tags(app, std::slice::from_ref(&updated_track));
 
     if let Err(error) = restoration {
         return Err(format!(
@@ -1691,6 +1687,34 @@ fn update_track_tags(
         ));
     }
     Ok(updated_track)
+}
+
+fn refresh_media_control_tags(app: &AppHandle, updated_tracks: &[Track]) {
+    let playback = app.state::<Mutex<PlaybackState>>();
+    let Ok(playback) = playback.lock() else {
+        return;
+    };
+    let Some(track) = updated_tracks
+        .iter()
+        .find(|track| playback.current_path.as_deref() == Some(track.file_path.as_str()))
+    else {
+        return;
+    };
+    let track_path = track.file_path.clone();
+    let media_track = MediaTrack::from(track);
+    drop(playback);
+    let app_for_update = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        let playback = app_for_update.state::<Mutex<PlaybackState>>();
+        let Ok(playback) = playback.try_lock() else {
+            return;
+        };
+        if playback.current_path.as_deref() == Some(track_path.as_str()) {
+            app_for_update
+                .state::<MediaControls>()
+                .update_track(Some(media_track), playback.is_playing);
+        }
+    });
 }
 
 #[tauri::command]
@@ -3705,6 +3729,16 @@ impl LibraryDatabase {
                 value TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS library_import_folders (
+                library_root TEXT NOT NULL,
+                folder TEXT NOT NULL,
+                PRIMARY KEY (library_root, folder)
+            );
+
+            CREATE TABLE IF NOT EXISTS track_favorites (
+                track_id TEXT PRIMARY KEY NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS genre_assignments (
                 scope TEXT NOT NULL,
                 entity_key TEXT NOT NULL,
@@ -3784,6 +3818,10 @@ impl LibraryDatabase {
                 [],
             )?;
         }
+        self.connection.execute(
+            "INSERT OR IGNORE INTO track_favorites (track_id) SELECT id FROM tracks WHERE is_favorite = 1",
+            [],
+        )?;
 
         if !self.has_column("tracks", "genres")? {
             self.connection.execute(
@@ -4377,11 +4415,84 @@ impl LibraryDatabase {
             .ok_or_else(|| "Video is not in the library.".to_owned())
     }
 
+    fn imported_library_folders(&self, root: &Path) -> Result<Vec<PathBuf>, String> {
+        let mut query = self
+            .connection
+            .prepare(
+                "SELECT folder FROM library_import_folders WHERE library_root = ?1 ORDER BY folder",
+            )
+            .map_err(|error| format!("Could not read imported library folders: {error}"))?;
+        let folders = query
+            .query_map([root.to_string_lossy().as_ref()], |row| {
+                row.get::<_, String>(0).map(PathBuf::from)
+            })
+            .map_err(|error| format!("Could not read imported library folders: {error}"))?;
+        folders
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|error| format!("Could not read imported library folders: {error}"))
+    }
+
+    fn active_library_roots(&self) -> Result<Vec<PathBuf>, String> {
+        let primary = self
+            .meta_value("last_scanned_folder")?
+            .map(PathBuf::from)
+            .ok_or_else(|| "No active library folder is configured.".to_owned())?;
+        let extras = self.imported_library_folders(&primary)?;
+        Ok(std::iter::once(primary).chain(extras).collect())
+    }
+
+    fn plan_scan(
+        &self,
+        selected: &Path,
+        append: bool,
+    ) -> Result<(PathBuf, Vec<PathBuf>, Option<PathBuf>), String> {
+        let current = self.meta_value("last_scanned_folder")?.map(PathBuf::from);
+        let primary = if append {
+            current.as_deref().unwrap_or(selected)
+        } else {
+            selected
+        };
+        let mut extras = self.imported_library_folders(primary)?;
+        let added = if append && primary != selected {
+            let target = selected.canonicalize().map_err(|error| {
+                format!("Could not open rip folder {}: {error}", selected.display())
+            })?;
+            let already_in_library = std::iter::once(primary)
+                .chain(extras.iter().map(PathBuf::as_path))
+                .filter_map(|root| root.canonicalize().ok())
+                .any(|root| canonical_path_is_within_root(&target, &root));
+            if already_in_library {
+                None
+            } else {
+                extras.push(selected.to_path_buf());
+                Some(selected.to_path_buf())
+            }
+        } else {
+            None
+        };
+        // A missing import can return later. Keep its registration and favorites
+        // while refreshing the folders that are currently present.
+        extras
+            .retain(|folder| added.as_ref() == Some(folder) || folder.try_exists().unwrap_or(true));
+        Ok((primary.to_path_buf(), extras, added))
+    }
+
+    #[cfg(test)]
     fn replace_library(
         &mut self,
         root_path: &Path,
         tracks: &mut [Track],
         scanned_at: i64,
+    ) -> Result<(), String> {
+        self.replace_library_with_import(root_path, tracks, scanned_at, None)
+    }
+
+    fn replace_library_with_import(
+        &mut self,
+        root_path: &Path,
+        tracks: &mut [Track],
+        scanned_at: i64,
+        added_folder: Option<&Path>,
     ) -> Result<(), String> {
         let removed_history = self.removed_history_references(tracks)?;
         let transaction = self
@@ -4468,6 +4579,11 @@ impl LibraryDatabase {
             }
         }
 
+        transaction.execute(
+            "INSERT OR IGNORE INTO track_favorites (track_id) SELECT id FROM tracks WHERE is_favorite = 1",
+            [],
+        ).map_err(|error| format!("Could not preserve favorite tracks: {error}"))?;
+
         portable_history::restore_readded_history(&transaction, tracks)?;
 
         upsert_meta(
@@ -4478,6 +4594,12 @@ impl LibraryDatabase {
         .map_err(|error| format!("Could not cache scanned folder: {error}"))?;
         upsert_meta(&transaction, "last_scanned_at", &scanned_at.to_string())
             .map_err(|error| format!("Could not cache scan time: {error}"))?;
+        if let Some(folder) = added_folder {
+            transaction.execute(
+                "INSERT OR IGNORE INTO library_import_folders (library_root, folder) VALUES (?1, ?2)",
+                params![root_path.to_string_lossy(), folder.to_string_lossy()],
+            ).map_err(|error| format!("Could not save the imported folder: {error}"))?;
+        }
 
         transaction
             .commit()
@@ -4619,8 +4741,11 @@ impl LibraryDatabase {
     }
 
     fn toggle_favorite(&self, id: &str) -> Result<bool, String> {
-        let current = self
+        let transaction = self
             .connection
+            .unchecked_transaction()
+            .map_err(|error| format!("Could not update favorite state: {error}"))?;
+        let current = transaction
             .query_row(
                 "SELECT is_favorite FROM tracks WHERE id = ?1",
                 [id],
@@ -4631,12 +4756,23 @@ impl LibraryDatabase {
             .ok_or_else(|| "Track is not in the library cache.".to_owned())?;
         let next = !current;
 
-        self.connection
+        transaction
             .execute(
                 "UPDATE tracks SET is_favorite = ?2 WHERE id = ?1",
                 params![id, next],
             )
             .map_err(|error| format!("Could not update favorite state: {error}"))?;
+        let save = if next {
+            "INSERT OR IGNORE INTO track_favorites (track_id) VALUES (?1)"
+        } else {
+            "DELETE FROM track_favorites WHERE track_id = ?1"
+        };
+        transaction
+            .execute(save, [id])
+            .map_err(|error| format!("Could not save favorite state: {error}"))?;
+        transaction
+            .commit()
+            .map_err(|error| format!("Could not save favorite state: {error}"))?;
 
         Ok(next)
     }
@@ -5117,28 +5253,22 @@ impl LibraryDatabase {
             .map_err(|error| format!("Could not read playlist track: {error}"))?
             .ok_or_else(|| "Track is not in this playlist.".to_owned())?;
 
-        let target_position = match direction.as_str() {
-            "up" => {
-                if current_position == 0 {
-                    return self.playlist_by_id(playlist_id);
-                }
-
-                current_position - 1
-            }
-            "down" => current_position + 1,
+        let neighbor = match direction.as_str() {
+            "up" => "pt.position < ?2 ORDER BY pt.position DESC",
+            "down" => "pt.position > ?2 ORDER BY pt.position ASC",
             _ => return Err("Move direction must be up or down.".to_owned()),
         };
 
-        let Some(target_track_id) = self
+        let Some((target_track_id, target_position)) = self
             .connection
             .query_row(
-                "
-                SELECT track_id
-                FROM playlist_tracks
-                WHERE playlist_id = ?1 AND position = ?2
-                ",
-                params![playlist_id, target_position],
-                |row| row.get::<_, String>(0),
+                &format!(
+                    "SELECT pt.track_id, pt.position FROM playlist_tracks pt
+                          JOIN tracks ON tracks.id = pt.track_id
+                          WHERE pt.playlist_id = ?1 AND {neighbor} LIMIT 1"
+                ),
+                params![playlist_id, current_position],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
             )
             .optional()
             .map_err(|error| format!("Could not read playlist track: {error}"))?
@@ -5288,7 +5418,15 @@ fn play_track(
             .lock()
             .map_err(|_| "Playback state is unavailable.".to_owned())?;
 
-        playback.play(&file_path)?
+        match playback.play(&file_path) {
+            Ok(status) => status,
+            Err(error) => {
+                if playback.current_path.is_none() {
+                    media_controls.update_track(None, false);
+                }
+                return Err(error);
+            }
+        }
     };
     let track = library
         .lock()
@@ -5405,13 +5543,23 @@ impl PlaybackState {
         let uri = gst::glib::filename_to_uri(&path, None)
             .map_err(|error| format!("Could not prepare track for playback: {error}"))?;
 
-        {
+        let result = {
             let playbin = self.playbin()?;
             set_gst_state(playbin, gst::State::Null)?;
             drain_playback_bus(playbin);
             playbin.set_property("uri", uri.as_str());
-            set_gst_state(playbin, gst::State::Playing)?;
-            check_for_playback_error(playbin)?;
+            set_gst_state(playbin, gst::State::Playing)
+                .and_then(|()| check_for_playback_error(playbin))
+        };
+        if let Err(error) = result {
+            if let Some(playbin) = &self.playbin {
+                let _ = set_gst_state(playbin, gst::State::Null);
+                drain_playback_bus(playbin);
+            }
+            self.current_path = None;
+            self.is_playing = false;
+            self.has_ended = false;
+            return Err(error);
         }
 
         self.current_path = Some(file_path.to_owned());
@@ -6700,7 +6848,7 @@ fn normalize_video_source(value: &str) -> String {
 }
 
 fn favorite_track_ids(connection: &Connection) -> rusqlite::Result<HashSet<String>> {
-    let mut statement = connection.prepare("SELECT id FROM tracks WHERE is_favorite = 1")?;
+    let mut statement = connection.prepare("SELECT track_id FROM track_favorites")?;
     let ids = statement
         .query_map([], |row| row.get::<_, String>(0))?
         .collect::<rusqlite::Result<HashSet<_>>>()?;
@@ -6784,20 +6932,18 @@ fn scan_directory(
     album_art_paths: &mut HashMap<String, CachedCoverArt>,
     tracks: &mut Vec<Track>,
 ) -> Result<(), String> {
-    let entries = match fs::read_dir(directory) {
-        Ok(entries) => entries,
-        Err(_) => return Ok(()),
-    };
-    let mut entries = entries.filter_map(Result::ok).collect::<Vec<_>>();
+    let scan_error = |error| format!("Could not scan {}: {error}", directory.display());
+    let mut entries = fs::read_dir(directory)
+        .map_err(scan_error)?
+        .collect::<io::Result<Vec<_>>>()
+        .map_err(scan_error)?;
     entries.sort_by_key(|entry| entry.path());
 
     for entry in entries {
-        let file_type = match entry.file_type() {
-            Ok(file_type) => file_type,
-            Err(_) => continue,
-        };
-
         let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("Could not scan {}: {error}", path.display()))?;
 
         if file_type.is_dir() {
             scan_directory(&path, scanned_at, cover_art_dir, album_art_paths, tracks)?;
@@ -6851,21 +6997,33 @@ fn scan_directory(
     Ok(())
 }
 
+#[cfg(test)]
 fn scan_audio_directory_root(
     root_path: &Path,
     scanned_at: i64,
     cover_art_dir: Option<&Path>,
 ) -> Result<Vec<Track>, String> {
+    scan_audio_directory_roots([root_path], scanned_at, cover_art_dir)
+}
+
+fn scan_audio_directory_roots<'a>(
+    roots: impl IntoIterator<Item = &'a Path>,
+    scanned_at: i64,
+    cover_art_dir: Option<&Path>,
+) -> Result<Vec<Track>, String> {
     let mut tracks = Vec::new();
     let mut album_art_paths = HashMap::<String, CachedCoverArt>::new();
-    scan_directory(
-        root_path,
-        scanned_at,
-        cover_art_dir,
-        &mut album_art_paths,
-        &mut tracks,
-    )?;
+    for root in roots {
+        scan_directory(
+            root,
+            scanned_at,
+            cover_art_dir,
+            &mut album_art_paths,
+            &mut tracks,
+        )?;
+    }
     tracks.sort_by(|left, right| left.file_path.cmp(&right.file_path));
+    tracks.dedup_by(|left, right| left.file_path == right.file_path);
 
     Ok(tracks)
 }
@@ -8157,19 +8315,16 @@ where
 {
     validate_update_album_tags_request(request)?;
     let mask = album_tag_field_mask(request);
-    let (tracks, root_path) = {
+    let (tracks, roots) = {
         let library = library
             .lock()
             .map_err(|_| "Library cache is unavailable.".to_owned())?;
         let tracks = cached_album_tracks(&library, &request.album_id)?;
-        let root_path = library
-            .meta_value("last_scanned_folder")?
-            .ok_or_else(|| "No active library folder is configured.".to_owned())?;
-        (tracks, PathBuf::from(root_path))
+        (tracks, library.active_library_roots()?)
     };
     let mut editable_tracks = Vec::new();
     for track in tracks {
-        let path = validated_cached_track_path(&track, &root_path)
+        let path = validated_cached_track_path(&track, &roots)
             .map_err(|error| format!("{}: {error}", track.file_name))?;
         let tagged_file =
             read_tagged_file(&path).map_err(|error| format!("{}: {error}", track.file_name))?;
@@ -8190,7 +8345,7 @@ where
     let mut guards = Vec::with_capacity(total);
 
     for (index, track) in editable_tracks.into_iter().enumerate() {
-        let path = validated_cached_track_path(&track, &root_path)
+        let path = validated_cached_track_path(&track, &roots)
             .map_err(|error| format!("{}: {error}", track.file_name))?;
         let canonical_key = path.to_string_lossy().into_owned();
         if !canonical_paths.insert(canonical_key.clone()) {
@@ -8377,7 +8532,7 @@ fn validate_update_track_tags_request(request: &UpdateTrackTagsRequest) -> Resul
     Ok(())
 }
 
-fn validated_cached_track_path(track: &Track, root_path: &Path) -> Result<PathBuf, String> {
+fn validated_cached_track_path(track: &Track, roots: &[PathBuf]) -> Result<PathBuf, String> {
     let target_path = PathBuf::from(&track.file_path);
 
     if target_path.is_dir() {
@@ -8388,9 +8543,6 @@ fn validated_cached_track_path(track: &Track, root_path: &Path) -> Result<PathBu
         return Err("Tag editing is not currently supported for this file format.".to_owned());
     }
 
-    let canonical_root = root_path
-        .canonicalize()
-        .map_err(|error| format!("Could not verify library folder: {error}"))?;
     let canonical_target = target_path.canonicalize().map_err(|error| {
         if error.kind() == io::ErrorKind::NotFound {
             "Selected track no longer exists.".to_owned()
@@ -8399,8 +8551,12 @@ fn validated_cached_track_path(track: &Track, root_path: &Path) -> Result<PathBu
         }
     })?;
 
-    if !canonical_path_is_within_root(&canonical_target, &canonical_root) {
-        return Err("Selected track is outside the active library folder.".to_owned());
+    if !roots
+        .iter()
+        .filter_map(|root| root.canonicalize().ok())
+        .any(|root| canonical_path_is_within_root(&canonical_target, &root))
+    {
+        return Err("Selected track is outside the active library folders.".to_owned());
     }
 
     let metadata = fs::metadata(&canonical_target)
@@ -10328,6 +10484,93 @@ mod play_history_tests {
         database
             .replace_library(Path::new("/synthetic-music"), tracks, 1_700_000_000)
             .expect("seed tracks");
+    }
+
+    #[test]
+    fn favorites_survive_an_omitted_track_and_restart() {
+        let library = TestLibrary::new("favorites");
+        let mut database = library.open();
+        let track = test_track("/synthetic-music/one.flac");
+        seed_tracks(&mut database, &mut [track.clone()]);
+        assert!(database.toggle_favorite(&track.id).unwrap());
+        seed_tracks(&mut database, &mut []);
+        drop(database);
+
+        let mut database = library.open();
+        let mut restored = [track.clone()];
+        seed_tracks(&mut database, &mut restored);
+        assert!(restored[0].is_favorite);
+        assert!(!database.toggle_favorite(&track.id).unwrap());
+        seed_tracks(&mut database, &mut []);
+        let mut restored = [track];
+        seed_tracks(&mut database, &mut restored);
+        assert!(!restored[0].is_favorite);
+    }
+
+    #[test]
+    fn imported_folder_persists_without_replacing_the_primary_library() {
+        let library = TestLibrary::new("import-folder");
+        let main = library.directory.join("main");
+        let extra = library.directory.join("ripped");
+        fs::create_dir(&main).unwrap();
+        fs::create_dir(&extra).unwrap();
+        fs::write(main.join("main.flac"), b"scan fixture").unwrap();
+        fs::write(extra.join("rip.flac"), b"scan fixture").unwrap();
+        let mut database = library.open();
+        let mut tracks = scan_audio_directory_root(&main, 10, None).unwrap();
+        database.replace_library(&main, &mut tracks, 10).unwrap();
+
+        let (primary, extras, added) = database.plan_scan(&extra, true).unwrap();
+        assert_eq!(primary, main);
+        assert_eq!(extras, [extra.clone()]);
+        let mut tracks =
+            scan_audio_directory_roots([main.as_path(), extra.as_path()], 20, None).unwrap();
+        database
+            .replace_library_with_import(&primary, &mut tracks, 20, added.as_deref())
+            .unwrap();
+        assert_eq!(database.load_cache().unwrap().tracks.len(), 2);
+        drop(database);
+
+        let database = library.open();
+        assert_eq!(
+            database.active_library_roots().unwrap(),
+            [main.clone(), extra.clone()]
+        );
+        assert_eq!(database.plan_scan(&main, false).unwrap().1, [extra.clone()]);
+        assert!(database.plan_scan(&extra, true).unwrap().2.is_none());
+        let missing = library.directory.join("missing");
+        assert!(scan_audio_directory_roots([main.as_path(), missing.as_path()], 30, None).is_err());
+        assert_eq!(database.load_cache().unwrap().tracks.len(), 2);
+    }
+
+    #[test]
+    fn playlist_moves_between_playable_tracks_across_missing_entries() {
+        let library = TestLibrary::new("playlist-move");
+        let mut database = library.open();
+        let mut tracks = [
+            test_track("/synthetic-music/first.flac"),
+            test_track("/synthetic-music/missing.flac"),
+            test_track("/synthetic-music/second.flac"),
+        ];
+        seed_tracks(&mut database, &mut tracks);
+        let playlist = database.create_playlist("Test playlist").unwrap();
+        for track in &tracks {
+            database
+                .add_track_to_playlist(&playlist.id, &track.id)
+                .unwrap();
+        }
+        seed_tracks(&mut database, &mut [tracks[0].clone(), tracks[2].clone()]);
+        let updated = database
+            .move_playlist_track(&playlist.id, &tracks[2].id, "up")
+            .unwrap();
+        assert_eq!(
+            updated.track_ids,
+            [
+                tracks[2].id.clone(),
+                tracks[1].id.clone(),
+                tracks[0].id.clone()
+            ]
+        );
     }
 
     fn event_count(database: &LibraryDatabase) -> i64 {
@@ -12915,6 +13158,7 @@ pub fn run() {
         .manage(Mutex::new(PlaybackState::default()))
         .manage(Mutex::new(VideoPlaybackState::default()))
         .manage(Mutex::new(TagWriteState::default()))
+        .manage(LibraryScanLock::default())
         .manage(LinuxPlaybackNotificationState::new())
         .setup(|app| {
             let db_path = app

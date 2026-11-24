@@ -73,6 +73,7 @@ jobs:
       - run: npm run build
       - run: npm run check
       - run: npm run test:stats
+      - run: npm run test:lyrics
       - run: npm run test:updater
       - run: python3 scripts/test-windows-runtime-audit.py
       - run: python3 scripts/test-signature-safety.py
@@ -173,6 +174,7 @@ jobs:
       - run: npm run build
       - run: npm run check
       - run: npm run test:stats
+      - run: npm run test:lyrics
       - run: npm run test:updater
       - run: python scripts/test-windows-runtime-audit.py
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check

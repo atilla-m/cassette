@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
+import { copyFile, mkdir } from "node:fs/promises";
 import net from "node:net";
 import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -116,6 +117,7 @@ try {
     `window.__TAURI_INTERNALS__.invoke(${JSON.stringify(command)}, ${JSON.stringify(args)})`,
   );
   assert.equal((await invoke("get_platform_capabilities")).os, "windows");
+  assert.equal(await evaluate("document.documentElement.dataset.theme"), "obsidian");
 
   const extensions = ["flac", "m4a", "mp3", "ogg", "opus", "wav"];
   const tracks = await invoke("scan_library", { root: fixtureDirectory });
@@ -147,6 +149,18 @@ try {
   }, "Rescan Library did not refresh the native library cache");
   assert.deepEqual(newCache.tracks.map(({ extension }) => extension).sort(), extensions);
   console.log("Installed Cassette scanned all six synthetic audio formats and rescanned the saved folder.");
+
+  const importFolder = join(testDirectory, "disposable-import");
+  const sample = tracks.find(({ extension }) => extension === "flac");
+  assert(sample, "FLAC fixture is missing");
+  await mkdir(importFolder);
+  await copyFile(sample.filePath, join(importFolder, "imported.flac"));
+  const imported = await invoke("scan_library", { root: importFolder, append: true });
+  assert.equal(imported.length, extensions.length + 1);
+  assert.equal((await invoke("get_library_cache")).lastScannedFolder, fixtureDirectory);
+  const rescanned = await invoke("scan_library", { root: fixtureDirectory });
+  assert.equal(rescanned.length, extensions.length + 1);
+  console.log("Installed Cassette added a separate folder and kept its tracks on rescan.");
 
   const light = await evaluate(`(() => {
     const preset = [...document.querySelectorAll('.theme-preset-grid button')]

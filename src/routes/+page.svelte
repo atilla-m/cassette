@@ -362,7 +362,7 @@
     recent: 10,
   };
   const THEME_SETTING_KEY = "cassette:theme";
-  const DEFAULT_THEME: ThemeId = "cassette-teal";
+  const DEFAULT_THEME: ThemeId = "obsidian";
   const themePresets: ThemePreset[] = [
     {
       id: "cassette-teal",
@@ -569,6 +569,7 @@
   let lastNotifiedTrackKey: string | null = null;
   let lastNotifiedPlaybackStartId: number | null = null;
   let playbackStartId = 0;
+  let isStartingTrack = false;
   let mainElement: HTMLElement | undefined = $state();
   let activeView = $state("Albums");
   let statsDetailSection = $state<StatsSectionId | null>(null);
@@ -593,6 +594,7 @@
   let isMixBuilderOpen = $state(false);
   let isCreatePlaylistOpen = $state(false);
   let isPlaylistEditMode = $state(false);
+  let isMovingPlaylistTrack = $state(false);
   let isLibraryHealthOpen = $state(false);
   let selectedPlaylistId = $state<string | null>(null);
   let isShortcutHelpOpen = $state(false);
@@ -1166,37 +1168,36 @@
     ];
 
     const statusIntervalId = window.setInterval(async () => {
-      if (isTagWriteSuspendingPlayback || !currentTrack || (!isPlaying && !hasCurrentTrackEnded)) {
+      if (isStartingTrack || isTagWriteSuspendingPlayback || !currentTrack || !isPlaying) {
         return;
       }
 
       const statusTrackPath = currentTrack.filePath;
+      const startId = playbackStartId;
       const tagWriteGeneration = tagWritePlaybackGeneration;
       const positionSnapshot = playbackSeekCoordinator.capturePositionUpdate(statusTrackPath);
 
       try {
         const status = await getPlaybackStatus();
 
-        if (isTagWriteSuspendingPlayback || tagWriteGeneration !== tagWritePlaybackGeneration
-          || currentTrack?.filePath !== statusTrackPath || status.filePath !== statusTrackPath) {
+        if (isStartingTrack || startId !== playbackStartId || isTagWriteSuspendingPlayback
+          || tagWriteGeneration !== tagWritePlaybackGeneration || currentTrack?.filePath !== statusTrackPath
+          || status.filePath !== statusTrackPath || !playbackSeekCoordinator.allowsPositionUpdate(positionSnapshot)) {
           return;
         }
 
-        const applyPosition = playbackSeekCoordinator.allowsPositionUpdate(positionSnapshot);
-        applyPlaybackStatus(status, { applyPosition });
-
-        if (applyPosition) {
-          await handlePlaybackStatusUpdate(status, "status");
-        }
+        applyPlaybackStatus(status);
+        await handlePlaybackStatusUpdate(status);
       } catch (error) {
-        if (!isTagWriteSuspendingPlayback && tagWriteGeneration === tagWritePlaybackGeneration) {
+        if (!isStartingTrack && startId === playbackStartId && !isTagWriteSuspendingPlayback
+          && tagWriteGeneration === tagWritePlaybackGeneration) {
           playbackError = error instanceof Error ? error.message : String(error);
         }
       }
     }, 1000);
 
     const progressIntervalId = window.setInterval(() => {
-      if (isTagWriteSuspendingPlayback || !currentTrack || !isPlaying || playbackSeekCoordinator.hasPendingSeek(currentTrack.filePath)) {
+      if (isStartingTrack || isTagWriteSuspendingPlayback || !currentTrack || !isPlaying || playbackSeekCoordinator.hasPendingSeek(currentTrack.filePath)) {
         return;
       }
 
@@ -1207,9 +1208,6 @@
       const nextPosition = positionSeconds + 0.25;
       positionSeconds = duration ? Math.min(nextPosition, duration) : nextPosition;
 
-      if (duration && nextPosition >= duration) {
-        void handleTrackEnd("duration");
-      }
     }, 250);
 
     const videoProgressIntervalId = ENABLE_EXPERIMENTAL_VIDEOS
@@ -1420,6 +1418,7 @@
     requestId?: number;
   }) {
     const track = currentTrack;
+    const requestId = options.requestId ?? lyricsRequestId;
     const isManual = options.mode === "manual";
     const replaceCached = options.replaceCached ?? false;
 
@@ -1459,7 +1458,7 @@
       if (isManual) {
         const results = await searchTrackLyricsResults(track.filePath);
 
-        if (track.filePath !== currentTrack?.filePath) {
+        if (!lyricsRequestIsCurrent(track.filePath, requestId)) {
           return;
         }
 
@@ -1472,7 +1471,7 @@
 
       const result = await autoFindTrackLyrics(track.filePath, replaceCached);
 
-      if (track.filePath !== currentTrack?.filePath || (options.requestId !== undefined && options.requestId !== lyricsRequestId)) {
+      if (!lyricsRequestIsCurrent(track.filePath, requestId)) {
         return;
       }
 
@@ -1487,18 +1486,19 @@
         lyricsLookupMessage = null;
       }
     } catch (error) {
+      if (!lyricsRequestIsCurrent(track.filePath, requestId)) return;
       const message = error instanceof Error ? error.message : "Could not search LRCLIB. Check your connection.";
 
       if (isManual) {
         lyricsLookupMessage = null;
         lyricsLookupError = message;
-      } else if (track.filePath === currentTrack?.filePath) {
+      } else {
         lyricsLookupMessage = "Offline / lookup failed";
         lyricsLookupError = null;
         setAutoLyricsCooldown(track, "failed", message);
       }
     } finally {
-      isAutoFindingLyrics = false;
+      if (lyricsRequestIsCurrent(track.filePath, requestId)) isAutoFindingLyrics = false;
     }
   }
 
@@ -1933,19 +1933,23 @@
       return;
     }
 
+    const track = currentTrack;
+    const requestId = lyricsRequestId;
     isSavingLyricsSelection = true;
     lyricsLookupError = null;
     lyricsLookupMessage = "Saving selected lyrics...";
 
     try {
-      const lyrics = await saveTrackLyricsResult(currentTrack.filePath, result, true);
+      const lyrics = await saveTrackLyricsResult(track.filePath, result, true);
+      if (!lyricsRequestIsCurrent(track.filePath, requestId)) return;
       currentLyrics = lyrics;
-      clearAutoLyricsCooldown(currentTrack);
+      clearAutoLyricsCooldown(track);
       lyricsPickerResults = [];
       isLyricsPickerOpen = false;
       isLyricsOptionsOpen = false;
       lyricsLookupMessage = lyrics.kind === "plain" ? "Plain lyrics" : null;
     } catch (error) {
+      if (!lyricsRequestIsCurrent(track.filePath, requestId)) return;
       lyricsLookupMessage = null;
       lyricsLookupError = error instanceof Error ? error.message : "Could not save selected lyrics.";
     } finally {
@@ -1953,19 +1957,28 @@
     }
   }
 
+  function lyricsRequestIsCurrent(trackPath: string, requestId: number) {
+    return requestId === lyricsRequestId && currentTrack?.filePath === trackPath;
+  }
+
   async function handleRemoveCachedLyrics() {
     if (!currentTrack) {
       return;
     }
 
+    const trackPath = currentTrack.filePath;
+    const requestId = lyricsRequestId;
     lyricsLookupError = null;
     lyricsLookupMessage = "Removing cached lyrics...";
 
     try {
-      await removeCachedTrackLyrics(currentTrack.filePath);
-      await loadCurrentTrackLyrics(currentTrack.filePath);
-      lyricsLookupMessage = "Cached lyrics removed.";
+      await removeCachedTrackLyrics(trackPath);
+      if (!lyricsRequestIsCurrent(trackPath, requestId)) return;
+      const reloadId = lyricsRequestId + 1;
+      await loadCurrentTrackLyrics(trackPath);
+      if (lyricsRequestIsCurrent(trackPath, reloadId)) lyricsLookupMessage = "Cached lyrics removed.";
     } catch (error) {
+      if (!lyricsRequestIsCurrent(trackPath, requestId)) return;
       lyricsLookupMessage = null;
       lyricsLookupError = error instanceof Error ? error.message : "Could not remove cached lyrics.";
     }
@@ -1976,15 +1989,19 @@
       return;
     }
 
+    const trackPath = currentTrack.filePath;
+    const requestId = lyricsRequestId;
     const roundedOffset = Math.round(Math.max(-5, Math.min(5, nextOffsetSeconds)) * 10) / 10;
     isSavingLyricsOffset = true;
     lyricsLookupError = null;
 
     try {
-      const savedOffset = await setTrackLyricsOffset(currentTrack.filePath, roundedOffset);
+      const savedOffset = await setTrackLyricsOffset(trackPath, roundedOffset);
+      if (!lyricsRequestIsCurrent(trackPath, requestId) || !currentLyrics) return;
       currentLyrics = { ...currentLyrics, offsetSeconds: savedOffset };
       lyricsLookupMessage = Math.abs(savedOffset) > 0.01 ? `Lyrics offset saved (${formatSignedSeconds(savedOffset)}).` : "Lyrics offset saved.";
     } catch (error) {
+      if (!lyricsRequestIsCurrent(trackPath, requestId)) return;
       lyricsLookupMessage = null;
       lyricsLookupError = error instanceof Error ? error.message : "Could not save lyrics offset.";
     } finally {
@@ -2012,15 +2029,27 @@
     }
   }
 
-  async function scanFolderIntoLibrary(folder: string) {
+  async function scanFolderIntoLibrary(folder: string, append = false) {
     isScanning = true;
     hasLoadedCache = true;
 
-    const scannedTracks = await scanLibrary(folder);
-    scannedFolder = folder;
+    const sameLibrary = scannedFolder !== null && (append || scannedFolder === folder);
+    const scannedTracks = await scanLibrary(folder, append);
+    if (!append || !scannedFolder) scannedFolder = folder;
     tracks = scannedTracks;
     scanCount = scannedTracks.length;
     lastScannedAt = Math.floor(Date.now() / 1000);
+    statsRevision += 1;
+    if (sameLibrary) {
+      const scannedById = new Map(scannedTracks.map((track, index) => [track.id, { track, index }]));
+      playbackQueue = playbackQueue.map((track) => scannedById.get(track.id)?.track ?? track);
+      if (currentTrack) {
+        const scannedTrack = scannedById.get(currentTrack.id);
+        currentTrack = scannedTrack?.track ?? currentTrack;
+        currentTrackIndex = scannedTrack?.index ?? null;
+      }
+      return;
+    }
     selectedAlbumId = null;
     selectedArtistName = null;
     selectedGenreName = null;
@@ -2052,8 +2081,8 @@
     cdRipMessage = "Scanning ripped folder...";
 
     try {
-      await scanFolderIntoLibrary(lastRippedFolder);
-      cdRipMessage = "Ripped folder scanned into Cassette.";
+      await scanFolderIntoLibrary(lastRippedFolder, true);
+      cdRipMessage = "Ripped tracks added to your library.";
     } catch (error) {
       cdRipMessage = null;
       cdRipError = error instanceof Error ? error.message : String(error);
@@ -3591,7 +3620,8 @@
       const status = await getPlaybackStatus();
       if (currentTrack?.filePath === status.filePath) {
         applyPlaybackStatus(status);
-        await handlePlaybackStatusUpdate(status, "status");
+        isTagWriteSuspendingPlayback = false;
+        await handlePlaybackStatusUpdate(status);
       }
     } catch (error) {
       updatePlaybackListenClock(false);
@@ -3981,10 +4011,11 @@
       queueIndex = 0;
     }
 
-    playbackQueue = nextQueue;
-    currentQueueIndex = queueIndex;
-    shuffledQueueOrder = isShuffleEnabled ? buildShuffledQueueOrder(nextQueue.length, queueIndex) : [];
-    await playQueuedTrackAtIndex(queueIndex);
+    await playQueuedTrackAtIndex(queueIndex, {
+      tracks: nextQueue,
+      shuffle: isShuffleEnabled,
+      order: isShuffleEnabled ? buildShuffledQueueOrder(nextQueue.length, queueIndex) : [],
+    });
   }
 
   function openContextMenu(x: number, y: number, items: ContextMenuItem[]) {
@@ -4594,7 +4625,7 @@
   async function handleRemoveTrackFromSelectedPlaylist(track: Track) {
     const playlist = selectedPlaylist;
 
-    if (!playlist) {
+    if (!playlist || isMovingPlaylistTrack) {
       return;
     }
 
@@ -4617,23 +4648,17 @@
 
   async function handleMoveTrackInSelectedPlaylist(track: Track, direction: "up" | "down") {
     const playlist = selectedPlaylist;
+    if (!playlist || !canMovePlaylistTrack(playlist, track, direction)) return;
 
-    if (!playlist || !canMovePlaylistTrack(playlist, track, direction)) {
-      return;
-    }
-
+    isMovingPlaylistTrack = true;
     playlistError = null;
     playlistMessage = null;
-    const previousPlaylists = playlists;
-    const optimisticPlaylist = moveTrackIdInPlaylist(playlist, track.id, direction);
-    applyUpdatedPlaylist(optimisticPlaylist);
-
     try {
-      const updatedPlaylist = await movePlaylistTrack(playlist.id, track.id, direction);
-      applyUpdatedPlaylist(updatedPlaylist);
+      applyUpdatedPlaylist(await movePlaylistTrack(playlist.id, track.id, direction));
     } catch (error) {
-      playlists = previousPlaylists;
       playlistError = error instanceof Error ? error.message : String(error);
+    } finally {
+      isMovingPlaylistTrack = false;
     }
   }
 
@@ -4643,32 +4668,11 @@
 
   function canMovePlaylistTrack(playlist: Playlist, track: Track, direction: "up" | "down") {
     const trackIndex = playlist.trackIds.indexOf(track.id);
-
-    if (trackIndex === -1) {
-      return false;
-    }
-
-    return direction === "up"
-      ? trackIndex > 0
-      : trackIndex < playlist.trackIds.length - 1;
-  }
-
-  function moveTrackIdInPlaylist(playlist: Playlist, trackId: string, direction: "up" | "down"): Playlist {
-    const trackIds = [...playlist.trackIds];
-    const trackIndex = trackIds.indexOf(trackId);
-    const targetIndex = direction === "up" ? trackIndex - 1 : trackIndex + 1;
-
-    if (trackIndex === -1 || targetIndex < 0 || targetIndex >= trackIds.length) {
-      return playlist;
-    }
-
-    [trackIds[trackIndex], trackIds[targetIndex]] = [trackIds[targetIndex], trackIds[trackIndex]];
-
-    return {
-      ...playlist,
-      trackIds,
-      updatedAt: Math.floor(Date.now() / 1000),
-    };
+    if (isMovingPlaylistTrack || trackIndex < 0) return false;
+    const candidates = direction === "up"
+      ? playlist.trackIds.slice(0, trackIndex)
+      : playlist.trackIds.slice(trackIndex + 1);
+    return candidates.some((id) => libraryTracksById.has(id));
   }
 
   async function handleRenamePlaylist(playlist: Playlist) {
@@ -4831,50 +4835,66 @@
     }
   }
 
-  async function playQueuedTrackAtIndex(queueIndex: number) {
-    if (queueIndex < 0 || queueIndex >= playbackQueue.length) {
+  async function playQueuedTrackAtIndex(
+    queueIndex: number,
+    nextQueue?: { tracks: Track[]; shuffle: boolean; order: number[] },
+  ) {
+    const track = (nextQueue?.tracks ?? playbackQueue)[queueIndex];
+    if (!track || isStartingTrack || isTagWriteSuspendingPlayback) {
       return;
     }
 
-    await saveActiveVideoProgress(true);
-    if (videoBackendStatus?.videoId) {
-      try {
-        videoBackendStatus = await stopVideo();
-      } catch {
-        videoBackendStatus = null;
-      }
-    }
-
-    const track = playbackQueue[queueIndex];
-    await finalizePlaybackListenSession();
-
-    const trackIndex = tracks.findIndex((candidate) => candidate.id === track.id);
+    isStartingTrack = true;
     playbackError = null;
-    currentTrack = track;
-    currentTrackIndex = trackIndex >= 0 ? trackIndex : null;
-    currentQueueIndex = queueIndex;
-    durationSeconds = track.durationSeconds;
-    playbackSeekCoordinator.reset(track.filePath);
-    lastConfirmedPlaybackPositionSeconds = 0;
-    positionSeconds = 0;
-    isPlaying = false;
-    hasCurrentTrackEnded = false;
-    isHandlingTrackEnd = false;
-    resetPlaybackListenSession(track);
-    const currentPlaybackStartId = playbackStartId + 1;
-    playbackStartId = currentPlaybackStartId;
-
+    const currentPlaybackStartId = ++playbackStartId;
     try {
-      const status = await playTrack(track.filePath);
-      if (currentTrack?.filePath !== track.filePath || status.filePath !== track.filePath) {
-        return;
+      await saveActiveVideoProgress(true);
+      if (videoBackendStatus?.videoId) {
+        try {
+          videoBackendStatus = await stopVideo();
+        } catch {
+          videoBackendStatus = null;
+        }
       }
+      const status = await playTrack(track.filePath);
+      if (status.filePath !== track.filePath) {
+        throw new Error("The selected track could not be started.");
+      }
+      await finalizePlaybackListenSession();
 
+      if (nextQueue) {
+        playbackQueue = nextQueue.tracks;
+        isShuffleEnabled = nextQueue.shuffle;
+        shuffledQueueOrder = nextQueue.order;
+      }
+      const trackIndex = tracks.findIndex((candidate) => candidate.id === track.id);
+      currentTrack = trackIndex >= 0 ? tracks[trackIndex] : track;
+      currentTrackIndex = trackIndex >= 0 ? trackIndex : null;
+      currentQueueIndex = playbackQueue[queueIndex]?.id === track.id
+        ? queueIndex
+        : playbackQueue.findIndex((candidate) => candidate.id === track.id);
+      if (currentQueueIndex < 0) currentQueueIndex = null;
+      playbackSeekCoordinator.reset(track.filePath);
+      hasCurrentTrackEnded = false;
+      resetPlaybackListenSession(currentTrack);
       applyPlaybackStatus(status);
-      durationSeconds = status.durationSeconds ?? track.durationSeconds;
-      await notifyTrackPlaybackStarted(track, currentPlaybackStartId);
+      void notifyTrackPlaybackStarted(currentTrack, currentPlaybackStartId);
     } catch (error) {
+      try {
+        const status = await getPlaybackStatus();
+        if (currentTrack?.filePath === status.filePath) {
+          applyPlaybackStatus(status);
+        } else if (currentTrack && !status.filePath) {
+          await finalizePlaybackListenSession();
+          isPlaying = false;
+          hasCurrentTrackEnded = true;
+        }
+      } catch {
+        // Keep the original track opening error available to the user.
+      }
       playbackError = error instanceof Error ? error.message : String(error);
+    } finally {
+      isStartingTrack = false;
     }
   }
 
@@ -4915,41 +4935,32 @@
     return normalized || "Unknown error";
   }
 
-  async function handlePlaybackStatusUpdate(status: PlaybackStatus, source: "status" | "duration") {
+  async function handlePlaybackStatusUpdate(status: PlaybackStatus) {
+    const startId = playbackStartId;
     await maybeRecordTrackPlay();
 
-    if (!status.hasEnded || !currentTrack || status.filePath !== currentTrack.filePath) {
+    if (!status.hasEnded || startId !== playbackStartId || status.filePath !== currentTrack?.filePath) {
       return;
     }
 
-    await handleTrackEnd(source);
+    await handleTrackEnd();
   }
 
-  async function handleTrackEnd(source: "status" | "duration") {
-    if (!currentTrack || isHandlingTrackEnd || hasCurrentTrackEnded) {
-      return;
-    }
-
-    const duration = durationSeconds ?? currentTrack.durationSeconds;
-
-    if (source === "duration" && (!duration || positionSeconds < duration)) {
+  async function handleTrackEnd() {
+    if (!currentTrack || isStartingTrack || isHandlingTrackEnd || hasCurrentTrackEnded) {
       return;
     }
 
     isHandlingTrackEnd = true;
     hasCurrentTrackEnded = true;
     isPlaying = false;
-    positionSeconds = duration ?? positionSeconds;
-    await maybeRecordTrackPlay();
-
+    positionSeconds = durationSeconds ?? currentTrack.durationSeconds ?? positionSeconds;
     const nextQueueIndex = getNextQueueIndex(true);
-
-    if (nextQueueIndex === null) {
+    try {
+      if (nextQueueIndex !== null) await playQueuedTrackAtIndex(nextQueueIndex);
+    } finally {
       isHandlingTrackEnd = false;
-      return;
     }
-
-    await playQueuedTrackAtIndex(nextQueueIndex);
   }
 
   async function handleToggleFavorite(track: Track) {
@@ -5158,12 +5169,8 @@
     }
 
     const shuffledMix = shuffleTracks(mixTracks);
-    playbackQueue = shuffledMix;
-    currentQueueIndex = 0;
-    isShuffleEnabled = true;
-    shuffledQueueOrder = shuffledMix.map((_, index) => index);
     isQueueOpen = true;
-    await playQueuedTrackAtIndex(0);
+    await playQueuedTrackAtIndex(0, { tracks: shuffledMix, shuffle: true, order: shuffledMix.map((_, index) => index) });
   }
 
   function handleToggleMixItem(category: MixCategory, value: string) {
@@ -5259,11 +5266,7 @@
       return;
     }
 
-    playbackQueue = queue;
-    currentQueueIndex = 0;
-    isShuffleEnabled = false;
-    shuffledQueueOrder = [];
-    await playQueuedTrackAtIndex(0);
+    await playQueuedTrackAtIndex(0, { tracks: queue, shuffle: false, order: [] });
   }
 
   function insertTracksNext(libraryTracks: Track[]) {
@@ -5332,7 +5335,7 @@
   }
 
   async function handleTogglePlayback() {
-    if (!currentTrack) {
+    if (!currentTrack || isStartingTrack || isTagWriteSuspendingPlayback) {
       return;
     }
 
@@ -5342,12 +5345,10 @@
 
     if (!isPlaying && hasCurrentTrackEnded) {
       if (currentQueueIndex === null) {
-        playbackQueue = [currentTrack];
-        currentQueueIndex = 0;
-        shuffledQueueOrder = isShuffleEnabled ? [0] : [];
+        await playQueuedTrackAtIndex(0, { tracks: [currentTrack], shuffle: isShuffleEnabled, order: isShuffleEnabled ? [0] : [] });
+      } else {
+        await playQueuedTrackAtIndex(currentQueueIndex);
       }
-
-      await playQueuedTrackAtIndex(currentQueueIndex ?? 0);
       return;
     }
 
@@ -5389,7 +5390,7 @@
   }
 
   async function handleMediaStop() {
-    if (!currentTrack) {
+    if (!currentTrack || isStartingTrack || isTagWriteSuspendingPlayback) {
       return;
     }
 
@@ -5417,7 +5418,7 @@
   async function handleSeek(nextPositionSeconds: number) {
     const duration = durationSeconds ?? currentTrack?.durationSeconds ?? null;
 
-    if (!currentTrack || !duration || duration <= 0 || !Number.isFinite(nextPositionSeconds)) {
+    if (!currentTrack || isStartingTrack || isTagWriteSuspendingPlayback || !duration || duration <= 0 || !Number.isFinite(nextPositionSeconds)) {
       return;
     }
 
@@ -10810,29 +10811,6 @@
     --shadow: rgba(0, 0, 0, 0.28);
     --focus-ring: rgba(185, 154, 77, 0.5);
     --range-empty: #2c2b27;
-  }
-
-  :global(:root[data-theme="obsidian"]) {
-    --bg: #000000;
-    --bg-soft: #050506;
-    --panel: #0b0c0f;
-    --panel-soft: #111216;
-    --panel-strong: #191b20;
-    --panel-hover: #20232a;
-    --border: #24262c;
-    --border-strong: #373b43;
-    --text: #f5f7fa;
-    --text-muted: #c0c5cb;
-    --text-soft: #8d949d;
-    --text-dim: #656c75;
-    --accent: #9aa6b2;
-    --accent-soft: #22262c;
-    --accent-strong: #545d68;
-    --accent-text: #eef3f8;
-    --accent-contrast: #050608;
-    --shadow: rgba(0, 0, 0, 0.34);
-    --focus-ring: rgba(154, 166, 178, 0.5);
-    --range-empty: #24262c;
   }
 
   :global(:root[data-theme="glacier"]) {

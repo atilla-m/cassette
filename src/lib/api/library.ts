@@ -104,8 +104,8 @@ export async function chooseCoverImage(): Promise<string | null> {
   return typeof selected === "string" ? selected : null;
 }
 
-export async function scanLibrary(root: string): Promise<Track[]> {
-  return invoke<Track[]>("scan_library", { root });
+export async function scanLibrary(root: string, append = false): Promise<Track[]> {
+  return invoke<Track[]>("scan_library", { root, append });
 }
 
 export async function getLibraryCache(): Promise<LibraryCache> {

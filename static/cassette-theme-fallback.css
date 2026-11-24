@@ -1,7 +1,7 @@
 /*
  * Keep Cassette readable if the page component stylesheet is briefly replaced
- * during Vite/Svelte hot reload. Keep the light palette here so a saved
- * Light selection also takes effect before the page component loads.
+ * while the page loads. The default Obsidian and saved Light palettes
+ * also apply before the interface mounts.
  */
 :root {
   color-scheme: dark;
@@ -30,6 +30,29 @@
   --range-empty: #2a313c;
   background: var(--bg);
   color: var(--text);
+}
+
+:root[data-theme="obsidian"] {
+  --bg: #000000;
+  --bg-soft: #050506;
+  --panel: #0b0c0f;
+  --panel-soft: #111216;
+  --panel-strong: #191b20;
+  --panel-hover: #20232a;
+  --border: #24262c;
+  --border-strong: #373b43;
+  --text: #f5f7fa;
+  --text-muted: #c0c5cb;
+  --text-soft: #8d949d;
+  --text-dim: #656c75;
+  --accent: #9aa6b2;
+  --accent-soft: #22262c;
+  --accent-strong: #545d68;
+  --accent-text: #eef3f8;
+  --accent-contrast: #050608;
+  --shadow: rgba(0, 0, 0, 0.34);
+  --focus-ring: rgba(154, 166, 178, 0.5);
+  --range-empty: #24262c;
 }
 
 :root[data-theme="light"] {
