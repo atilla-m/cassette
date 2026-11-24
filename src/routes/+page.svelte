@@ -923,6 +923,11 @@
   let currentTrackCoverArtSrc = $derived(localImageSource(currentTrackCoverArtPath));
   let currentTrackDuration = $derived(durationSeconds ?? currentTrack?.durationSeconds ?? null);
   let syncedLyricLines = $derived(currentLyrics?.kind === "synced" ? parseLrcLyrics(currentLyrics.text) : []);
+  let plainLyricStanzas = $derived(
+    currentLyrics?.kind === "plain" && currentLyrics.text.trim()
+      ? currentLyrics.text.replace(/\r\n?/g, "\n").trim().split(/\n(?:[^\S\n]*\n)+/)
+      : [],
+  );
   let lyricsOffsetSeconds = $derived(currentLyrics?.offsetSeconds ?? 0);
   let syncedLyricsState = $derived(resolveSyncedLyricsState(syncedLyricLines, positionSeconds, lyricsOffsetSeconds));
   let hasLyricsIntro = $derived(hasSyncedLyricsIntro(syncedLyricLines, lyricsOffsetSeconds));
@@ -2004,7 +2009,7 @@
       lyricsPickerResults = [];
       isLyricsPickerOpen = false;
       isLyricsOptionsOpen = false;
-      lyricsLookupMessage = lyrics.kind === "plain" ? "Plain lyrics" : null;
+      lyricsLookupMessage = null;
     } catch (error) {
       if (!lyricsRequestIsCurrent(track.filePath, requestId)) return;
       lyricsLookupMessage = null;
@@ -7274,9 +7279,9 @@
               </aside>
 
               <section class="lyrics-focus" aria-labelledby="lyrics-view-title">
-                {#if lyricsLookupError || isAutoFindingLyrics || (!currentLyrics && lyricsLookupMessage) || currentLyrics?.kind === "plain"}
+                {#if lyricsLookupError || isAutoFindingLyrics || (!currentLyrics && lyricsLookupMessage)}
                   <p class:error={lyricsLookupError} class="lyrics-status-line">
-                    {lyricsLookupError ?? (isAutoFindingLyrics ? "Searching lyrics..." : currentLyrics?.kind === "plain" ? "Plain lyrics" : lyricsLookupMessage)}
+                    {lyricsLookupError ?? (isAutoFindingLyrics ? "Searching lyrics..." : lyricsLookupMessage)}
                   </p>
                 {/if}
 
@@ -7326,8 +7331,13 @@
                       {/if}
                     {/each}
                   </div>
-                {:else if currentLyrics?.kind === "plain"}
-                  <pre class="plain-lyrics">{currentLyrics.text}</pre>
+                {:else if plainLyricStanzas.length > 0}
+                  <!-- svelte-ignore a11y_no_noninteractive_tabindex (Allow keyboard scrolling in the lyrics pane.) -->
+                  <div class="plain-lyrics" role="region" aria-label="Plain lyrics" tabindex="0">
+                    {#each plainLyricStanzas as stanza}
+                      <p>{stanza}</p>
+                    {/each}
+                  </div>
                 {:else if currentLyrics?.kind === "synced"}
                   <div class="lyrics-empty-state">
                     <h3>No lyric lines found</h3>
@@ -12496,23 +12506,33 @@
     color: var(--danger);
   }
 
-  .synced-lyrics {
+  .synced-lyrics,
+  .plain-lyrics {
     display: grid;
     justify-items: center;
-    gap: 4px;
     max-height: min(66vh, 650px);
     overflow-y: auto;
     overscroll-behavior: contain;
-    padding: 104px 0;
     scrollbar-color: transparent transparent;
     scrollbar-width: thin;
     transition: scrollbar-color 180ms ease;
   }
 
+  .synced-lyrics {
+    gap: 4px;
+    padding: 104px 0;
+  }
+
   .plain-lyrics {
-    scrollbar-color: transparent transparent;
-    scrollbar-width: thin;
-    transition: scrollbar-color 180ms ease;
+    align-content: start;
+    gap: clamp(1.4rem, 3.6vh, 2.5rem);
+    padding-block: clamp(1.5rem, 5vh, 3.5rem);
+  }
+
+  .plain-lyrics:focus-visible {
+    border-radius: 8px;
+    outline: 2px solid var(--focus-ring);
+    outline-offset: -2px;
   }
 
   .synced-lyrics:hover,
@@ -12547,22 +12567,27 @@
     background-color: rgba(124, 139, 156, 0.28);
   }
 
-  .synced-lyrics button {
+  .synced-lyrics button,
+  .plain-lyrics p {
     width: auto;
     max-width: min(100%, 940px);
-    border: 0;
     margin: 0;
-    border-radius: 8px;
-    background: transparent;
-    color: var(--text-dim);
-    cursor: default;
     font: inherit;
     font-size: clamp(1.22rem, 1.9vw, 1.92rem);
-    font-weight: 620;
     line-height: 1.72;
     padding: 3px 14px;
     text-align: center;
     text-wrap: balance;
+    overflow-wrap: anywhere;
+  }
+
+  .synced-lyrics button {
+    border: 0;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--text-dim);
+    cursor: default;
+    font-weight: 620;
     transition:
       background 150ms ease,
       color 150ms ease,
@@ -12636,16 +12661,9 @@
       drop-shadow(0 0 12px color-mix(in srgb, var(--accent) 42%, transparent));
   }
 
-  .plain-lyrics {
-    max-height: min(66vh, 650px);
-    overflow: auto;
-    margin: 0 auto;
-    width: min(100%, 760px);
+  .plain-lyrics p {
     color: var(--text);
-    font: inherit;
-    font-size: clamp(1.05rem, 1.45vw, 1.35rem);
-    font-weight: 680;
-    line-height: 1.85;
+    font-weight: 740;
     white-space: pre-wrap;
   }
 
