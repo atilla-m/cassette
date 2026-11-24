@@ -1,5 +1,5 @@
 use super::{audio_payload_fingerprint_with_hasher, unix_timestamp, LibraryDatabase, Track};
-use rusqlite::{params, OptionalExtension, Transaction};
+use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
