@@ -13469,6 +13469,7 @@
 
   .album-track-list {
     display: grid;
+    grid-template-columns: minmax(0, 1fr);
     gap: 4px;
   }
 
@@ -13483,7 +13484,7 @@
 
   .album-track-row {
     display: grid;
-    grid-template-columns: 42px minmax(180px, 1fr) minmax(56px, auto) auto auto;
+    grid-template-columns: 42px minmax(0, 1fr) minmax(56px, auto) auto auto;
     align-items: center;
     gap: 12px;
     min-height: 54px;
@@ -13502,7 +13503,7 @@
   }
 
   .album-track-row.with-play-counts {
-    grid-template-columns: 42px minmax(180px, 1fr) minmax(74px, auto) minmax(56px, auto) auto auto;
+    grid-template-columns: 42px minmax(0, 1fr) minmax(74px, auto) minmax(56px, auto) auto auto;
   }
 
   .album-track-play-count {
@@ -17260,7 +17261,7 @@
     .settings-status-list,
     .settings-tool-grid,
     .stats-overview-grid {
-      grid-template-columns: 1fr;
+      grid-template-columns: minmax(0, 1fr);
     }
 
     .home.albums-landing-view {

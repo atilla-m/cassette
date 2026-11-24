@@ -67,7 +67,7 @@ fn signature_matches_filename(signature: &str, installer: &str) -> bool {
 }
 
 pub(super) fn is_installed_package() -> bool {
-    use tauri::utils::platform::{bundle_type, BundleType};
+    use tauri::utils::{config::BundleType, platform::bundle_type};
     cfg!(target_arch = "x86_64") && matches!(bundle_type(), Some(BundleType::Nsis))
 }
 
