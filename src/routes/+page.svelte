@@ -10780,7 +10780,7 @@
 
   {#if !isVideoPlaybackActive}
     <NowPlayingBar
-      track={currentTrack}
+      track={currentTrack ? { ...currentTrack, coverArtPath: currentTrackCoverArtPath } : null}
       {isPlaying}
       {positionSeconds}
       {durationSeconds}
@@ -17034,7 +17034,7 @@
 
     .lyrics-view-top,
     .lyrics-experience {
-      grid-template-columns: 1fr;
+      grid-template-columns: minmax(0, 1fr);
     }
 
     .lyrics-view-top {
@@ -17061,6 +17061,17 @@
       gap: 14px;
       justify-self: stretch;
       order: 2;
+    }
+
+    .lyrics-sidecar::before {
+      inset-inline: 0;
+    }
+
+    .lyrics-cover-ambient {
+      inset-inline: 0 auto;
+      width: clamp(156px, 32vw, 204px);
+      height: clamp(156px, 32vw, 204px);
+      transform: none;
     }
 
     .lyrics-cover {

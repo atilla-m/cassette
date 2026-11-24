@@ -83,8 +83,7 @@ async fn latest_beta(
     let mut page = 1u32;
     loop {
         let releases: Vec<GithubRelease> = client
-            .get(RELEASES_API)
-            .query(&[("per_page", 100), ("page", page)])
+            .get(format!("{RELEASES_API}?per_page=100&page={page}"))
             .header("Accept", "application/vnd.github+json")
             .send()
             .await?

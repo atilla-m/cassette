@@ -408,7 +408,7 @@
     <span>{formatDuration(effectiveDuration)}</span>
   </div>
 
-  <div class="volume" aria-label="Volume">
+  <div class="player-tools" role="group" aria-label="Player options">
     {#if !compact}
       <button
         class="lyrics-button"
@@ -521,7 +521,7 @@
 
   .track-meta,
   .progress-area span,
-  .volume span {
+  .player-tools span {
     color: var(--text-soft);
     font-size: 0.84rem;
     font-weight: 650;
@@ -532,6 +532,7 @@
     align-items: baseline;
     gap: 4px;
     min-width: 0;
+    overflow: hidden;
   }
 
   button.track-link {
@@ -695,7 +696,7 @@
   }
 
   .progress-area,
-  .volume {
+  .player-tools {
     display: flex;
     align-items: center;
     gap: 10px;
@@ -707,7 +708,7 @@
     width: min(40vw, 560px);
   }
 
-  .player.compact .volume {
+  .player.compact .player-tools {
     justify-content: flex-end;
     width: min(24vw, 240px);
   }
@@ -777,25 +778,56 @@
   @media (max-width: 920px) {
     .player,
     .player.compact {
-      grid-template-columns: minmax(170px, 1fr) auto;
+      grid-template-columns: minmax(0, 1fr) auto auto;
+      gap: 14px;
     }
 
     .progress-area,
-    .volume {
+    .player-tools > span,
+    .volume-bar {
       display: none;
+    }
+
+    .player.compact .player-tools {
+      width: auto;
     }
   }
 
-  @media (max-width: 560px) {
+  @media (max-width: 660px) {
     .player,
     .player.compact {
-      grid-template-columns: 1fr;
+      grid-template-columns: minmax(0, 1fr) auto;
       gap: 12px;
       padding: 14px 16px;
     }
 
     .transport {
+      grid-row: 2;
+      grid-column: 1 / -1;
       justify-content: flex-start;
+    }
+
+    .player-tools {
+      grid-row: 1;
+      grid-column: 2;
+    }
+  }
+
+  @media (max-width: 400px) {
+    .track,
+    .player-tools {
+      gap: 8px;
+    }
+
+    .cover {
+      width: 32px;
+      height: 32px;
+    }
+
+    button.queue-button,
+    button.lyrics-button {
+      min-width: 58px;
+      padding-inline: 8px;
     }
   }
 </style>
