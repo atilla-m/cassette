@@ -357,12 +357,14 @@
     { key: "year", label: "Year", inputMode: "numeric" },
   ];
   const STATS_PREVIEW_LIMITS: Record<StatsSectionId, number> = {
-    tracks: 10,
-    artists: 8,
-    albums: 8,
-    genres: 8,
-    recent: 10,
+    tracks: 5,
+    artists: 5,
+    albums: 5,
+    genres: 5,
+    recent: 5,
   };
+  const statsDayFormat = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", timeZone: "UTC" });
+  const statsRangeFormat = new Intl.DateTimeFormat(undefined, { year: "numeric", month: "short", day: "numeric", timeZone: "UTC" });
   const THEME_SETTING_KEY = "cassette:theme";
   const DEFAULT_THEME: ThemeId = "obsidian";
   const themePresets: ThemePreset[] = [
@@ -779,17 +781,18 @@
   let statsTopArtists = $derived(visibleStatsItems(allStatsTopArtists, statsSectionExpanded("artists"), statsVisibleLimits.artists, STATS_PREVIEW_LIMITS.artists));
   let statsTopAlbums = $derived(visibleStatsItems(allStatsTopAlbums, statsSectionExpanded("albums"), statsVisibleLimits.albums, STATS_PREVIEW_LIMITS.albums));
   let statsTopGenres = $derived(visibleStatsItems(allStatsTopGenres, statsSectionExpanded("genres"), statsVisibleLimits.genres, STATS_PREVIEW_LIMITS.genres));
-  const STATS_SECTION_TITLES: Record<StatsSectionId, string> = {
-    tracks: "Top Tracks", artists: "Top Artists", albums: "Top Albums", genres: "Top Genres", recent: "Recently Played",
-  };
   let statsTotalPlays = $derived(statsSnapshot?.totalPlays ?? (statsPeriod === "all" ? tracks.reduce((total, track) => total + track.playCount, 0) : 0));
   let statsDistinctTracks = $derived(periodTracks.filter((track) => track.playCount > 0).length);
   let statsDistinctArtists = $derived(new Set(periodTracks.filter((track) => track.playCount > 0)
     .map((track) => track.artist ?? track.albumArtist ?? "Unknown Artist")).size);
   let statsMaxDailyPlays = $derived(Math.max(1, ...(statsSnapshot?.dailyPlays ?? [])));
+  let statsChartStep = $derived(Math.max(1, Math.ceil(statsMaxDailyPlays / 4)));
   let statsActiveDays = $derived(statsSnapshot?.dailyPlays.filter((count) => count > 0).length ?? 0);
   let statsChartHasPlays = $derived((statsSnapshot?.dailyPlays ?? []).some((count) => count > 0));
   let statsChartDates = $derived(statsRange?.chartDates.slice(statsChartOffset, statsChartOffset + 90) ?? []);
+  let statsChartDateLabel = $derived(statsChartDates.length
+    ? statsRangeFormat.formatRange(new Date(statsChartDates[0]), new Date(statsChartDates[statsChartDates.length - 1]))
+    : "");
   let songFormatOptions = $derived<DropdownOption[]>(availableFormats.map((format) => ({ value: format, label: format })));
   let normalizedSearchQuery = $derived(normalizeSearch(activeView === "Songs" ? songsSearchQuery : searchQuery));
   let libraryTracksById = $derived(new Map(tracks.map((track) => [track.id, track])));
@@ -1249,8 +1252,7 @@
         }
 
         applyPlaybackStatus(status);
-        void maybeRecordTrackPlay();
-        if (status.hasEnded) await handleTrackEnd();
+        await handlePlaybackStatusUpdate(status);
       } catch (error) {
         if (!isStartingTrack && startId === playbackStartId && controlRevision === playbackControlRevision && !isTagWriteSuspendingPlayback
           && tagWriteGeneration === tagWritePlaybackGeneration) {
@@ -5007,6 +5009,11 @@
     return normalized || "Unknown error";
   }
 
+  async function handlePlaybackStatusUpdate(status: PlaybackStatus) {
+    void maybeRecordTrackPlay();
+    if (status.hasEnded) await handleTrackEnd();
+  }
+
   async function handleTrackEnd() {
     if (!currentTrack || isStartingTrack || isHandlingTrackEnd || hasCurrentTrackEnded) {
       return;
@@ -6625,17 +6632,7 @@
       return "View all";
     }
 
-    return section === "recent" ? "Most recent" : statsPeriod === "all" ? "All time" : "Selected period";
-  }
-
-  function statsSectionTotal(section: StatsSectionId) {
-    switch (section) {
-      case "tracks": return allStatsTopTracks.length;
-      case "artists": return allStatsTopArtists.length;
-      case "albums": return allStatsTopAlbums.length;
-      case "genres": return allStatsTopGenres.length;
-      case "recent": return allStatsRecentlyPlayedTracks.length;
-    }
+    return "";
   }
 
   function hasMoreStats(section: StatsSectionId, total: number) {
@@ -6992,10 +6989,6 @@
       return currentTrack ? currentTrack.title : "Current Track";
     }
 
-    if (activeView === "Stats" && statsDetailSection) {
-      return STATS_SECTION_TITLES[statsDetailSection];
-    }
-
     return activeView;
   }
 
@@ -7034,13 +7027,6 @@
       return scannedFolder
         ? `Library folder: ${scannedFolder}`
         : "No library folder is cached yet.";
-    }
-
-    if (activeView === "Stats") {
-      if (statsDetailSection) {
-        return `${statsViewAllLabel(statsDetailSection, statsSectionTotal(statsDetailSection))} · ${statsPeriod === "all" ? "All time" : "Selected listening period"}`;
-      }
-      return "Listening activity and library totals.";
     }
 
     if (activeView === "CD Rip") {
@@ -7124,7 +7110,7 @@
       bind:this={mainElement}
       tabindex="-1"
     >
-      {#if activeView !== "Now Playing" && !isAlbumDetailView && !isArtistDetailView && !isGenreDetailView && !isPlaylistDetailView}
+      {#if activeView !== "Now Playing" && activeView !== "Stats" && !isAlbumDetailView && !isArtistDetailView && !isGenreDetailView && !isPlaylistDetailView}
         <header class="home-header">
           <div>
             <p class="eyebrow">{viewEyebrow()}</p>
@@ -7464,14 +7450,23 @@
         </section>
       {:else if activeView === "Stats"}
         <section class="stats-page" aria-label="Listening and library statistics">
+          {#snippet statsTrackArt(track: Track)}
+            <span class="stats-mini-cover" aria-hidden="true">
+              <span>♪</span>
+              {#if track.coverArtPath}
+                <img src={localImageSource(track.coverArtPath) ?? ""} alt="" loading="lazy" onload={showLoadedImage} onerror={hideBrokenImage} />
+              {/if}
+            </span>
+          {/snippet}
+          <header class="stats-header">
           {#if statsDetailSection}
             <button class="back-button stats-back-button" type="button" onclick={closeStatsSection}>Back to Stats</button>
-            {#if statsError}<p class="stats-status" role="alert">{statsError}</p>{/if}
-            {#if statsLoading}<p class="stats-status" aria-live="polite">Loading listening statistics…</p>{/if}
           {:else}
+          <h2>Stats</h2>
           <div class="stats-period-toolbar">
-            <label for="stats-period">Listening period</label>
-            <select id="stats-period" bind:value={statsPeriod} onchange={() => { statsClock = Date.now(); }}>
+            <div class="stats-period-field">
+              <label for="stats-period">Listening period</label>
+              <select id="stats-period" bind:value={statsPeriod} onchange={() => { statsClock = Date.now(); }}>
               <option value="all">All time</option>
               <option value="today">Today</option>
               <option value="week">This week</option>
@@ -7480,109 +7475,121 @@
               <option value="year">This year</option>
               <option value="previousYear">Previous year</option>
               <option value="custom">Custom date range</option>
-            </select>
+              </select>
+            </div>
             {#if statsPeriod === "previousMonth"}
-              <label for="stats-month">Choose month (blank = previous month)</label>
-              <input id="stats-month" type="month" bind:value={statsSelectedMonth} />
+              <div class="stats-period-field">
+                <label for="stats-month">Month</label>
+                <input id="stats-month" type="month" bind:value={statsSelectedMonth} />
+              </div>
             {:else if statsPeriod === "previousYear"}
-              <label for="stats-year">Choose year (blank = previous year)</label>
-              <input id="stats-year" type="text" inputmode="numeric" maxlength="4" placeholder={String(new Date(statsClock).getFullYear() - 1)} bind:value={statsSelectedYear} />
+              <div class="stats-period-field">
+                <label for="stats-year">Year</label>
+                <input id="stats-year" type="text" inputmode="numeric" maxlength="4" placeholder={String(new Date(statsClock).getFullYear() - 1)} bind:value={statsSelectedYear} />
+              </div>
             {/if}
             {#if statsPeriod === "custom"}
-              <label for="stats-from">From</label>
-              <input id="stats-from" type="date" bind:value={statsCustomFrom} />
-              <label for="stats-to">Through</label>
-              <input id="stats-to" type="date" bind:value={statsCustomTo} />
+              <div class="stats-period-field">
+                <label for="stats-from">From</label>
+                <input id="stats-from" type="date" bind:value={statsCustomFrom} />
+              </div>
+              <div class="stats-period-field">
+                <label for="stats-to">Through</label>
+                <input id="stats-to" type="date" bind:value={statsCustomTo} />
+              </div>
             {/if}
           </div>
+          {/if}
+          </header>
           {#if !statsRange}
             <p class="stats-status" role="alert">Choose valid dates with “From” on or before “Through” (up to 100 years).</p>
           {:else if statsError}
             <p class="stats-status" role="alert">{statsError}</p>
-          {:else if statsLoading}
+          {:else if statsLoading && !statsSnapshot}
             <p class="stats-status" aria-live="polite">Loading listening statistics…</p>
           {/if}
+          {#if !statsDetailSection}
+          <section class="stats-chart-panel" aria-labelledby="daily-plays-title">
           <dl class="stats-overview-grid" aria-label="Selected listening period">
             {#each [
               { label: "Plays", value: statsTotalPlays },
               { label: "Songs played", value: statsDistinctTracks },
               { label: "Artists played", value: statsDistinctArtists },
-              { label: statsPeriod === "all" ? "Active days (last 30)" : "Active days", value: statsActiveDays },
+              { label: "Active days", value: statsActiveDays },
             ] as metric, index (metric.label)}
               <div class="stats-overview-card" class:highlight={index === 0}>
                 <dt>{metric.label}</dt>
-                <dd>{statsRange && !statsLoading && !statsError && (statsSnapshot || (statsPeriod === "all" && index < 3)) ? metric.value.toLocaleString() : "—"}</dd>
+                <dd>{statsRange && !statsError && (statsSnapshot || (!statsLoading && statsPeriod === "all" && index < 3)) ? metric.value.toLocaleString() : "—"}</dd>
+                {#if index === 3 && statsPeriod === "all"}<span>Last 30 days</span>{/if}
               </div>
             {/each}
           </dl>
 
-          {#if statsSnapshot}
-            <details class="stats-coverage">
-              <summary>Tracking coverage</summary>
-              <p class="stats-coverage-note">
-              {#if statsPeriod === "all"}
-                All-time totals include {statsSnapshot.undatedLegacyPlays} undated legacy plays. The chart shows only the most recent 30 local calendar days of dated events.
-              {:else}
-                Earlier all-time plays without recorded dates cannot be placed in this period.
-              {/if}
-              Detailed tracking start dates for this profile and imported sources:
-              {statsSnapshot.coverageSources.map((source) => source.detailedTrackingStartedAtUtc !== null ? new Date(source.detailedTrackingStartedAtUtc * 1000).toLocaleDateString() : "unknown").join(", ")}.
-              An older known last-played date does not establish complete earlier coverage.
-              {#if statsSnapshot.pendingTracks.length > 0}
-                {statsSnapshot.pendingTracks.length} retained track references are not in this library. Their plays remain in statistics using the backup’s labels; playback is unavailable until associated.
-              {/if}
-              </p>
-            </details>
-          {/if}
-
-          <section class="stats-chart-panel" aria-labelledby="daily-plays-title">
             <div class="stats-chart-heading">
               <h2 id="daily-plays-title">Daily plays</h2>
-              {#if statsChartDates.length}
-                <span>{statsChartDates[0]} – {statsChartDates.at(-1)}</span>
-              {/if}
+              <span>{statsChartDateLabel}</span>
             </div>
             {#if statsSnapshot && statsRange && statsChartHasPlays}
-              <div class="stats-chart-scroll" role="region" aria-label="Daily play counts; use Tab to inspect dates">
-                <div class="stats-chart-bars" style:--chart-days={statsChartDates.length}>
+              <div class="stats-chart">
+                <div class="stats-chart-scale" aria-hidden="true">
+                  {#each [4, 3, 2, 1, 0] as tick}
+                    <span>{(tick * statsChartStep).toLocaleString()}</span>
+                  {/each}
+                </div>
+                <div class="stats-chart-scroll" role="region" aria-label="Daily play counts">
+                <div class="stats-chart-bars" style:--chart-days={statsChartDates.length} class:dense={statsChartDates.length > 35}>
                   {#each statsChartDates as day, index (day)}
-                    <button type="button" class="stats-chart-day" aria-pressed={statsSelectedDay === day} aria-label={`${day}: ${playsLabel(statsSnapshot.dailyPlays[index + statsChartOffset] ?? 0)}`} title={`${day}: ${playsLabel(statsSnapshot.dailyPlays[index + statsChartOffset] ?? 0)}`} onclick={() => {
+                    {@const count = statsSnapshot.dailyPlays[index + statsChartOffset] ?? 0}
+                    {@const caption = `${day}: ${playsLabel(count)}`}
+                    <button type="button" class="stats-chart-day" aria-pressed={statsSelectedDay === day} aria-label={caption} title={caption} onclick={() => {
                       statsSelectedDay = day;
                     }}>
-                      <span class="stats-chart-value">{statsSnapshot.dailyPlays[index + statsChartOffset] ?? 0}</span>
-                      <span class="stats-chart-bar" class:zero={!statsSnapshot.dailyPlays[index + statsChartOffset]} style:height={`${Math.max(2, ((statsSnapshot.dailyPlays[index + statsChartOffset] ?? 0) / statsMaxDailyPlays) * 96)}px`}></span>
-                      <span class="stats-chart-date">{day.slice(5)}</span>
+                      <span class="stats-chart-plot" aria-hidden="true">
+                        <span class="stats-chart-bar" class:zero={!count} style:--bar-height={`${count / (4 * statsChartStep) * 100}%`}></span>
+                      </span>
+                      <span class="stats-chart-date" aria-hidden="true">
+                        {#if index % Math.max(1, Math.ceil(statsChartDates.length / 6)) === 0}
+                          {statsDayFormat.format(new Date(day))}
+                        {/if}
+                      </span>
                     </button>
                   {/each}
+                </div>
                 </div>
               </div>
               {#if statsSelectedDayLabel}<p class="stats-coverage-note" aria-live="polite">{statsSelectedDayLabel}</p>{/if}
               {#if statsRange.chartDates.length > 90}
                 <div class="stats-pagination">
-                  <button type="button" disabled={statsChartOffset === 0} onclick={() => { statsChartOffset = Math.max(0, statsChartOffset - 90); }}>Earlier days</button>
-                  <button type="button" disabled={statsChartOffset + 90 >= statsRange.chartDates.length} onclick={() => { statsChartOffset += 90; }}>Later days</button>
+                  <button type="button" disabled={statsChartOffset === 0} onclick={() => { statsChartOffset = Math.max(0, statsChartOffset - 90); statsSelectedDay = null; }}>Earlier days</button>
+                  <button type="button" disabled={statsChartOffset + 90 >= statsRange.chartDates.length} onclick={() => { statsChartOffset += 90; statsSelectedDay = null; }}>Later days</button>
                 </div>
               {/if}
             {:else if statsSnapshot}
-              <p class="stats-coverage-note">No dated plays in this chart period.</p>
+              <p class="stats-chart-empty">No plays with dates in this period.</p>
+            {/if}
+            {#if statsSnapshot}
+              <details class="stats-coverage">
+                <summary>Tracking coverage</summary>
+                <p class="stats-coverage-note">
+                  {#if statsPeriod === "all"}
+                    All-time totals include {statsSnapshot.undatedLegacyPlays} plays without dates. The chart covers the last 30 days.
+                  {:else}
+                    This period includes plays with recorded dates.
+                  {/if}
+                  {#if statsSnapshot.coverageSources.length > 0}
+                    Detailed tracking began on {statsSnapshot.coverageSources.map((source) => source.detailedTrackingStartedAtUtc !== null ? new Date(source.detailedTrackingStartedAtUtc * 1000).toLocaleDateString() : "an unknown date").join(", ")}.
+                  {/if}
+                  {#if statsSnapshot.pendingTracks.length > 0}
+                    History includes {statsSnapshot.pendingTracks.length} tracks outside the current library.
+                  {/if}
+                </p>
+              </details>
             {/if}
           </section>
-          <details class="stats-coverage stats-library-summary">
-            <summary>Library totals</summary>
-            <dl>
-              {#each [
-                { label: "Songs", value: tracks.length },
-                { label: "Albums", value: displayAlbums.length },
-                { label: "Artists", value: displayArtists.length },
-                { label: "Genres", value: displayGenres.length },
-                { label: "Liked songs", value: favoriteTracks.length },
-              ] as item (item.label)}
-                <div><dt>{item.label}</dt><dd>{hasLoadedCache ? item.value.toLocaleString() : "—"}</dd></div>
-              {/each}
-            </dl>
-          </details>
           {/if}
 
+          {#if statsRange && (!statsLoading || statsSnapshot) && !statsError}
+          <div class="stats-section-grid" class:full-list={statsDetailSection !== null}>
           {#if !statsDetailSection || statsDetailSection === "tracks"}
           <LibrarySection
             title="Top Tracks"
@@ -7590,11 +7597,8 @@
             onViewAll={!statsDetailSection && allStatsTopTracks.length > STATS_PREVIEW_LIMITS.tracks ? () => openStatsSection("tracks") : undefined}
           >
             {#if statsTopTracks.length === 0}
-              <div class="group-empty">
-                <h3>No top tracks yet</h3>
-                <p>Tracks appear here after they pass the play-count threshold.</p>
-              </div>
-            {:else}
+              <p class="stats-empty">No track plays in this period.</p>
+            {:else if statsDetailSection === "tracks"}
               <TrackList
                 tracks={statsTopTracks}
                 unavailableTrackIds={statsUnavailableIds}
@@ -7614,12 +7618,31 @@
                   {/if}
                 </div>
               {/if}
+            {:else}
+              <ol class="stats-rank-list">
+                {#each statsTopTracks as track, index (track.id)}
+                  <li>
+                    <button class="stats-rank-card" type="button" disabled={statsUnavailableIds.has(track.id)}
+                      onclick={() => handleStatsTrackSelect(track, statsTopTracks)}
+                      oncontextmenu={(event) => {
+                        event.preventDefault();
+                        openStatsTrackContextMenu(track, statsTopTracks, event.clientX, event.clientY);
+                      }}>
+                      <span class="stats-rank-number">{index + 1}</span>
+                      {@render statsTrackArt(track)}
+                      <span class="stats-rank-copy">
+                        <strong title={track.title}>{track.title}</strong>
+                        <small>{track.artist ?? track.albumArtist ?? "Unknown Artist"}</small>
+                      </span>
+                      <span class="stats-rank-count">{playsLabel(track.playCount)}</span>
+                    </button>
+                  </li>
+                {/each}
+              </ol>
             {/if}
           </LibrarySection>
           {/if}
 
-          {#if statsDetailSection !== "tracks"}
-          <div class="stats-section-grid" class:full-list={statsDetailSection !== null}>
             {#if !statsDetailSection || statsDetailSection === "artists"}
             <LibrarySection
               title="Top Artists"
@@ -7627,10 +7650,7 @@
               onViewAll={!statsDetailSection && allStatsTopArtists.length > STATS_PREVIEW_LIMITS.artists ? () => openStatsSection("artists") : undefined}
             >
               {#if statsTopArtists.length === 0}
-                <div class="group-empty compact">
-                  <h3>No artist play data yet</h3>
-                  <p>Artist totals will appear after songs are played.</p>
-                </div>
+                <p class="stats-empty">No artist plays in this period.</p>
               {:else}
                 <div class="stats-rank-list">
                   {#each statsTopArtists as stat, index}
@@ -7641,8 +7661,9 @@
                       </span>
                       <span class="stats-rank-copy">
                         <strong>{stat.name}</strong>
-                        <small>{playsLabel(stat.totalPlays)} · {songCountLabel(stat.songCount)}</small>
+                        <small>{songCountLabel(stat.songCount)}</small>
                       </span>
+                      <span class="stats-rank-count">{playsLabel(stat.totalPlays)}</span>
                     </button>
                   {/each}
                 </div>
@@ -7665,10 +7686,7 @@
               onViewAll={!statsDetailSection && allStatsTopAlbums.length > STATS_PREVIEW_LIMITS.albums ? () => openStatsSection("albums") : undefined}
             >
               {#if statsTopAlbums.length === 0}
-                <div class="group-empty compact">
-                  <h3>No album play data yet</h3>
-                  <p>Album totals will appear after songs are played.</p>
-                </div>
+                <p class="stats-empty">No album plays in this period.</p>
               {:else}
                 <div class="stats-rank-list">
                   {#each statsTopAlbums as stat, index}
@@ -7688,8 +7706,9 @@
                       </span>
                       <span class="stats-rank-copy">
                         <strong>{stat.album.title}</strong>
-                        <small>{stat.album.artist} · {playsLabel(stat.totalPlays)} · {songCountLabel(stat.songCount)}</small>
+                        <small>{stat.album.artist}</small>
                       </span>
+                      <span class="stats-rank-count">{playsLabel(stat.totalPlays)}</span>
                     </button>
                   {/each}
                 </div>
@@ -7712,10 +7731,7 @@
               onViewAll={!statsDetailSection && allStatsTopGenres.length > STATS_PREVIEW_LIMITS.genres ? () => openStatsSection("genres") : undefined}
             >
               {#if statsTopGenres.length === 0}
-                <div class="group-empty compact">
-                  <h3>No genre play data yet</h3>
-                  <p>Genre totals will appear after songs with genre data are played.</p>
-                </div>
+                <p class="stats-empty">No genre plays in this period.</p>
               {:else}
                 <div class="stats-rank-list">
                   {#each statsTopGenres as stat, index}
@@ -7726,8 +7742,9 @@
                       </span>
                       <span class="stats-rank-copy">
                         <strong>{stat.genre.name}</strong>
-                        <small>{playsLabel(stat.totalPlays)} · {songCountLabel(stat.songCount)}</small>
+                        <small>{songCountLabel(stat.songCount)}</small>
                       </span>
+                      <span class="stats-rank-count">{playsLabel(stat.totalPlays)}</span>
                     </button>
                   {/each}
                 </div>
@@ -7750,10 +7767,7 @@
               onViewAll={!statsDetailSection && allStatsRecentlyPlayedTracks.length > STATS_PREVIEW_LIMITS.recent ? () => openStatsSection("recent") : undefined}
             >
               {#if statsRecentlyPlayedTracks.length === 0}
-                <div class="group-empty compact">
-                  <h3>No playback history yet</h3>
-                  <p>Recently played tracks will appear after playback is recorded.</p>
-                </div>
+                <p class="stats-empty">No recently played tracks in this period.</p>
               {:else}
                 <div class="stats-recent-list">
                   {#each statsRecentlyPlayedTracks as track}
@@ -7769,18 +7783,7 @@
                         openStatsTrackContextMenu(track, statsRecentlyPlayedTracks, event.clientX, event.clientY);
                       }}
                     >
-                      <span class="mini-cover stats-mini-cover" aria-hidden="true">
-                        <span>{track.extension.toUpperCase()}</span>
-                        {#if track.coverArtPath}
-                          <img
-                            src={localImageSource(track.coverArtPath) ?? ""}
-                            alt=""
-                            loading="lazy"
-                            onload={showLoadedImage}
-                            onerror={hideBrokenImage}
-                          />
-                        {/if}
-                      </span>
+                      {@render statsTrackArt(track)}
                       <span class="stats-rank-copy">
                         <strong>{track.title}</strong>
                         <small>{track.artist ?? "Unknown Artist"}{track.album ? ` · ${track.album}` : ""}</small>
@@ -7799,6 +7802,23 @@
                 {/if}
               {/if}
             </LibrarySection>
+            {/if}
+
+            {#if !statsDetailSection}
+              <section class="stats-library-summary" aria-labelledby="stats-library-title">
+                <h2 id="stats-library-title">Library totals</h2>
+                <dl>
+                  {#each [
+                    { label: "Songs", value: tracks.length },
+                    { label: "Albums", value: displayAlbums.length },
+                    { label: "Artists", value: displayArtists.length },
+                    { label: "Genres", value: displayGenres.length },
+                    { label: "Liked songs", value: favoriteTracks.length },
+                  ] as item (item.label)}
+                    <div><dt>{item.label}</dt><dd>{hasLoadedCache ? item.value.toLocaleString() : "—"}</dd></div>
+                  {/each}
+                </dl>
+              </section>
             {/if}
           </div>
           {/if}
@@ -14506,8 +14526,25 @@
   .stats-page {
     display: grid;
     grid-template-columns: minmax(0, 1fr);
-    gap: 22px;
-    max-width: 1120px;
+    gap: 24px;
+    width: min(100%, 1320px);
+    margin-inline: auto;
+    container: stats / inline-size;
+  }
+
+  .stats-header {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: end;
+    justify-content: space-between;
+    gap: 14px 24px;
+  }
+
+  .stats-header > h2 {
+    margin: 0;
+    font-size: clamp(2.5rem, 4.8vw, 3.65rem);
+    line-height: 1.05;
+    letter-spacing: -0.04em;
   }
 
   .stats-period-toolbar,
@@ -14518,7 +14555,13 @@
     gap: 10px;
   }
 
-  .stats-period-toolbar label {
+  .stats-period-field {
+    display: grid;
+    gap: 5px;
+    min-width: 0;
+  }
+
+  .stats-period-field label {
     color: var(--text-soft);
     font-size: 0.78rem;
     font-weight: 800;
@@ -14534,12 +14577,20 @@
     color: var(--text);
     font: inherit;
     padding: 6px 10px;
+    max-width: 100%;
+  }
+
+  .stats-period-toolbar select {
+    min-width: min(168px, 100%);
+  }
+
+  .stats-period-toolbar input[inputmode="numeric"] {
+    width: 90px;
   }
 
   .stats-period-toolbar :is(select, input):focus-visible,
   .stats-transfer-panel :is(select, button):focus-visible,
-  .stats-chart-day:focus-visible,
-  .stats-chart-scroll:focus-visible {
+  .stats-chart-day:focus-visible {
     outline: 2px solid var(--accent);
     outline-offset: 2px;
   }
@@ -14552,7 +14603,6 @@
     line-height: 1.5;
   }
 
-  .stats-chart-panel,
   .stats-transfer-panel {
     min-width: 0;
     border: 1px solid var(--border);
@@ -14561,18 +14611,32 @@
     padding: 16px;
   }
 
+  .stats-chart-panel,
+  .stats-library-summary,
+  .stats-section-grid > :global(.library-section) {
+    min-width: 0;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: var(--panel-soft);
+    padding: clamp(16px, 2.3vw, 28px);
+  }
+
+  .stats-chart-panel {
+    background: linear-gradient(160deg, color-mix(in srgb, var(--accent) 6%, var(--panel-soft)), var(--panel-soft) 58%);
+  }
+
   .stats-chart-heading {
     display: flex;
     flex-wrap: wrap;
     align-items: baseline;
     justify-content: space-between;
     gap: 6px 16px;
-    margin-bottom: 12px;
+    margin: 22px 0 14px;
   }
 
   .stats-chart-heading h2 {
     margin: 0;
-    font-size: 1rem;
+    font-size: 1.12rem;
   }
 
   .stats-chart-heading span,
@@ -14587,42 +14651,94 @@
     font-weight: 750;
   }
 
+  .stats-coverage {
+    margin-top: 18px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border);
+  }
+
   .stats-coverage[open] > :not(summary) {
     margin-top: 8px;
   }
 
+  .stats-library-summary h2 {
+    margin: 0;
+    font-size: 1.08rem;
+  }
+
   .stats-library-summary dl {
+    margin: 12px 0 0;
+  }
+
+  .stats-library-summary dl > div {
     display: flex;
-    flex-wrap: wrap;
-    gap: 10px 24px;
-    margin-bottom: 0;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-soft);
+  }
+
+  .stats-library-summary dl > div:last-child {
+    border-bottom: 0;
   }
 
   .stats-library-summary dd {
     margin: 0;
     color: var(--text);
     font-weight: 750;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .stats-chart {
+    --plot-height: clamp(124px, 22vh, 206px);
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 10px;
+    align-items: start;
+  }
+
+  .stats-chart-scale {
+    display: flex;
+    flex-direction: column;
+    align-items: end;
+    justify-content: space-between;
+    height: calc(var(--plot-height) + 8px);
+    margin-top: 4px;
+    color: var(--text-soft);
+    font-size: 0.7rem;
+    font-variant-numeric: tabular-nums;
+    line-height: 1;
   }
 
   .stats-chart-scroll {
     overflow-x: auto;
-    padding: 8px 2px 4px;
+    padding: 8px 3px 4px;
+    scrollbar-width: thin;
   }
 
   .stats-chart-bars {
     display: grid;
-    grid-template-columns: repeat(var(--chart-days), minmax(36px, 1fr));
-    align-items: end;
-    gap: 5px;
-    min-height: 128px;
+    grid-template-columns: repeat(var(--chart-days), minmax(15px, 1fr));
+    width: max-content;
     min-width: 100%;
+    background: repeating-linear-gradient(to bottom, var(--border) 0 1px, transparent 1px 25%)
+      top / 100% var(--plot-height) no-repeat;
+  }
+
+  .stats-chart-bars.dense {
+    grid-template-columns: repeat(var(--chart-days), minmax(20px, 1fr));
+  }
+
+  .stats-chart-bars:has(.stats-chart-day:only-child) {
+    grid-template-columns: minmax(72px, 1fr);
   }
 
   .stats-chart-day {
+    position: relative;
     display: grid;
-    align-items: end;
     justify-items: center;
-    gap: 4px;
+    grid-template-rows: var(--plot-height) 22px;
     min-width: 0;
     color: var(--text-soft);
     font-size: 0.68rem;
@@ -14632,23 +14748,68 @@
     cursor: pointer;
   }
 
-  .stats-chart-value { font-weight: 800; }
-  .stats-chart-date { white-space: nowrap; }
+  .stats-chart-day:focus-visible {
+    z-index: 1;
+    outline-offset: 0;
+  }
+
+  .stats-chart-plot {
+    display: flex;
+    align-items: end;
+    justify-content: center;
+    width: 100%;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .stats-chart-date {
+    position: absolute;
+    bottom: 0;
+    left: 50%;
+    transform: translateX(-50%);
+    white-space: nowrap;
+    pointer-events: none;
+  }
+
+  .stats-chart-day:first-child .stats-chart-date {
+    left: 0;
+    transform: none;
+  }
+
   .stats-chart-bar {
     display: block;
-    width: 26px;
+    width: clamp(5px, 68%, 28px);
+    height: var(--bar-height);
+    min-height: 2px;
     border-radius: 4px 4px 0 0;
-    background: var(--accent);
+    background: linear-gradient(to top, color-mix(in srgb, var(--accent) 58%, var(--panel-soft)), var(--accent));
   }
 
   .stats-chart-bar.zero {
     background: var(--border-strong);
   }
 
-  .stats-chart-day[aria-pressed="true"] {
+  .stats-chart-day:is(:hover, [aria-pressed="true"]) {
     color: var(--text);
     background: var(--panel-hover);
     border-radius: 4px;
+  }
+
+  .stats-chart-day[aria-pressed="true"] .stats-chart-bar:not(.zero) {
+    background: var(--accent-text);
+  }
+
+  .stats-chart-empty,
+  .stats-empty {
+    margin: 0;
+    color: var(--text-soft);
+    font-size: 0.9rem;
+  }
+
+  .stats-chart-empty {
+    display: grid;
+    min-height: 105px;
+    place-items: center;
+    border-block: 1px solid var(--border);
   }
 
   .stats-transfer-panel,
@@ -14691,47 +14852,51 @@
   .stats-overview-grid {
     display: grid;
     grid-template-columns: repeat(4, minmax(0, 1fr));
-    gap: 12px;
     margin: 0;
+    border-bottom: 1px solid var(--border);
   }
 
   .stats-overview-card {
     min-width: 0;
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    background: var(--panel-soft);
-    padding: 16px;
+    padding: 4px clamp(10px, 2vw, 24px) 18px;
   }
 
-  .stats-overview-card.highlight {
-    border-color: var(--accent-strong);
+  .stats-overview-card:first-child {
+    padding-left: 0;
   }
 
-  .stats-overview-card dt {
-    display: block;
-    margin-bottom: 8px;
+  .stats-overview-card + .stats-overview-card {
+    border-left: 1px solid var(--border);
+  }
+
+  .stats-overview-card dt,
+  .stats-overview-card > span {
     color: var(--text-soft);
-    font-size: 0.76rem;
-    font-weight: 850;
-    text-transform: uppercase;
+    font-size: 0.83rem;
+    font-weight: 650;
   }
 
   .stats-overview-card dd {
-    margin: 0;
-    display: block;
+    margin: 4px 0 0;
     overflow: hidden;
     color: var(--text);
-    font-size: 1.55rem;
-    font-weight: 900;
+    font-size: clamp(1.65rem, 3.3vw, 3.2rem);
+    font-weight: 800;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.05em;
     line-height: 1.1;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
 
+  .stats-overview-card.highlight dd {
+    color: var(--accent-text);
+  }
+
   .stats-section-grid {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 22px;
+    gap: 18px;
   }
 
   .stats-section-grid.full-list {
@@ -14743,13 +14908,34 @@
   }
 
   .stats-section-grid :global(.library-section) {
-    min-width: 0;
+    align-content: start;
+  }
+
+  .stats-section-grid > :global(.library-section + .library-section) {
+    margin-top: 0;
+  }
+
+  .stats-section-grid :global(.section-header button) {
+    min-height: 28px;
+    border-color: transparent;
+    background: transparent;
+    color: var(--accent-text);
+    cursor: pointer;
+    padding-inline: 6px;
+  }
+
+  .stats-section-grid :global(.section-header button:hover),
+  .stats-section-grid :global(.section-header button:focus-visible) {
+    background: var(--panel-hover);
   }
 
   .stats-rank-list,
   .stats-recent-list {
     display: grid;
-    gap: 8px;
+    gap: 2px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
   }
 
   .stats-rank-card,
@@ -14758,60 +14944,62 @@
     align-items: center;
     width: 100%;
     min-width: 0;
-    min-height: 68px;
-    border: 1px solid var(--border);
+    min-height: 53px;
+    border: 1px solid transparent;
     border-radius: 8px;
-    background: var(--panel-soft);
+    background: transparent;
     color: inherit;
-    cursor: default;
+    cursor: pointer;
     font: inherit;
-    padding: 10px;
+    padding: 7px 6px;
     text-align: left;
   }
 
   .stats-rank-card {
-    grid-template-columns: 32px 48px minmax(0, 1fr);
-    gap: 10px;
+    grid-template-columns: 20px 36px minmax(0, 1fr) auto;
+    gap: 8px;
   }
 
   .stats-recent-card {
-    grid-template-columns: 48px minmax(0, 1fr) minmax(120px, auto);
-    gap: 12px;
+    grid-template-columns: 36px minmax(0, 1fr) auto;
+    gap: 8px;
   }
 
-  .stats-rank-card:hover,
+  .stats-rank-card:hover:not(:disabled),
   .stats-rank-card:focus-visible,
-  .stats-recent-card:hover,
+  .stats-recent-card:hover:not(:disabled),
   .stats-recent-card:focus-visible {
     border-color: var(--accent-strong);
     background: var(--panel-hover);
     outline: none;
   }
 
+  .stats-rank-card:disabled,
+  .stats-recent-card:disabled {
+    cursor: default;
+    opacity: 0.6;
+  }
+
   .stats-rank-number {
-    display: grid;
-    width: 30px;
-    height: 30px;
-    place-items: center;
-    border-radius: 7px;
-    background: var(--bg-soft);
     color: var(--text-soft);
     font-size: 0.78rem;
-    font-weight: 900;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    text-align: center;
   }
 
   .stats-avatar,
   .stats-cover,
   .stats-genre-mark,
   .stats-mini-cover {
-    width: 48px;
-    height: 48px;
+    width: 36px;
+    height: 36px;
     margin: 0;
     flex: 0 0 auto;
   }
 
   .stats-cover .album-art-disc {
-    border-width: 7px;
+    border-width: 5px;
   }
 
   .stats-genre-mark,
@@ -14833,7 +15021,7 @@
   .stats-mini-cover {
     background: var(--panel-strong);
     color: var(--text-soft);
-    font-size: 0.66rem;
+    font-size: 1rem;
     font-weight: 900;
   }
 
@@ -14858,7 +15046,8 @@
 
   .stats-rank-copy strong,
   .stats-rank-copy small,
-  .stats-played-at {
+  .stats-played-at,
+  .stats-rank-count {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -14912,6 +15101,44 @@
   .stats-played-at {
     justify-self: end;
     max-width: 180px;
+  }
+
+  .stats-rank-count {
+    justify-self: end;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+
+  @container stats (max-width: 730px) {
+    .stats-section-grid {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
+
+  @container stats (max-width: 520px) {
+    .stats-overview-grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .stats-overview-card:nth-child(3) {
+      border-left: 0;
+      padding-left: 0;
+    }
+
+    .stats-overview-card:nth-child(n+3) {
+      border-top: 1px solid var(--border);
+      padding-top: 12px;
+    }
+
+    .stats-recent-card {
+      grid-template-columns: 36px minmax(0, 1fr);
+    }
+
+    .stats-played-at {
+      grid-column: 2;
+      justify-self: start;
+      max-width: 100%;
+    }
   }
 
   .settings-panel {
@@ -16919,8 +17146,7 @@
     .cd-status-grid,
     .cd-metadata-form,
     .settings-status-list,
-    .settings-tool-grid,
-    .stats-overview-grid {
+    .settings-tool-grid {
       grid-template-columns: repeat(2, minmax(0, 1fr));
     }
 
@@ -17180,23 +17406,12 @@
     }
 
     .settings-control-list,
-    .about-grid,
-    .stats-section-grid {
+    .about-grid {
       grid-template-columns: 1fr;
     }
 
     .cd-track-row {
       grid-template-columns: 52px minmax(130px, 1.1fr) minmax(110px, 0.9fr) 80px minmax(100px, 0.8fr) minmax(0, 1fr);
-    }
-
-    .stats-recent-card {
-      grid-template-columns: 48px minmax(0, 1fr);
-    }
-
-    .stats-played-at {
-      grid-column: 2;
-      justify-self: start;
-      max-width: 100%;
     }
 
     .queue-panel {
@@ -17282,8 +17497,7 @@
     .cd-status-grid,
     .cd-metadata-form,
     .settings-status-list,
-    .settings-tool-grid,
-    .stats-overview-grid {
+    .settings-tool-grid {
       grid-template-columns: minmax(0, 1fr);
     }
 
