@@ -1249,7 +1249,8 @@
         }
 
         applyPlaybackStatus(status);
-        await handlePlaybackStatusUpdate(status);
+        void maybeRecordTrackPlay();
+        if (status.hasEnded) await handleTrackEnd();
       } catch (error) {
         if (!isStartingTrack && startId === playbackStartId && controlRevision === playbackControlRevision && !isTagWriteSuspendingPlayback
           && tagWriteGeneration === tagWritePlaybackGeneration) {
@@ -5006,17 +5007,6 @@
     return normalized || "Unknown error";
   }
 
-  async function handlePlaybackStatusUpdate(status: PlaybackStatus) {
-    const startId = playbackStartId;
-    await maybeRecordTrackPlay();
-
-    if (!status.hasEnded || startId !== playbackStartId || status.filePath !== currentTrack?.filePath) {
-      return;
-    }
-
-    await handleTrackEnd();
-  }
-
   async function handleTrackEnd() {
     if (!currentTrack || isStartingTrack || isHandlingTrackEnd || hasCurrentTrackEnded) {
       return;
@@ -5070,15 +5060,19 @@
       return;
     }
 
-    countedPlaybackTrackId = currentTrack.id;
+    const trackId = currentTrack.id;
+    const eventId = playbackSessionEventId;
+    countedPlaybackTrackId = trackId;
 
     try {
-      applyUpdatedTrack(await recordTrackPlay(currentTrack.id, playbackSessionEventId));
+      applyUpdatedTrack(await recordTrackPlay(trackId, eventId));
       statsClock = Date.now();
       statsRevision += 1;
     } catch (error) {
-      countedPlaybackTrackId = null;
-      playbackError = error instanceof Error ? error.message : String(error);
+      if (playbackSessionEventId === eventId) {
+        countedPlaybackTrackId = null;
+        playbackError = error instanceof Error ? error.message : String(error);
+      }
     }
   }
 
