@@ -51,7 +51,7 @@ foreach ($name in @(
 }
 
 & $python scripts/audit-release-artifacts.py `
-  --workspace . --version $version --license LICENSE `
+  --workspace . --version $version --windows-beta --license LICENSE `
   --installed-windows-dir $installRoot
 if ($LASTEXITCODE -ne 0) {
   throw "The installed package has an unresolved or unlisted DLL dependency"

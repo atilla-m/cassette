@@ -23,7 +23,7 @@ if (process.platform === "win32") {
   const cargoManifest = readFileSync(join(workspace, "src-tauri/Cargo.toml"), "utf8");
   const cargoVersion = /^version\s*=\s*"([^"]+)"/m.exec(cargoManifest)?.[1];
   if (configuration.version !== expectedVersion || cargoVersion !== expectedVersion
-      || !/^\d+\.\d+\.\d+-beta\.[\dA-Za-z]+(?:\.[\dA-Za-z-]+)*$/.test(expectedVersion)) {
+      || !/^\d+\.\d+\.\d+-beta\.[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*$/.test(expectedVersion)) {
     throw new Error("Windows beta version must match in package.json, Cargo.toml and tauri.conf.json.");
   }
   if (forwardedArguments.includes("--config") && process.env.GITHUB_REF_NAME !== `windows-v${expectedVersion}`) {

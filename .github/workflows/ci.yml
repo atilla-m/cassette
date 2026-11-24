@@ -228,6 +228,7 @@ jobs:
           python scripts/audit-release-artifacts.py `
             --workspace . `
             --version $env:RELEASE_VERSION `
+            --windows-beta `
             --license LICENSE `
             --frontend build `
             --artifact src-tauri/target/x86_64-pc-windows-msvc/release/cassette.exe `

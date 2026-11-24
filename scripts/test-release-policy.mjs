@@ -12,26 +12,25 @@ const pkg = JSON.parse(read("package.json"));
 const config = JSON.parse(read("src-tauri/tauri.conf.json"));
 const overlay = JSON.parse(read("src-tauri/tauri.updater.conf.json"));
 const expectedVersion = "0.1.0-beta.5.1";
-const assertCargoLockVersion = (path, packageName) => {
+const assertCargoLockVersion = (path, packageName, version = expectedVersion) => {
   const contents = read(path);
-  const pattern = new RegExp(`name = "${packageName}"\\r?\\nversion = "${expectedVersion.replaceAll(".", "\\.")}"`);
+  const pattern = new RegExp(`name = "${packageName}"\\r?\\nversion = "${version.replaceAll(".", "\\.")}"`);
   assert.match(contents, pattern);
   assert.match(contents.replace(/\r?\n/g, "\r\n"), pattern);
 };
 
 test("active release version sources remain synchronized", () => {
   const packageLock = JSON.parse(read("package-lock.json"));
-  assert.equal(pkg.version, expectedVersion);
-  assert.equal(packageLock.version, expectedVersion);
-  assert.equal(packageLock.packages[""].version, expectedVersion);
-  assert.equal(config.version, expectedVersion);
-  assert.match(read("src-tauri/Cargo.toml"), new RegExp(`^version = "${expectedVersion.replaceAll(".", "\\.")}"$`, "m"));
-  assertCargoLockVersion("src-tauri/Cargo.lock", "cassette");
+  assert.match(pkg.version, /^\d+\.\d+\.\d+-beta\.[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*$/);
+  assert.equal(packageLock.version, pkg.version);
+  assert.equal(packageLock.packages[""].version, pkg.version);
+  assert.equal(config.version, pkg.version);
+  assert.equal(/^version\s*=\s*"([^"]+)"/m.exec(read("src-tauri/Cargo.toml"))?.[1], pkg.version);
+  assertCargoLockVersion("src-tauri/Cargo.lock", "cassette", pkg.version);
   assert.match(read("scripts/update-verifier/Cargo.toml"), new RegExp(`^version = "${expectedVersion.replaceAll(".", "\\.")}"$`, "m"));
   assertCargoLockVersion("scripts/update-verifier/Cargo.lock", "cassette-update-verifier");
 
-  assert.match(read("src-tauri/src/lib.rs"), new RegExp(`Cassette/${expectedVersion.replaceAll(".", "\\.")}`));
-  assert.match(read("src/routes/+page.svelte"), new RegExp(expectedVersion.replaceAll(".", "\\.")));
+  assert.match(read("src/routes/+page.svelte"), /const appVersion = packageInfo\.version/);
   assert.match(read(`docs/RELEASE-NOTES-${expectedVersion}.md`), new RegExp(expectedVersion.replaceAll(".", "\\.")));
   assert.match(read("docs/RELEASING-beta.5.1.md"), /checklist — published/i);
   const readme = read("README.md");

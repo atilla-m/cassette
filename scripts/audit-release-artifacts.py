@@ -982,6 +982,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--frontend", action="append", type=Path, default=[])
     parser.add_argument("--artifact", action="append", type=Path, default=[])
     parser.add_argument("--installed-windows-dir", type=Path)
+    parser.add_argument("--windows-beta", action="store_true")
     return parser.parse_args()
 
 
@@ -994,7 +995,15 @@ def main() -> int:
         return 2
 
     audit = Audit(workspace, args.version, license_path.resolve())
-    if audit.expected_version != EXPECTED_VERSION:
+    if args.windows_beta:
+        installer = f"Cassette_{audit.expected_version}_x64-setup.exe"
+        if not re.fullmatch(r"\d+\.\d+\.\d+-beta\.[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*", audit.expected_version):
+            audit.fail("Expected a Windows beta release version")
+        if not (args.installed_windows_dir or args.artifact) or any(
+            path.name not in {"cassette.exe", installer} for path in args.artifact
+        ):
+            audit.fail("Windows beta inspection requires an installed Windows package or exact Windows artifacts")
+    elif audit.expected_version != EXPECTED_VERSION:
         audit.fail(f"Checkpoint 2A accepts only version {EXPECTED_VERSION}")
 
     audit_configuration(audit)
