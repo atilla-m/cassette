@@ -52,7 +52,7 @@ Cassette requires WebKitGTK and GStreamer with the base, good, bad/codec, ugly/r
 
 Linux notifications call the external `notify-send` command. The package recommends `libnotify-bin` on Debian/Ubuntu or `libnotify` on Fedora, but it is optional: when absent, notification attempts report that notification support is unavailable without preventing Cassette from launching or using the music library.
 
-Cassette can detect and rip audio CDs to FLAC on Windows and Linux. Windows uses the optical drive and the bundled FLAC encoder. It supports discs containing only audio tracks. Linux uses `cdparanoia`, `flac`, and `libdiscid`. Missing CD tools only affect CD features. Experimental video/DVD functionality is disabled for this beta.
+CD detection and ripping remain an optional Linux feature and use `cdparanoia`, `flac`, and `libdiscid`. Missing CD tools produce a feature-specific error and do not affect the core music library. Experimental video/DVD functionality is disabled for this beta, so its external tools are neither required nor advertised as available beta features.
 
 ### Data and uninstall
 
@@ -79,9 +79,9 @@ Run only the command appropriate for the installed package. Package removal does
 rm -r -- "${XDG_DATA_HOME:-$HOME/.local/share}/io.github.atilla.cassette"
 ```
 
-## Windows 10/11 x86_64 prerelease candidate
+## Windows 10/11 x86_64 (deferred)
 
-The Windows candidate uses the `0.1.0-beta.5.1` Linux release source with Windows-specific packaging and playback fixes. CI builds an unsigned NSIS installer with a private GStreamer runtime and the offline WebView2 installer. Clean Windows installation and the loaded-track tag editing checks are pending. See [the Windows qualification notes](docs/GSTREAMER-WINDOWS.md).
+Windows installer work remains on a separate feature branch and is not part of the Linux beta.5.1 release. Its remaining manual loaded-track editing check must pass before Windows distribution. No Windows installer is among beta.5.1's four Linux assets. See [docs/GSTREAMER-WINDOWS.md](docs/GSTREAMER-WINDOWS.md) for development context; it is not a Windows installation guide.
 
 ## Tag editors
 
