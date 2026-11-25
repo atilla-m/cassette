@@ -23,6 +23,7 @@
     movePlaylistTrack,
     recordTrackPlay,
     getListeningStats,
+    removeListeningEvent,
     chooseHistoryExportPath,
     chooseHistoryImportPath,
     exportListeningHistory,
@@ -104,7 +105,7 @@
   import { buildAlbums, buildArtists, buildGenres } from "$lib/data/libraryViews";
   import { statsRangeForPeriod, type StatsPeriod } from "$lib/utils/statsPeriod";
   import { resolveStatsPlayback, statsDayValueLabel } from "$lib/utils/listeningStats";
-  import type { ListeningStats, ListeningImportPreview } from "$lib/types/listening";
+  import type { ListeningStats, ListeningImportPreview, RecentListen } from "$lib/types/listening";
   import { albums as mockAlbums, artists as mockArtists, genres as mockGenres, navItems } from "$lib/data/mockLibrary";
   import { ENABLE_EXPERIMENTAL_VIDEOS } from "$lib/featureFlags";
   import type {
@@ -693,6 +694,8 @@
   let statsSnapshot = $state<ListeningStats | null>(null);
   let statsLoading = $state(false);
   let statsError = $state<string | null>(null);
+  let removingListenId = $state<string | null>(null);
+  let removeListenError = $state<string | null>(null);
   let historyImportPath = $state<string | null>(null);
   let historyImportPreview = $state<ListeningImportPreview | null>(null);
   let historyBusy = $state(false);
@@ -798,12 +801,14 @@
     return { ...track, playCount: count?.plays ?? 0, lastPlayedAt: count?.lastPlayedAt ?? null };
   }), ...statsPendingTracks]);
   let allStatsTopTracks = $derived(mostPlayed(periodTracks));
-  let allStatsRecentlyPlayedTracks = $derived(recentlyPlayed(periodTracks));
+  let statsRecentQueue = $derived(recentlyPlayed(periodTracks));
+  let statsTracksById = $derived(new Map(periodTracks.map((track) => [track.id, track])));
+  let statsRecentListens = $derived(statsSnapshot?.recentListens ?? []);
+  let statsRecentCount = $derived((statsPeriod === "all" ? statsSnapshot?.datedPlays : statsSnapshot?.totalPlays) ?? 0);
   let allStatsTopArtists = $derived(buildTopArtistStats(periodTracks, buildArtists(periodTracks)));
   let allStatsTopAlbums = $derived(buildTopAlbumStats(periodTracks, buildAlbums(periodTracks)));
   let allStatsTopGenres = $derived(buildTopGenreStats(periodTracks, buildGenres(periodTracks)));
   let statsTopTracks = $derived(visibleStatsItems(allStatsTopTracks, statsSectionExpanded("tracks"), statsVisibleLimits.tracks, STATS_PREVIEW_LIMITS.tracks));
-  let statsRecentlyPlayedTracks = $derived(visibleStatsItems(allStatsRecentlyPlayedTracks, statsSectionExpanded("recent"), statsVisibleLimits.recent, STATS_PREVIEW_LIMITS.recent));
   let statsTopArtists = $derived(visibleStatsItems(allStatsTopArtists, statsSectionExpanded("artists"), statsVisibleLimits.artists, STATS_PREVIEW_LIMITS.artists));
   let statsTopAlbums = $derived(visibleStatsItems(allStatsTopAlbums, statsSectionExpanded("albums"), statsVisibleLimits.albums, STATS_PREVIEW_LIMITS.albums));
   let statsTopGenres = $derived(visibleStatsItems(allStatsTopGenres, statsSectionExpanded("genres"), statsVisibleLimits.genres, STATS_PREVIEW_LIMITS.genres));
@@ -1013,7 +1018,8 @@
     statsLastRangeKey = rangeKey;
     statsLoading = true;
     statsError = null;
-    void getListeningStats(range.startUtc, range.endUtc, range.dayBoundariesUtc)
+    const recentLimit = statsSectionExpanded("recent") ? statsVisibleLimits.recent : STATS_PREVIEW_LIMITS.recent;
+    void getListeningStats(range.startUtc, range.endUtc, range.dayBoundariesUtc, recentLimit)
       .then((result) => {
         if (requestId === statsRequestId) statsSnapshot = result;
       })
@@ -6717,6 +6723,21 @@
     if (selection) openTrackContextMenu(selection.track, selection.queue, x, y);
   }
 
+  async function handleRemoveListen(listen: RecentListen, title: string) {
+    if (removingListenId || !window.confirm(`Remove the listen for “${title}” recorded on ${formatDateTime(listen.playedAtUtc)}?`)) return;
+    removingListenId = listen.eventId;
+    removeListenError = null;
+    try {
+      const track = await removeListeningEvent(listen.eventId);
+      if (track) applyUpdatedTrack(track);
+      statsRevision += 1;
+    } catch (error) {
+      removeListenError = error instanceof Error ? error.message : String(error);
+    } finally {
+      removingListenId = null;
+    }
+  }
+
   async function handleExportListeningHistory() {
     if (historyBusy) return;
     historyBusy = true;
@@ -7956,40 +7977,53 @@
             {#if !statsDetailSection || statsDetailSection === "recent"}
             <LibrarySection
               title="Recently Played"
-              viewAllLabel={statsViewAllLabel("recent", allStatsRecentlyPlayedTracks.length)}
-              onViewAll={!statsDetailSection && allStatsRecentlyPlayedTracks.length > STATS_PREVIEW_LIMITS.recent ? () => openStatsSection("recent") : undefined}
+              viewAllLabel={statsViewAllLabel("recent", statsRecentCount)}
+              onViewAll={!statsDetailSection && statsRecentCount > STATS_PREVIEW_LIMITS.recent ? () => openStatsSection("recent") : undefined}
             >
-              {#if statsRecentlyPlayedTracks.length === 0}
-                <p class="stats-empty">No recently played tracks in this period.</p>
+              {#if removeListenError}<p class="stats-status" role="alert">{removeListenError}</p>{/if}
+              {#if statsRecentListens.length === 0}
+                <p class="stats-empty">No dated listens in this period.</p>
               {:else}
                 <div class="stats-recent-list">
-                  {#each statsRecentlyPlayedTracks as track}
-                    <button
-                      class="stats-recent-card"
-                      type="button"
-                      title={track.filePath}
-                      disabled={statsUnavailableIds.has(track.id)}
-                      onclick={() => handleStatsTrackSelect(track, statsRecentlyPlayedTracks)}
-                      oncontextmenu={(event) => {
-                        event.preventDefault();
-                        event.stopPropagation();
-                        openStatsTrackContextMenu(track, statsRecentlyPlayedTracks, event.clientX, event.clientY);
-                      }}
-                    >
-                      {@render statsTrackArt(track)}
-                      <span class="stats-rank-copy">
-                        <strong>{track.title}</strong>
-                        <small>{track.artist ?? "Unknown Artist"}{track.album ? ` · ${track.album}` : ""}</small>
-                      </span>
-                      <span class="stats-played-at">{lastPlayedLabel(track)}</span>
-                    </button>
+                  {#each statsRecentListens as listen (listen.eventId)}
+                    {@const track = statsTracksById.get(listen.trackId)}
+                    {@const title = track?.title ?? "Unavailable track"}
+                    <div class="stats-recent-entry">
+                      <button
+                        class="stats-recent-card"
+                        type="button"
+                        title={track?.filePath || "Track unavailable"}
+                        disabled={!track?.filePath}
+                        onclick={() => track && handleStatsTrackSelect(track, statsRecentQueue)}
+                        oncontextmenu={(event) => {
+                          if (!track?.filePath) return;
+                          event.preventDefault();
+                          event.stopPropagation();
+                          openStatsTrackContextMenu(track, statsRecentQueue, event.clientX, event.clientY);
+                        }}
+                      >
+                        {#if track}{@render statsTrackArt(track)}{:else}<span aria-hidden="true"></span>{/if}
+                        <span class="stats-rank-copy">
+                          <strong>{title}</strong>
+                          <small>{track?.artist ?? "Unknown Artist"}{track?.album ? ` · ${track.album}` : ""}</small>
+                        </span>
+                        <span class="stats-played-at">{formatDateTime(listen.playedAtUtc)}</span>
+                      </button>
+                      <button
+                        class="stats-remove-listen"
+                        type="button"
+                        aria-label={`Remove listen for ${title} from ${formatDateTime(listen.playedAtUtc)}`}
+                        disabled={removingListenId !== null}
+                        onclick={() => handleRemoveListen(listen, title)}
+                      >{removingListenId === listen.eventId ? "Removing…" : "Remove listen"}</button>
+                    </div>
                   {/each}
                 </div>
                 {#if statsSectionExpanded("recent")}
                   <div class="stats-pagination" aria-live="polite">
-                    <span>Showing {statsRecentlyPlayedTracks.length} of {allStatsRecentlyPlayedTracks.length} unique tracks</span>
-                    {#if hasMoreStats("recent", allStatsRecentlyPlayedTracks.length)}
-                      <button type="button" onclick={() => loadMoreStats("recent", allStatsRecentlyPlayedTracks.length)}>Load 50 more</button>
+                    <span>Showing {statsRecentListens.length} of {statsRecentCount} listens</span>
+                    {#if hasMoreStats("recent", statsRecentCount)}
+                      <button type="button" onclick={() => loadMoreStats("recent", statsRecentCount)}>Load 50 more</button>
                     {/if}
                   </div>
                 {/if}
@@ -10220,7 +10254,7 @@
                   <div>
                     <span>Track change notifications</span>
                     <strong>Unavailable</strong>
-                    <small>Linux-only in Cassette 0.1.0-beta.8.</small>
+                    <small>Linux-only in Cassette 0.1.0-beta.9.</small>
                   </div>
                 {/if}
               </div>
@@ -15225,6 +15259,31 @@
     font: inherit;
     padding: 7px 6px;
     text-align: left;
+  }
+
+  .stats-recent-entry {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 6px;
+    align-items: center;
+  }
+
+  .stats-remove-listen {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--panel);
+    color: var(--text-soft);
+    padding: 6px 8px;
+    cursor: pointer;
+    font: inherit;
+    font-size: 0.72rem;
+  }
+
+  .stats-remove-listen:hover:not(:disabled),
+  .stats-remove-listen:focus-visible {
+    border-color: var(--accent-strong);
+    background: var(--panel-hover);
+    color: var(--text);
   }
 
   .stats-rank-card {

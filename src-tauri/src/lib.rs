@@ -61,7 +61,7 @@ const MAX_FOLDER_COVER_BYTES: u64 = 25 * 1024 * 1024;
 const MAX_LYRICS_BYTES: u64 = 1024 * 1024;
 const GENRE_SCOPE_ALBUM: &str = "album";
 const GENRE_SCOPE_ARTIST: &str = "artist";
-const MUSICBRAINZ_USER_AGENT: &str = "Cassette/0.1.0-beta.8 (local music player; contact: none)";
+const MUSICBRAINZ_USER_AGENT: &str = "Cassette/0.1.0-beta.9 (local music player; contact: none)";
 const SUPPORTED_TAG_FORMATS_LABEL: &str = "FLAC, MP3, Ogg/Vorbis, Opus, WAV, and M4A/AAC";
 
 #[derive(Debug, Clone, Serialize)]
@@ -597,6 +597,7 @@ struct PlaybackState {
     has_ended: bool,
     pending_eos: bool,
     stream_started: bool,
+    stream_changed: bool,
     stream_group: Option<gst::GroupId>,
     end_observation: Option<PlaybackEndObservation>,
 }
@@ -677,8 +678,7 @@ impl TagEditPlaybackRelease<'_> {
             if self.was_playing {
                 set_gst_state(&playbin, gst::State::Playing)?;
             }
-            self.playback
-                .consume_playback_event(&playbin, gst::ClockTime::from_mseconds(150))?;
+            self.playback.wait_for_playback_start(&playbin)?;
             Ok(())
         })();
         self.playback.end_observation = None;
@@ -1127,7 +1127,7 @@ fn send_linux_playback_notification(
     {
         let _ = (title, body, notifications);
         Err(
-            "Desktop notifications are available only on Linux in Cassette 0.1.0-beta.8."
+            "Desktop notifications are available only on Linux in Cassette 0.1.0-beta.9."
                 .to_owned(),
         )
     }
@@ -1427,7 +1427,7 @@ async fn detect_dvd() -> Result<DvdDetectResult, String> {
     }
 
     #[cfg(not(target_os = "linux"))]
-    Err("DVD detection and import are available only on Linux in Cassette 0.1.0-beta.8.".to_owned())
+    Err("DVD detection and import are available only on Linux in Cassette 0.1.0-beta.9.".to_owned())
 }
 
 #[tauri::command]
@@ -1443,7 +1443,7 @@ async fn scan_dvd_titles(source: String) -> Result<DvdTitleScanResult, String> {
     {
         let _ = source;
         Err(
-            "DVD detection and import are available only on Linux in Cassette 0.1.0-beta.8."
+            "DVD detection and import are available only on Linux in Cassette 0.1.0-beta.9."
                 .to_owned(),
         )
     }
@@ -1482,7 +1482,7 @@ async fn import_dvd_title(
     {
         let _ = (source, title_number, output_folder, metadata, app, library);
         Err(
-            "DVD detection and import are available only on Linux in Cassette 0.1.0-beta.8."
+            "DVD detection and import are available only on Linux in Cassette 0.1.0-beta.9."
                 .to_owned(),
         )
     }
@@ -5951,9 +5951,8 @@ impl PlaybackState {
             drain_playback_bus(&playbin);
             playbin.set_property("uri", uri.as_str());
             self.gapless.stage(file_path, next);
-            set_gst_state(&playbin, gst::State::Playing).and_then(|()| {
-                self.consume_playback_event(&playbin, gst::ClockTime::from_mseconds(150))
-            })
+            set_gst_state(&playbin, gst::State::Playing)
+                .and_then(|()| self.wait_for_playback_start(&playbin))
         };
         self.end_observation = None;
         if let Err(error) = result {
@@ -6045,12 +6044,38 @@ impl PlaybackState {
 
     fn reset_stream_tracking(&mut self) {
         self.stream_started = false;
+        self.stream_changed = false;
         self.stream_group = None;
         self.pending_eos = false;
     }
 
     fn consume_pending_playback_events(&mut self, playbin: &gst::Element) -> Result<(), String> {
         while self.consume_playback_event(playbin, gst::ClockTime::ZERO)? {}
+        // A preloaded URI can change before the sink starts the next stream.
+        if self.stream_changed {
+            if let Some(path) = self.gapless.take_started_track(playbin) {
+                self.stream_changed = false;
+                self.current_path = Some(path);
+                self.has_ended = false;
+                self.end_observation = None;
+            }
+        }
+        Ok(())
+    }
+
+    fn wait_for_playback_start(&mut self, playbin: &gst::Element) -> Result<(), String> {
+        let deadline = Instant::now() + Duration::from_millis(150);
+        while !self.pending_eos {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero()
+                || !self.consume_playback_event(
+                    playbin,
+                    gst::ClockTime::from_nseconds(remaining.as_nanos() as u64),
+                )?
+            {
+                break;
+            }
+        }
         Ok(())
     }
 
@@ -6063,20 +6088,10 @@ impl PlaybackState {
             None => return Ok(false),
             Some(PlaybackBusEvent::Ended) => self.pending_eos = true,
             Some(PlaybackBusEvent::StreamStarted(group)) => {
-                let switched_stream =
+                self.stream_changed |=
                     self.stream_started && (group.is_none() || group != self.stream_group);
                 self.stream_started = true;
                 self.stream_group = group;
-                // playbin can change current-uri while its sink is still playing
-                // the old stream. Associate the queued file at the stream boundary.
-                if switched_stream {
-                    if let Some(path) = self.gapless.take_started_track(playbin) {
-                        self.current_path = Some(path);
-                        self.has_ended = false;
-                        self.pending_eos = false;
-                        self.end_observation = None;
-                    }
-                }
             }
         }
         Ok(true)
@@ -6860,7 +6875,7 @@ impl VideoPlaybackState {
         _start_position_seconds: Option<f64>,
     ) -> Result<VideoPlaybackStatus, String> {
         Err(
-            "Cassette-controlled video playback is available only on Linux in Cassette 0.1.0-beta.8."
+            "Cassette-controlled video playback is available only on Linux in Cassette 0.1.0-beta.9."
                 .to_owned(),
         )
     }
@@ -6893,14 +6908,14 @@ impl VideoPlaybackState {
 
     fn bring_to_front(&mut self) -> Result<VideoPlaybackStatus, String> {
         Err(
-            "Cassette-controlled video playback is available only on Linux in Cassette 0.1.0-beta.8."
+            "Cassette-controlled video playback is available only on Linux in Cassette 0.1.0-beta.9."
                 .to_owned(),
         )
     }
 
     fn toggle_fullscreen(&mut self) -> Result<VideoPlaybackStatus, String> {
         Err(
-            "Cassette-controlled video playback is available only on Linux in Cassette 0.1.0-beta.8."
+            "Cassette-controlled video playback is available only on Linux in Cassette 0.1.0-beta.9."
                 .to_owned(),
         )
     }
@@ -6949,7 +6964,7 @@ impl VideoPlaybackState {
             is_fullscreen: self.is_fullscreen,
             backend: "unavailable".to_owned(),
             error: Some(
-                "Cassette-controlled video playback is available only on Linux in Cassette 0.1.0-beta.8."
+                "Cassette-controlled video playback is available only on Linux in Cassette 0.1.0-beta.9."
                     .to_owned(),
             ),
         }
@@ -7148,13 +7163,7 @@ fn drain_playback_bus(playbin: &gst::Element) {
         return;
     };
 
-    while bus
-        .timed_pop_filtered(
-            gst::ClockTime::ZERO,
-            &[gst::MessageType::Error, gst::MessageType::Eos],
-        )
-        .is_some()
-    {}
+    while bus.pop().is_some() {}
 }
 
 fn set_gst_state(playbin: &gst::Element, state: gst::State) -> Result<(), String> {
@@ -7189,14 +7198,17 @@ fn poll_playback_event(
         return Ok(None);
     };
 
-    let Some(message) = bus.timed_pop_filtered(
-        timeout,
-        &[
-            gst::MessageType::Error,
-            gst::MessageType::Eos,
-            gst::MessageType::StreamStart,
-        ],
-    ) else {
+    let message_types = [
+        gst::MessageType::Error,
+        gst::MessageType::Eos,
+        gst::MessageType::StreamStart,
+    ];
+    let message = if timeout == gst::ClockTime::ZERO {
+        bus.pop_filtered(&message_types)
+    } else {
+        bus.timed_pop_filtered(timeout, &message_types)
+    };
+    let Some(message) = message else {
         return Ok(None);
     };
 
@@ -7366,7 +7378,7 @@ fn ffprobe_video_codec_info(_path: &Path) -> VideoCodecInfo {
         resolution: None,
         duration_seconds: None,
         error: Some(
-            "Video inspection is available only on Linux in Cassette 0.1.0-beta.8.".to_owned(),
+            "Video inspection is available only on Linux in Cassette 0.1.0-beta.9.".to_owned(),
         ),
     }
 }
@@ -10446,7 +10458,7 @@ fn lyrics_metadata_path(lyrics_path: &Path) -> Option<PathBuf> {
 async fn search_lrclib_lyrics_results(track: &Track) -> Result<Vec<LrclibLyricsResult>, String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(12))
-        .user_agent("Cassette/0.1.0-beta.8 local lyrics lookup")
+        .user_agent("Cassette/0.1.0-beta.9 local lyrics lookup")
         .build()
         .map_err(|error| format!("Could not prepare lyrics lookup: {error}"))?;
     let query = lrclib_query(track);
@@ -13919,6 +13931,7 @@ pub fn run() {
             record_track_play,
             ignored_tracks::set_ignored_tracks,
             listening_stats::get_listening_stats,
+            listening_stats::remove_listening_event,
             portable_history::export_listening_history,
             portable_history::preview_listening_history_import,
             portable_history::import_listening_history,

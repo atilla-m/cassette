@@ -1,5 +1,8 @@
+export type RecentListen = { eventId: string; trackId: string; playedAtUtc: number };
+
 export type ListeningStats = {
   trackCounts: Array<{ trackId: string; plays: number; lastPlayedAt: number | null }>;
+  recentListens: RecentListen[];
   dailyPlays: number[];
   totalPlays: number;
   datedPlays: number;

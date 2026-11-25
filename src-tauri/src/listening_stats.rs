@@ -1,7 +1,7 @@
 use super::portable_history::CoverageSource;
 use super::portable_history::PortableRef;
-use super::LibraryDatabase;
-use rusqlite::params;
+use super::{LibraryDatabase, Track};
+use rusqlite::{params, OptionalExtension};
 use serde::Serialize;
 use std::sync::Mutex;
 use tauri::State;
@@ -18,6 +18,7 @@ pub(crate) struct TrackPeriodCount {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ListeningStats {
     track_counts: Vec<TrackPeriodCount>,
+    recent_listens: Vec<RecentListen>,
     daily_plays: Vec<i64>,
     total_plays: i64,
     dated_plays: i64,
@@ -25,6 +26,14 @@ pub(crate) struct ListeningStats {
     detailed_history_started_at_utc: Option<i64>,
     pending_tracks: Vec<PendingTrack>,
     coverage_sources: Vec<CoverageSource>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RecentListen {
+    event_id: String,
+    track_id: String,
+    played_at_utc: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -44,6 +53,7 @@ impl LibraryDatabase {
         start_utc: Option<i64>,
         end_utc: Option<i64>,
         day_boundaries_utc: &[i64],
+        recent_limit: u32,
     ) -> Result<ListeningStats, String> {
         if start_utc.is_some() != end_utc.is_some()
             || start_utc
@@ -154,6 +164,38 @@ impl LibraryDatabase {
             }
         }
 
+        let recent_listens = if recent_limit == 0 {
+            Vec::new()
+        } else {
+            let mut statement = self
+                .connection
+                .prepare(
+                    "SELECT event_id, track_id, played_at_utc FROM track_play_events \
+                 WHERE played_at_utc >= ?1 AND played_at_utc < ?2 \
+                   AND track_id NOT IN (SELECT track_id FROM ignored_tracks) \
+                 ORDER BY played_at_utc DESC, event_id DESC LIMIT ?3",
+                )
+                .map_err(|error| format!("Could not query recent listens: {error}"))?;
+            let rows = statement
+                .query_map(
+                    params![
+                        start_utc.unwrap_or(i64::MIN),
+                        end_utc.unwrap_or(i64::MAX),
+                        recent_limit
+                    ],
+                    |row| {
+                        Ok(RecentListen {
+                            event_id: row.get(0)?,
+                            track_id: row.get(1)?,
+                            played_at_utc: row.get(2)?,
+                        })
+                    },
+                )
+                .map_err(|error| format!("Could not query recent listens: {error}"))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(|error| format!("Could not read recent listens: {error}"))?
+        };
+
         let mut pending_tracks = Vec::new();
         let mut statement = self
             .connection
@@ -203,6 +245,7 @@ impl LibraryDatabase {
         };
         Ok(ListeningStats {
             track_counts,
+            recent_listens,
             daily_plays,
             total_plays,
             dated_plays,
@@ -212,6 +255,34 @@ impl LibraryDatabase {
             coverage_sources,
         })
     }
+
+    fn remove_listening_event(&mut self, event_id: &str) -> Result<Option<Track>, String> {
+        let transaction = self
+            .connection
+            .transaction()
+            .map_err(|error| error.to_string())?;
+        let track_id: Option<String> = transaction
+            .query_row(
+                "DELETE FROM track_play_events WHERE event_id = ?1 RETURNING track_id",
+                [event_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| format!("Could not remove the listen: {error}"))?;
+        let Some(track_id) = track_id else {
+            return Ok(None);
+        };
+        transaction.execute(
+            "UPDATE tracks SET play_count = MAX(0, play_count - 1), \
+             last_played_at = (SELECT MAX(played_at_utc) FROM track_play_events WHERE track_id = ?1) \
+             WHERE id = ?1",
+            [&track_id],
+        ).map_err(|error| format!("Could not update playback totals: {error}"))?;
+        transaction
+            .commit()
+            .map_err(|error| format!("Could not save listening history: {error}"))?;
+        self.track_by_id(&track_id)
+    }
 }
 
 #[tauri::command(async)]
@@ -219,12 +290,24 @@ pub(crate) fn get_listening_stats(
     start_utc: Option<i64>,
     end_utc: Option<i64>,
     day_boundaries_utc: Vec<i64>,
+    recent_limit: u32,
     library: State<'_, Mutex<LibraryDatabase>>,
 ) -> Result<ListeningStats, String> {
     let library = library
         .lock()
         .map_err(|_| "Library cache is unavailable.".to_owned())?;
-    library.listening_stats(start_utc, end_utc, &day_boundaries_utc)
+    library.listening_stats(start_utc, end_utc, &day_boundaries_utc, recent_limit)
+}
+
+#[tauri::command(async)]
+pub(crate) fn remove_listening_event(
+    event_id: String,
+    library: State<'_, Mutex<LibraryDatabase>>,
+) -> Result<Option<Track>, String> {
+    let mut library = library
+        .lock()
+        .map_err(|_| "Library cache is unavailable.".to_owned())?;
+    library.remove_listening_event(&event_id)
 }
 
 #[cfg(test)]
@@ -258,18 +341,20 @@ mod tests {
     fn stats_periods_are_half_open_and_all_time_includes_undated_legacy_totals() {
         let database = database();
         let selected = database
-            .listening_stats(Some(100), Some(200), &[100, 150, 200])
+            .listening_stats(Some(100), Some(200), &[100, 150, 200], 50)
             .unwrap();
         assert_eq!(selected.total_plays, 2);
         assert_eq!(selected.track_counts.len(), 1);
         assert_eq!(selected.daily_plays, vec![1, 1]);
         assert_eq!(selected.undated_legacy_plays, 9);
+        assert_eq!(selected.recent_listens[0].event_id, "event-before-end");
+        assert_eq!(selected.recent_listens[1].event_id, "event-at-start");
         let next = database
-            .listening_stats(Some(200), Some(300), &[200, 300])
+            .listening_stats(Some(200), Some(300), &[200, 300], 50)
             .unwrap();
         assert_eq!(next.total_plays, 1);
         let all = database
-            .listening_stats(None, None, &[100, 200, 300])
+            .listening_stats(None, None, &[100, 200, 300], 50)
             .unwrap();
         assert_eq!(all.total_plays, 12);
         assert_eq!(all.dated_plays, 3);
@@ -288,37 +373,86 @@ mod tests {
             .record_play_at("a", "00000000-0000-4000-8000-000000000001", 175)
             .unwrap();
         let stats = database
-            .listening_stats(None, None, &[100, 200, 300])
+            .listening_stats(None, None, &[100, 200, 300], 50)
             .unwrap();
         assert_eq!(stats.total_plays, 3);
         assert_eq!(stats.daily_plays, vec![0, 1]);
         assert_eq!(stats.dated_plays, 1);
-        let stats = database.listening_stats(Some(100), Some(200), &[]).unwrap();
+        assert_eq!(stats.recent_listens.len(), 1);
+        assert_eq!(stats.recent_listens[0].track_id, "b");
+        let stats = database
+            .listening_stats(Some(100), Some(200), &[], 50)
+            .unwrap();
         assert_eq!(stats.total_plays, 0);
         database
             .connection
             .execute("DELETE FROM ignored_tracks", [])
             .unwrap();
         let restored = database
-            .listening_stats(None, None, &[100, 200, 300])
+            .listening_stats(None, None, &[100, 200, 300], 50)
             .unwrap();
         assert_eq!(restored.total_plays, 12);
         assert_eq!(restored.daily_plays, vec![2, 1]);
     }
 
     #[test]
+    fn removing_one_listen_preserves_other_events_and_undated_totals() {
+        let mut database = database();
+        let duplicate = "00000000-0000-4000-8000-000000000003";
+        database.record_play_at("a", duplicate, 199).unwrap();
+        let updated = database
+            .remove_listening_event("event-before-end")
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.play_count, 9);
+        assert_eq!(updated.last_played_at, Some(199));
+        assert!(database
+            .remove_listening_event("event-before-end")
+            .unwrap()
+            .is_none());
+
+        let latest = database
+            .listening_stats(Some(100), Some(200), &[100, 150, 200], 1)
+            .unwrap();
+        assert_eq!(latest.total_plays, 2);
+        assert_eq!(latest.daily_plays, vec![1, 1]);
+        assert_eq!(latest.recent_listens.len(), 1);
+        assert_eq!(latest.recent_listens[0].event_id, duplicate);
+        assert_eq!(latest.recent_listens[0].played_at_utc, 199);
+
+        let updated = database.remove_listening_event(duplicate).unwrap().unwrap();
+        assert_eq!(updated.play_count, 8);
+        assert_eq!(updated.last_played_at, Some(100));
+        let updated = database
+            .remove_listening_event("event-at-start")
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.play_count, 7);
+        assert_eq!(updated.last_played_at, None);
+        let all = database.listening_stats(None, None, &[], 50).unwrap();
+        assert_eq!(all.total_plays, 10);
+        assert_eq!(all.undated_legacy_plays, 9);
+        assert_eq!(all.dated_plays, 1);
+        assert_eq!(all.recent_listens[0].event_id, "event-at-end");
+    }
+
+    #[test]
     fn stats_invalid_empty_ranges_and_dst_length_days() {
         let database = database();
-        assert!(database.listening_stats(Some(100), None, &[]).is_err());
-        assert!(database.listening_stats(Some(200), Some(100), &[]).is_err());
-        assert!(database.listening_stats(None, None, &[100, 100]).is_err());
+        assert!(database.listening_stats(Some(100), None, &[], 50).is_err());
+        assert!(database
+            .listening_stats(Some(200), Some(100), &[], 50)
+            .is_err());
+        assert!(database
+            .listening_stats(None, None, &[100, 100], 50)
+            .is_err());
         let empty = database
-            .listening_stats(Some(300), Some(400), &[300, 400])
+            .listening_stats(Some(300), Some(400), &[300, 400], 50)
             .unwrap();
         assert_eq!(empty.total_plays, 0);
         assert_eq!(empty.daily_plays, vec![0]);
         let dst = database
-            .listening_stats(Some(0), Some(172800), &[0, 23 * 3600, 48 * 3600])
+            .listening_stats(Some(0), Some(172800), &[0, 23 * 3600, 48 * 3600], 50)
             .unwrap();
         assert_eq!(dst.daily_plays, vec![3, 0]);
     }
@@ -334,7 +468,7 @@ mod tests {
         for index in 0..125 {
             database.connection.execute("INSERT INTO tracks (id, title, file_path, file_name, extension, scanned_at, play_count) VALUES (?1, ?1, ?1, ?1, 'wav', 1, 1)", [format!("synthetic-{index:03}")]).unwrap();
         }
-        let all = database.listening_stats(None, None, &[]).unwrap();
+        let all = database.listening_stats(None, None, &[], 50).unwrap();
         assert_eq!(all.track_counts.len(), 127);
         assert_eq!(all.total_plays, 137);
     }

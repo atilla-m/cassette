@@ -177,10 +177,14 @@ export async function getListeningStats(
   startUtc: number | null,
   endUtc: number | null,
   dayBoundariesUtc: number[],
+  recentLimit: number,
 ): Promise<ListeningStats> {
-  return invoke<ListeningStats>("get_listening_stats", { startUtc, endUtc, dayBoundariesUtc });
+  return invoke<ListeningStats>("get_listening_stats", { startUtc, endUtc, dayBoundariesUtc, recentLimit });
 }
 
+export async function removeListeningEvent(eventId: string): Promise<Track | null> {
+  return invoke<Track | null>("remove_listening_event", { eventId });
+}
 export async function chooseHistoryExportPath(): Promise<string | null> {
   const selected = await save({
     title: "Export listening history",
