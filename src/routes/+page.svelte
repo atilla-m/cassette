@@ -10220,7 +10220,7 @@
                   <div>
                     <span>Track change notifications</span>
                     <strong>Unavailable</strong>
-                    <small>Linux-only in Cassette 0.1.0-beta.7.</small>
+                    <small>Linux-only in Cassette 0.1.0-beta.8.</small>
                   </div>
                 {/if}
               </div>

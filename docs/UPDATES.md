@@ -2,7 +2,7 @@
 
 ## Current status
 
-Windows and Linux use the same production verification key. The [beta.7 checklist](RELEASING-beta.7.md) covers both platform releases. Linux AppImage and DEB/RPM update checks use the existing GitHub Pages beta feed. Windows checks published `windows-v` GitHub prereleases. The [beta.6 checklist](RELEASING-beta.6.md) records the prior paired release.
+Windows and Linux use the same production verification key. The [beta.8 checklist](RELEASING-beta.8.md) covers both platform releases. Linux AppImage and DEB/RPM update checks use the existing GitHub Pages beta feed. Windows checks published `windows-v` GitHub prereleases. The [beta.7 checklist](RELEASING-beta.7.md) records the prior paired release.
 
 The immutable beta.1 evidence remains historical: annotated tag `v0.1.0-beta.1` (tag object `f2f7dc0c1af47a370d5df6f7a0e61bb6bd8ed087`) targets commit `e239ead18d0b73032498038532b2768ecce25a3e`; signed workflow run `34475557727` produced artifact `10151906575` (`169926732` archive bytes, SHA-256 `460c5dac018a2f65c8d474d1fb149c89018ccd485d8ee4a10f6b98bee767bc0b`), recovered into unpublished draft release `386309067`. The verified files were AppImage `42c2004528577f3a18fcf395ebd159d048b0dde54e2c03963d6fab765cf88ed2`, signature `d4a78da58e755b11b18dbd11747f9c7bc5e18b0487886d827282eb4cd5c991b7`, DEB `308bfa20ee83038e70a0a2fe7d8a1245b43971187126e73b4158613fa11bdb80`, and RPM `6ef405d17c9653b04aa226bfaa3941130d9ecf3e7a13a742e98cf13559be481d`. These values document the superseded candidate; they are not selectors for the current release.
 

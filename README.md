@@ -4,15 +4,15 @@ Cassette is a private, local-first desktop music library and player for Windows 
 
 ## Beta status
 
-Cassette 0.1.0-beta.7 is the current prerelease. Both platform packages use the same source commit. See the [beta.7 release notes](docs/RELEASE-NOTES-0.1.0-beta.7.md).
+Cassette 0.1.0-beta.8 is the current prerelease. Both platform packages use the same source commit. See the [beta.8 release notes](docs/RELEASE-NOTES-0.1.0-beta.8.md).
 
-Download `Cassette_0.1.0-beta.7_x64-setup.exe` from the [Windows x64 release](https://github.com/atilla-m/cassette/releases/tag/windows-v0.1.0-beta.7).
+Download `Cassette_0.1.0-beta.8_x64-setup.exe` from the [Windows x64 release](https://github.com/atilla-m/cassette/releases/tag/windows-v0.1.0-beta.8).
 
-Choose the package matching your installation method from the [Linux x86_64 release](https://github.com/atilla-m/cassette/releases/tag/v0.1.0-beta.7).
+Choose the package matching your installation method from the [Linux x86_64 release](https://github.com/atilla-m/cassette/releases/tag/v0.1.0-beta.8).
 
-- `Cassette_0.1.0-beta.7_amd64.AppImage` is the portable AppImage and the recommended download.
-- `Cassette_0.1.0-beta.7_amd64.deb` is for the Ubuntu package path.
-- `Cassette-0.1.0-beta.7-1.x86_64.rpm` is for the Fedora package path.
+- `Cassette_0.1.0-beta.8_amd64.AppImage` is the portable AppImage and the recommended download.
+- `Cassette_0.1.0-beta.8_amd64.deb` is for the Ubuntu package path.
+- `Cassette-0.1.0-beta.8-1.x86_64.rpm` is for the Fedora package path.
 
 Earlier Linux releases include [beta.5.1](https://github.com/atilla-m/cassette/releases/tag/v0.1.0-beta.5.1) and [beta.4](https://github.com/atilla-m/cassette/releases/tag/v0.1.0-beta.4). Beta.4 shipped `Cassette_0.1.0-beta.4_amd64.AppImage`, `Cassette_0.1.0-beta.4_amd64.deb`, and `Cassette-0.1.0-beta.4-1.x86_64.rpm`.
 
@@ -108,7 +108,7 @@ The 13 ignored real-media fixture tests are intentionally excluded from normal v
 
 Report beta problems through [Cassette GitHub Issues](https://github.com/atilla-m/cassette/issues). Include the operating system, package format, Cassette version, relevant GStreamer/runtime details, reproduction steps, and sanitized logs; do not attach private library databases or personal media.
 
-See the [beta.7 release checklist](docs/RELEASING-beta.7.md) and [artifact scanner documentation](docs/ARTIFACT-SAFETY.md).
+See the [beta.8 release checklist](docs/RELEASING-beta.8.md) and [artifact scanner documentation](docs/ARTIFACT-SAFETY.md).
 Updater security, signing-key custody, and beta-feed publication are documented in [docs/UPDATES.md](docs/UPDATES.md).
 
 Cassette is free software licensed under the [GNU General Public License version 3 or later](LICENSE) (`GPL-3.0-or-later`). The full license is included in application bundle resources.
