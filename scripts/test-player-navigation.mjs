@@ -46,6 +46,19 @@ function expression(source, node, name) {
   return part?.expression ? source.slice(part.expression.start, part.expression.end) : null;
 }
 
+test("the main player subscribes to the target used by Windows media commands", () => {
+  const route = readFileSync(new URL("../src/routes/+page.svelte", import.meta.url), "utf8");
+  const windows = readFileSync(new URL("../src-tauri/src/windows_media_controls.rs", import.meta.url), "utf8");
+  const label = windows.match(/app\.emit_to\("([^"]+)", event, /)?.[1];
+  assert.equal(label, "main");
+  const commands = [...windows.matchAll(/Button::\w+ => Some\("(media-[\w-]+)"\)/g)].map(([, event]) => event);
+  assert.deepEqual(commands.sort(), ["media-next", "media-pause", "media-play", "media-previous", "media-stop"]);
+  for (const event of commands) {
+    const registration = route.split(/\r?\n/).find((line) => line.includes(`listen("${event}"`));
+    assert.ok(registration?.includes(`{ target: "${label}" }`), `${event} must listen on the targeted window`);
+  }
+});
+
 test("browsing history has one persistent header outside the conditional sidebar and scrolling page", () => {
   const { elements } = template("../src/routes/+page.svelte");
   const headers = elements.filter(({ node }) => hasClass(node, "workspace-navigation"));

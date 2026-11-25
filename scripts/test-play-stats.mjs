@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { buildAlbums, buildArtists, buildGenres } from "../src/lib/data/libraryViews.ts";
+import { PlaybackListenProgress } from "../src/lib/utils/playbackListenProgress.ts";
 import {
   nextStatsLimit,
   rankMostPlayedTracks,
@@ -10,6 +11,53 @@ import {
   sortGenresByPlayCount,
   visibleStatsItems,
 } from "../src/lib/utils/playStats.ts";
+
+test("half of a two-minute track qualifies only after 60 seconds of media have played", () => {
+  const progress = new PlaybackListenProgress();
+  progress.reset(0);
+  progress.observe(0, 90_000, true);
+  assert.equal(progress.qualifies(120, 50, false), false);
+  progress.observe(59.99, 149_990, true);
+  assert.equal(progress.qualifies(120, 50, false), false);
+  progress.observe(60, 150_000, true);
+  assert.equal(progress.qualifies(120, 50, false), true);
+  assert.equal(progress.qualifies(120, 75, false), false);
+});
+
+test("seeks, pauses, and an unsettled media clock add no listening time", () => {
+  const progress = new PlaybackListenProgress();
+  progress.reset(0);
+  progress.observe(20, 20_000, true);
+  progress.forgetPosition();
+  progress.observe(80, 20_100, true);
+  progress.observe(90, 30_100, true);
+  progress.observe(90, 75_100, false);
+  progress.forgetPosition();
+  progress.observe(21, 75_200, true);
+  progress.observe(91, 75_450, true);
+  assert.equal(progress.qualifies(120, 50, false), false);
+  progress.observe(120, 104_450, true);
+  assert.equal(progress.qualifies(120, 50, true), false);
+  progress.forgetPosition();
+  progress.observe(0, 105_000, true);
+  progress.observe(1, 106_000, true);
+  assert.equal(progress.qualifies(120, 50, false), true);
+});
+
+test("an end after seeking to the tail does not qualify, and a new track starts fresh", () => {
+  const progress = new PlaybackListenProgress();
+  progress.reset(0);
+  progress.observe(0, 0, true);
+  progress.forgetPosition();
+  progress.observe(119, 300, true);
+  progress.observe(120, 1300, true);
+  assert.equal(progress.qualifies(120, 50, true), false);
+  progress.reset(1300);
+  progress.observe(2, 3300, true);
+  assert.equal(progress.qualifies(10, 25, false), false);
+  assert.equal(progress.qualifies(null, 50, false), false);
+  assert.equal(progress.qualifies(null, 50, true), true);
+});
 
 function track(overrides) {
   const id = overrides.id;

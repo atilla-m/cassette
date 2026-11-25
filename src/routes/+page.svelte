@@ -149,6 +149,7 @@
   } from "$lib/types/library";
   import { sendLinuxPlaybackNotification } from "$lib/utils/linuxNotifications";
   import { localImageSource } from "$lib/utils/localImage";
+  import { PlaybackListenProgress } from "$lib/utils/playbackListenProgress";
   import {
     PlaybackSeekCoordinator,
     failedSeekRecoveryPosition,
@@ -713,10 +714,8 @@
   let isPlaying = $state(false);
   let hasCurrentTrackEnded = $state(false);
   let countedPlaybackTrackId = $state<string | null>(null);
-  let playbackSessionTrackId: string | null = null;
   let playbackSessionEventId: string | null = null;
-  let playbackSessionListenedSeconds = 0;
-  let playbackSessionStartedAtMs: number | null = null;
+  const playbackListenProgress = new PlaybackListenProgress();
   let isTagWriteSuspendingPlayback = false;
   let tagWritePlaybackGeneration = 0;
   let positionSeconds = $state(0);
@@ -1238,13 +1237,13 @@
       void loadVideoLibrary();
     }
     const mediaControlUnlisteners = [
-      listen("media-play-pause", () => void handleTogglePlayback()),
-      listen("media-play", () => void handleMediaPlay()),
-      listen("media-pause", () => void handleMediaPause()),
-      listen("media-stop", () => void handleMediaStop()),
-      listen("media-next", () => void handleNextTrack()),
-      listen("media-previous", () => void handlePreviousTrack()),
-      listen<number>("media-seek", (event) => void handleSeek(event.payload)),
+      listen("media-play-pause", () => void handleTogglePlayback(), { target: "main" }),
+      listen("media-play", () => void handleMediaPlay(), { target: "main" }),
+      listen("media-pause", () => void handleMediaPause(), { target: "main" }),
+      listen("media-stop", () => void handleMediaStop(), { target: "main" }),
+      listen("media-next", () => void handleNextTrack(), { target: "main" }),
+      listen("media-previous", () => void handlePreviousTrack(), { target: "main" }),
+      listen<number>("media-seek", (event) => void handleSeek(event.payload), { target: "main" }),
       listen<CdRipEvent>("cd-rip-started", (event) => handleCdRipStarted(event.payload)),
       listen<CdRipEvent>("cd-rip-track-started", (event) => handleCdRipTrackStarted(event.payload)),
       listen<CdRipEvent>("cd-rip-track-finished", (event) => handleCdRipTrackFinished(event.payload)),
@@ -1297,15 +1296,6 @@
       } finally {
         isPollingPlayback = false;
       }
-    }, 250);
-
-    const progressIntervalId = window.setInterval(() => {
-      if (isStartingTrack || isTagWriteSuspendingPlayback || !currentTrack || !isPlaying || playbackSeekCoordinator.hasPendingSeek(currentTrack.filePath)) {
-        return;
-      }
-
-      updatePlaybackListenClock(true);
-      void maybeRecordTrackPlay();
     }, 250);
 
     const videoProgressIntervalId = ENABLE_EXPERIMENTAL_VIDEOS
@@ -1407,7 +1397,6 @@
       window.clearInterval(statsCalendarIntervalId);
       window.removeEventListener("focus", refreshStatsCalendar);
       window.clearInterval(statusIntervalId);
-      window.clearInterval(progressIntervalId);
       if (videoProgressIntervalId !== null) {
         window.clearInterval(videoProgressIntervalId);
       }
@@ -3774,7 +3763,7 @@
     if (platformCapabilities?.os !== "windows" || !currentTrack || !paths.includes(currentTrack.filePath)) {
       return false;
     }
-    updatePlaybackListenClock(false);
+    playbackListenProgress.forgetPosition();
     isTagWriteSuspendingPlayback = true;
     tagWritePlaybackGeneration += 1;
     return true;
@@ -3790,7 +3779,7 @@
         await handlePlaybackStatusUpdate(status);
       }
     } catch (error) {
-      updatePlaybackListenClock(false);
+      playbackListenProgress.forgetPosition();
       isPlaying = false;
       playbackError = error instanceof Error ? error.message : String(error);
     } finally {
@@ -5077,34 +5066,26 @@
 
   async function acceptGaplessTransition(status: PlaybackStatus) {
     if (!status.filePath || !currentTrack) return;
+    const changedAt = performance.now() - Math.max(0, status.positionSeconds) * 1000;
+    observeGaplessEnd(changedAt);
     const nextIndex = getNextQueueIndex(true);
     if (nextIndex !== null && playbackQueue[nextIndex]?.filePath !== status.filePath) {
-      updatePlaybackListenClock(false);
-      void maybeRecordTrackPlay(true);
       await playQueuedTrackAtIndex(nextIndex);
       return;
     }
     if (nextIndex === null) {
       await pausePlayback();
-      updatePlaybackListenClock(false);
-      void maybeRecordTrackPlay(true);
       isPlaying = false;
       hasCurrentTrackEnded = true;
       return;
     }
-    updatePlaybackListenClock(false);
-    // Polling sees the handoff after it happens. Attribute elapsed time in the
-    // new stream to its own session.
-    playbackSessionListenedSeconds = Math.max(0, playbackSessionListenedSeconds - status.positionSeconds);
-    void maybeRecordTrackPlay(true);
     const track = playbackQueue[nextIndex];
     const trackIndex = tracks.findIndex((candidate) => candidate.id === track.id);
     currentTrack = trackIndex >= 0 ? tracks[trackIndex] : track;
     currentTrackIndex = trackIndex >= 0 ? trackIndex : null;
     currentQueueIndex = nextIndex;
     playbackSeekCoordinator.reset(track.filePath);
-    resetPlaybackListenSession(currentTrack);
-    playbackSessionListenedSeconds = status.positionSeconds;
+    resetPlaybackListenSession(currentTrack, changedAt);
     applyPlaybackStatus(status);
     void notifyTrackPlaybackStarted(currentTrack, ++playbackStartId);
     await handlePlaybackStatusUpdate(status);
@@ -5143,12 +5124,12 @@
       const nextFilePath = queue[queueIndex]?.id === track.id
         ? gaplessCandidate(queue, queueIndex, shuffle, order)
         : null;
+      await sampleListenBeforeTrackChange();
+      const startedAt = performance.now();
       const status = await playTrack(track.filePath, nextFilePath);
       if (status.filePath !== track.filePath) {
         throw new Error("The selected track could not be started.");
       }
-      await finalizePlaybackListenSession();
-
       if (nextQueue) {
         playbackQueue = nextQueue.tracks;
         isShuffleEnabled = nextQueue.shuffle;
@@ -5163,7 +5144,7 @@
       if (currentQueueIndex < 0) currentQueueIndex = null;
       playbackSeekCoordinator.reset(track.filePath);
       hasCurrentTrackEnded = false;
-      resetPlaybackListenSession(currentTrack);
+      resetPlaybackListenSession(currentTrack, startedAt);
       applyPlaybackStatus(status);
       void notifyTrackPlaybackStarted(currentTrack, currentPlaybackStartId);
     } catch (error) {
@@ -5172,7 +5153,6 @@
         if (currentTrack?.filePath === status.filePath) {
           applyPlaybackStatus(status);
         } else if (currentTrack && !status.filePath) {
-          await finalizePlaybackListenSession();
           isPlaying = false;
           hasCurrentTrackEnded = true;
         }
@@ -5276,7 +5256,7 @@
       || !playbackSessionEventId
       || ignoredTrackIds.has(currentTrack.id)
       || countedPlaybackTrackId === currentTrack.id
-      || !hasReachedPlayCountThreshold(currentTrack, naturalEnd)
+      || !playbackListenProgress.qualifies(durationSeconds ?? currentTrack.durationSeconds, listenPercentage, naturalEnd)
     ) {
       return;
     }
@@ -5297,51 +5277,42 @@
     }
   }
 
-  async function finalizePlaybackListenSession() {
-    updatePlaybackListenClock(false);
-    await maybeRecordTrackPlay();
-  }
-
-  function resetPlaybackListenSession(track: Track | null) {
-    playbackSessionTrackId = track?.id ?? null;
+  function resetPlaybackListenSession(track: Track | null, startedAt = performance.now()) {
     playbackSessionEventId = track ? crypto.randomUUID() : null;
-    playbackSessionListenedSeconds = 0;
-    playbackSessionStartedAtMs = null;
+    playbackListenProgress.reset(startedAt);
     countedPlaybackTrackId = null;
   }
 
-  function updatePlaybackListenClock(nextIsPlaying = isPlaying) {
-    const now = performance.now();
-
-    if (!currentTrack) {
-      playbackSessionTrackId = null;
-      playbackSessionEventId = null;
-      playbackSessionListenedSeconds = 0;
-      playbackSessionStartedAtMs = null;
-      return;
-    }
-
-    if (playbackSessionTrackId !== currentTrack.id) {
-      playbackSessionTrackId = currentTrack.id;
-      playbackSessionEventId = crypto.randomUUID();
-      playbackSessionListenedSeconds = 0;
-      playbackSessionStartedAtMs = null;
-      countedPlaybackTrackId = null;
-    }
-
-    if (isPlaying && playbackSessionStartedAtMs !== null) {
-      playbackSessionListenedSeconds += Math.max(0, (now - playbackSessionStartedAtMs) / 1000);
-    }
-
-    playbackSessionStartedAtMs = nextIsPlaying ? now : null;
+  function observeListenPosition(status: PlaybackStatus) {
+    if (!currentTrack || status.filePath !== currentTrack.filePath) return;
+    const endedAt = status.durationSeconds ?? currentTrack.durationSeconds;
+    playbackListenProgress.observe(
+      status.hasEnded && endedAt !== null ? endedAt : status.positionSeconds,
+      performance.now(),
+      isPlaying || status.isPlaying,
+    );
   }
 
-  function hasReachedPlayCountThreshold(track: Track, naturalEnd: boolean) {
-    if (playbackSessionTrackId !== track.id || playbackSessionListenedSeconds <= 0) return false;
-    const duration = durationSeconds ?? track.durationSeconds;
-    if (!duration || duration <= 0) return naturalEnd;
-    const tolerance = naturalEnd && listenPercentage === 100 ? 0.25 : 0;
-    return playbackSessionListenedSeconds + tolerance >= duration * listenPercentage / 100;
+  function observeGaplessEnd(changedAt: number) {
+    const duration = durationSeconds ?? currentTrack?.durationSeconds ?? null;
+    if (duration !== null) playbackListenProgress.observe(duration, changedAt, isPlaying);
+    void maybeRecordTrackPlay(true);
+  }
+
+  async function sampleListenBeforeTrackChange() {
+    const path = currentTrack?.filePath;
+    if (!path || !isPlaying || playbackSeekCoordinator.hasPendingSeek(path)) return;
+    try {
+      const status = await getPlaybackStatus();
+      if (status.filePath === path) {
+        observeListenPosition(status);
+        void maybeRecordTrackPlay(status.hasEnded);
+      } else if (status.filePath) {
+        observeGaplessEnd(performance.now() - Math.max(0, status.positionSeconds) * 1000);
+      }
+    } catch {
+      // Opening the next track remains possible when the old player has failed.
+    }
   }
 
   async function handleSaveAlbumGenres() {
@@ -5700,6 +5671,7 @@
     const playbackTrackPath = currentTrack.filePath;
     playbackError = null;
     playbackSeekCoordinator.request(playbackTrackPath, clampedPositionSeconds);
+    playbackListenProgress.forgetPosition();
     positionSeconds = clampedPositionSeconds;
     hasCurrentTrackEnded = false;
 
@@ -5807,8 +5779,8 @@
     status: PlaybackStatus,
     options: { applyPosition?: boolean; positionOverride?: number; applyTransport?: boolean } = {},
   ) {
+    if (options.applyPosition !== false && options.positionOverride === undefined) observeListenPosition(status);
     if (options.applyTransport !== false) {
-      updatePlaybackListenClock(status.isPlaying);
       isPlaying = status.isPlaying;
       if (status.isPlaying) hasCurrentTrackEnded = false;
     }
