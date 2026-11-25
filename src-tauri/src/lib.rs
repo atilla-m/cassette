@@ -7489,7 +7489,7 @@ fn scan_directory(
     cover_art_dir: Option<&Path>,
     album_art_paths: &mut HashMap<String, CachedCoverArt>,
     tracks: &mut Vec<Track>,
-    progress: &mut impl FnMut(bool),
+    progress: &mut impl FnMut(&Path, bool),
 ) -> Result<(), String> {
     let scan_error = |error| format!("Could not scan {}: {error}", directory.display());
     let mut entries = fs::read_dir(directory)
@@ -7527,7 +7527,7 @@ fn scan_directory(
                 continue;
             }
             if fs::File::open(&path).is_err() {
-                progress(true);
+                progress(&path, true);
                 continue;
             }
             if let Some((mut track, embedded_cover_art)) = track_from_path(path.clone(), scanned_at)
@@ -7572,9 +7572,9 @@ fn scan_directory(
                 }
 
                 tracks.push(track);
-                progress(false);
+                progress(&path, false);
             } else {
-                progress(true);
+                progress(&path, true);
             }
         }
     }
@@ -7606,7 +7606,7 @@ fn scan_audio_directory_roots<'a>(
             cover_art_dir,
             &mut album_art_paths,
             &mut tracks,
-            &mut |_| {},
+            &mut |_, _| {},
         )?;
     }
     tracks.sort_by(|left, right| left.file_path.cmp(&right.file_path));

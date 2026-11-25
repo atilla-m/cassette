@@ -974,13 +974,13 @@
   let cachedLyricsLabel = $derived(currentLyrics?.source === "lrclib" ? cachedLyricsStatus(currentLyrics) : null);
   let canPlayPrevious = $derived(
     currentQueueIndex !== null
-      && playbackQueue.length > 1
+      && playableQueueOrder.length > 1
       && (currentOrderIndex > 0 || repeatMode === "all"),
   );
   let canPlayNext = $derived(
     currentQueueIndex !== null
-      && playbackQueue.length > 1
-      && (currentOrderIndex < playbackOrder.length - 1 || repeatMode === "all"),
+      && playableQueueOrder.length > 1
+      && (currentOrderIndex < playableQueueOrder.length - 1 || repeatMode === "all"),
   );
   let hadSearchQuery = false;
   let lyricsRequestId = 0;
@@ -1320,7 +1320,7 @@
       : null;
 
     function handleKeydown(event: KeyboardEvent) {
-      if (artworkViewer) {
+      if (artworkViewer || lyricsEdit) {
         // The viewer handles Escape/Tab. Do not run page shortcuts behind it.
         return;
       }
@@ -1381,7 +1381,9 @@
         return;
       }
 
-      if (shouldIgnoreShortcut(event.target)) {
+      if (shouldIgnoreShortcut(event.target)
+        || (isAlbumSelectingTracks && event.code === "Space" && event.target instanceof HTMLElement
+          && event.target.classList.contains("album-track-row"))) {
         return;
       }
 
@@ -4568,7 +4570,7 @@
       return;
     }
 
-    if (event.key === "Enter") {
+    if (event.key === "Enter" || (isAlbumSelectingTracks && event.code === "Space")) {
       event.preventDefault();
       event.stopPropagation();
       handleAlbumTrackSelect(track, event);
@@ -5082,6 +5084,8 @@
     if (!status.filePath || !currentTrack) return;
     const nextIndex = getNextQueueIndex(true);
     if (nextIndex !== null && playbackQueue[nextIndex]?.filePath !== status.filePath) {
+      updatePlaybackListenClock(false);
+      void maybeRecordTrackPlay(true);
       await playQueuedTrackAtIndex(nextIndex);
       return;
     }
@@ -5141,7 +5145,10 @@
       const order = nextQueue
         ? (shuffle ? normalizedQueueOrder(nextQueue.order, queue.length) : queue.map((_, index) => index))
         : playbackOrder;
-      const status = await playTrack(track.filePath, gaplessCandidate(queue, queueIndex, shuffle, order));
+      const nextFilePath = queue[queueIndex]?.id === track.id
+        ? gaplessCandidate(queue, queueIndex, shuffle, order)
+        : null;
+      const status = await playTrack(track.filePath, nextFilePath);
       if (status.filePath !== track.filePath) {
         throw new Error("The selected track could not be started.");
       }

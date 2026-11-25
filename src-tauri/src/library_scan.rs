@@ -2,7 +2,7 @@ use super::*;
 use std::collections::BTreeMap;
 use tauri::ipc::Channel;
 
-#[derive(Clone, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct FolderScanReport {
     path: String,
@@ -120,6 +120,7 @@ pub(super) async fn run_scan(
         let mut folder_results = Vec::new();
         let mut rescanned = Vec::new();
         let mut unavailable_roots = Vec::new();
+        let mut skipped_paths = HashSet::new();
         for folder in &roots {
             let path = folder.to_string_lossy().into_owned();
             if only_folder.as_deref().is_some_and(|only| only != path) {
@@ -140,9 +141,12 @@ pub(super) async fn run_scan(
                 ..Default::default()
             };
             let mut checked = 0;
-            let mut send_progress = |skipped: bool| {
+            let mut send_progress = |path: &Path, skipped: bool| {
                 checked += 1;
-                report.skipped += usize::from(skipped);
+                if skipped {
+                    report.skipped += 1;
+                    skipped_paths.insert(path.to_string_lossy().into_owned());
+                }
                 if checked == 1 || checked % 16 == 0 {
                     if let Some(progress) = &progress {
                         let _ = progress.send(ScanProgress {
@@ -202,9 +206,10 @@ pub(super) async fn run_scan(
                 continue;
             }
             let track_path = Path::new(&track.file_path);
-            if unavailable_roots
-                .iter()
-                .any(|root| track_path.starts_with(root))
+            if skipped_paths.contains(&track.id)
+                || unavailable_roots
+                    .iter()
+                    .any(|root| track_path.starts_with(root))
             {
                 snapshot.unavailable_track_ids.insert(track.id.clone());
             } else if rescanned.iter().any(|root| track_path.starts_with(root)) {
