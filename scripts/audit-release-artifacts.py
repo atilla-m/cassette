@@ -27,7 +27,7 @@ from pathlib import Path
 from update_signature import validate_signature
 
 
-EXPECTED_VERSION = "0.1.0-beta.6"
+EXPECTED_VERSION = "0.1.0-beta.7"
 EXPECTED_LICENSE = "GPL-3.0-or-later"
 WINDOWS_GSTREAMER = json.loads(Path(__file__).with_name("windows-gstreamer.json").read_text(encoding="utf-8"))
 WINDOWS_REQUIRED_ELEMENTS = {
