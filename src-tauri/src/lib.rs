@@ -596,6 +596,8 @@ struct PlaybackState {
     is_playing: bool,
     has_ended: bool,
     pending_eos: bool,
+    stream_started: bool,
+    stream_group: Option<gst::GroupId>,
     end_observation: Option<PlaybackEndObservation>,
 }
 
@@ -653,14 +655,17 @@ impl TagEditPlaybackRelease<'_> {
                 .playback
                 .playbin
                 .as_ref()
-                .ok_or_else(|| "Playback backend disappeared during tag editing.".to_owned())?;
-            set_gst_state(playbin, gst::State::Null)?;
-            wait_for_gst_state(playbin, gst::State::Null)?;
+                .ok_or_else(|| "Playback backend disappeared during tag editing.".to_owned())?
+                .clone();
+            set_gst_state(&playbin, gst::State::Null)?;
+            wait_for_gst_state(&playbin, gst::State::Null)?;
+            self.playback.reset_stream_tracking();
+            self.playback.gapless.reset();
             let uri = gst::glib::filename_to_uri(Path::new(&self.path), None)
                 .map_err(|error| format!("Could not restore playback URI: {error}"))?;
             playbin.set_property("uri", uri.as_str());
-            set_gst_state(playbin, gst::State::Paused)?;
-            wait_for_gst_state(playbin, gst::State::Paused)?;
+            set_gst_state(&playbin, gst::State::Paused)?;
+            wait_for_gst_state(&playbin, gst::State::Paused)?;
             if self.position > gst::ClockTime::ZERO {
                 playbin
                     .seek_simple(
@@ -670,21 +675,22 @@ impl TagEditPlaybackRelease<'_> {
                     .map_err(|error| format!("Could not restore playback position: {error}"))?;
             }
             if self.was_playing {
-                set_gst_state(playbin, gst::State::Playing)?;
+                set_gst_state(&playbin, gst::State::Playing)?;
             }
-            poll_playback_end(playbin, gst::ClockTime::from_mseconds(150))
+            self.playback
+                .consume_playback_event(&playbin, gst::ClockTime::from_mseconds(150))?;
+            Ok(())
         })();
         self.playback.end_observation = None;
-        if let Ok(ended) = &result {
+        if result.is_ok() {
             self.playback.is_playing = self.was_playing;
             self.playback.has_ended = self.had_ended;
-            self.playback.pending_eos = *ended;
         } else {
             self.playback.is_playing = false;
             self.playback.has_ended = false;
             self.playback.pending_eos = false;
         }
-        result.map(|_| ())
+        result
     }
 }
 
@@ -5941,28 +5947,27 @@ impl PlaybackState {
             let playbin = self.playbin()?.clone();
             set_gst_state(&playbin, gst::State::Null)?;
             self.gapless.reset();
+            self.reset_stream_tracking();
             drain_playback_bus(&playbin);
             playbin.set_property("uri", uri.as_str());
             self.gapless.stage(file_path, next);
-            set_gst_state(&playbin, gst::State::Playing)
-                .and_then(|()| poll_playback_end(&playbin, gst::ClockTime::from_mseconds(150)))
+            set_gst_state(&playbin, gst::State::Playing).and_then(|()| {
+                self.consume_playback_event(&playbin, gst::ClockTime::from_mseconds(150))
+            })
         };
         self.end_observation = None;
-        self.pending_eos = match result {
-            Ok(ended) => ended,
-            Err(error) => {
-                if let Some(playbin) = &self.playbin {
-                    let _ = set_gst_state(playbin, gst::State::Null);
-                    drain_playback_bus(playbin);
-                }
-                self.current_path = None;
-                self.is_playing = false;
-                self.has_ended = false;
-                self.pending_eos = false;
-                self.gapless.reset();
-                return Err(error);
+        if let Err(error) = result {
+            if let Some(playbin) = &self.playbin {
+                let _ = set_gst_state(playbin, gst::State::Null);
+                drain_playback_bus(playbin);
             }
-        };
+            self.current_path = None;
+            self.is_playing = false;
+            self.has_ended = false;
+            self.reset_stream_tracking();
+            self.gapless.reset();
+            return Err(error);
+        }
 
         self.current_path = Some(file_path.to_owned());
         self.is_playing = true;
@@ -5974,7 +5979,7 @@ impl PlaybackState {
     fn pause(&mut self) -> Result<PlaybackStatus, String> {
         if let Some(playbin) = self.playbin.clone() {
             set_gst_state(&playbin, gst::State::Paused)?;
-            self.refresh_gapless_current(&playbin);
+            self.consume_pending_playback_events(&playbin)?;
             self.is_playing = false;
             self.end_observation = None;
         }
@@ -5987,7 +5992,7 @@ impl PlaybackState {
             return Ok(self.status());
         };
 
-        self.refresh_gapless_current(&playbin);
+        self.consume_pending_playback_events(&playbin)?;
         set_gst_state(&playbin, gst::State::Playing)?;
         self.is_playing = self.current_path.is_some();
         self.has_ended = false;
@@ -6001,22 +6006,13 @@ impl PlaybackState {
             return Ok(());
         };
 
-        self.refresh_gapless_current(&playbin);
-        loop {
-            match poll_playback_end(&playbin, gst::ClockTime::ZERO) {
-                Ok(true) => self.pending_eos = true,
-                Ok(false) => break,
-                Err(error) => {
-                    self.is_playing = false;
-                    self.pending_eos = false;
-                    self.end_observation = None;
-                    self.gapless.reset();
-                    return Err(error);
-                }
-            }
+        if let Err(error) = self.consume_pending_playback_events(&playbin) {
+            self.is_playing = false;
+            self.pending_eos = false;
+            self.end_observation = None;
+            self.gapless.reset();
+            return Err(error);
         }
-
-        self.refresh_gapless_current(&playbin);
         if self.is_playing {
             // Some sinks can stall at the decoded endpoint without posting EOS.
             // Use the native clock, never the player's rounded time display.
@@ -6047,12 +6043,43 @@ impl PlaybackState {
         Ok(())
     }
 
-    fn refresh_gapless_current(&mut self, playbin: &gst::Element) {
-        if let Some(path) = self.gapless.take_current(playbin) {
-            self.current_path = Some(path);
-            self.has_ended = false;
-            self.end_observation = None;
+    fn reset_stream_tracking(&mut self) {
+        self.stream_started = false;
+        self.stream_group = None;
+        self.pending_eos = false;
+    }
+
+    fn consume_pending_playback_events(&mut self, playbin: &gst::Element) -> Result<(), String> {
+        while self.consume_playback_event(playbin, gst::ClockTime::ZERO)? {}
+        Ok(())
+    }
+
+    fn consume_playback_event(
+        &mut self,
+        playbin: &gst::Element,
+        timeout: gst::ClockTime,
+    ) -> Result<bool, String> {
+        match poll_playback_event(playbin, timeout)? {
+            None => return Ok(false),
+            Some(PlaybackBusEvent::Ended) => self.pending_eos = true,
+            Some(PlaybackBusEvent::StreamStarted(group)) => {
+                let switched_stream =
+                    self.stream_started && (group.is_none() || group != self.stream_group);
+                self.stream_started = true;
+                self.stream_group = group;
+                // playbin can change current-uri while its sink is still playing
+                // the old stream. Associate the queued file at the stream boundary.
+                if switched_stream {
+                    if let Some(path) = self.gapless.take_started_track(playbin) {
+                        self.current_path = Some(path);
+                        self.has_ended = false;
+                        self.pending_eos = false;
+                        self.end_observation = None;
+                    }
+                }
+            }
         }
+        Ok(true)
     }
 
     fn seek(
@@ -6065,7 +6092,7 @@ impl PlaybackState {
         }
 
         if let Some(playbin) = self.playbin.clone() {
-            self.refresh_gapless_current(&playbin);
+            self.consume_pending_playback_events(&playbin)?;
         }
         ensure_seek_track_matches(self.current_path.as_deref(), expected_file_path)?;
 
@@ -6122,7 +6149,7 @@ impl PlaybackState {
         self.current_path = None;
         self.is_playing = false;
         self.has_ended = false;
-        self.pending_eos = false;
+        self.reset_stream_tracking();
         self.end_observation = None;
     }
 
@@ -6301,7 +6328,7 @@ mod playback_seek_tests {
     }
 
     #[test]
-    fn playbin_switches_to_the_queued_file_without_restarting() {
+    fn gapless_tracks_change_when_the_new_audio_starts() {
         fn write_wave(path: &Path, samples: u32) {
             let data_size = 2 * samples;
             let mut file = fs::File::create(path).unwrap();
@@ -6323,8 +6350,10 @@ mod playback_seek_tests {
         let directory = tempfile::tempdir().unwrap();
         let first = directory.path().join("first.wav");
         let second = directory.path().join("second.wav");
-        write_wave(&first, 8_000);
-        write_wave(&second, 16_000);
+        let third = directory.path().join("third.wav");
+        write_wave(&first, 16_000);
+        write_wave(&second, 20_800);
+        write_wave(&third, 14_400);
         let mut playback = PlaybackState::default();
         let playbin = playback.playbin().unwrap().clone();
         let sink = gst::ElementFactory::make("fakesink")
@@ -6332,19 +6361,48 @@ mod playback_seek_tests {
             .build()
             .unwrap();
         playbin.set_property("audio-sink", sink);
+        let started_at = Instant::now();
         playback
             .play_with_next(first.to_str().unwrap(), second.to_str())
             .unwrap();
-        let deadline = Instant::now() + Duration::from_secs(4);
-        while playback.current_path.as_deref() != second.to_str() && Instant::now() < deadline {
-            playback.refresh().unwrap();
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        let status = playback.status();
+
+        let result = (|| -> Result<(), String> {
+            let deadline = started_at + Duration::from_secs(8);
+            for (previous, next, earliest, duration) in
+                [(&first, &second, 1.6, 2.6), (&second, &third, 4.15, 1.8)]
+            {
+                while playback.current_path.as_deref() == previous.to_str()
+                    && Instant::now() < deadline
+                {
+                    playback.refresh()?;
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                let status = playback.status();
+                let elapsed = started_at.elapsed().as_secs_f64();
+                if status.file_path.as_deref() != next.to_str()
+                    || !status.is_playing
+                    || status.has_ended
+                    || elapsed < earliest
+                    || status.position_seconds >= 0.4
+                    || !status
+                        .duration_seconds
+                        .is_some_and(|value| (value - duration).abs() < 0.03)
+                {
+                    return Err(format!(
+                        "The handoff to {} reported another stream's timing at {elapsed:.3}s: {status:?}",
+                        next.display()
+                    ));
+                }
+                if next == &second {
+                    playback
+                        .gapless
+                        .stage(second.to_str().unwrap(), third.to_str());
+                }
+            }
+            Ok(())
+        })();
         playback.shutdown();
-        assert_eq!(status.file_path.as_deref(), second.to_str());
-        assert!(status.is_playing);
-        assert!(!status.has_ended);
+        result.unwrap();
     }
 }
 
@@ -7118,21 +7176,37 @@ fn wait_for_gst_state(playbin: &gst::Element, expected: gst::State) -> Result<()
     Ok(())
 }
 
-fn poll_playback_end(playbin: &gst::Element, timeout: gst::ClockTime) -> Result<bool, String> {
+enum PlaybackBusEvent {
+    Ended,
+    StreamStarted(Option<gst::GroupId>),
+}
+
+fn poll_playback_event(
+    playbin: &gst::Element,
+    timeout: gst::ClockTime,
+) -> Result<Option<PlaybackBusEvent>, String> {
     let Some(bus) = playbin.bus() else {
-        return Ok(false);
+        return Ok(None);
     };
 
-    let Some(message) =
-        bus.timed_pop_filtered(timeout, &[gst::MessageType::Error, gst::MessageType::Eos])
-    else {
-        return Ok(false);
+    let Some(message) = bus.timed_pop_filtered(
+        timeout,
+        &[
+            gst::MessageType::Error,
+            gst::MessageType::Eos,
+            gst::MessageType::StreamStart,
+        ],
+    ) else {
+        return Ok(None);
     };
 
     match message.view() {
         gst::MessageView::Error(error) => Err(format!("Playback failed: {}", error.error())),
-        gst::MessageView::Eos(_) => Ok(true),
-        _ => Ok(false),
+        gst::MessageView::Eos(_) => Ok(Some(PlaybackBusEvent::Ended)),
+        gst::MessageView::StreamStart(event) => {
+            Ok(Some(PlaybackBusEvent::StreamStarted(event.group_id())))
+        }
+        _ => Ok(None),
     }
 }
 

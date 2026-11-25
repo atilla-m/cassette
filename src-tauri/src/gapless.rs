@@ -78,7 +78,7 @@ impl Gapless {
             .map(|track| track.path.clone())
     }
 
-    pub(super) fn take_current(&self, playbin: &gst::Element) -> Option<String> {
+    pub(super) fn take_started_track(&self, playbin: &gst::Element) -> Option<String> {
         let current_uri = playbin.property::<Option<String>>("current-uri")?;
         let mut queue = self.0.lock().ok()?;
         if queue.armed.as_ref()?.uri != current_uri {
