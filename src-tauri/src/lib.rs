@@ -36,7 +36,11 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 #[cfg(target_os = "windows")]
 mod cd_windows;
+mod gapless;
+mod ignored_tracks;
+mod library_scan;
 mod listening_stats;
+mod lyrics_edits;
 #[cfg(not(target_os = "windows"))]
 mod mpris;
 mod portable_history;
@@ -587,6 +591,7 @@ struct VideoCodecInfo {
 #[derive(Debug, Default)]
 struct PlaybackState {
     playbin: Option<gst::Element>,
+    gapless: gapless::Gapless,
     current_path: Option<String>,
     is_playing: bool,
     has_ended: bool,
@@ -691,20 +696,24 @@ fn release_playback_for_tag_edit<'a>(
     let mut playback = playback
         .lock()
         .map_err(|_| "Playback state is unavailable.".to_owned())?;
+    playback.refresh()?;
     let Some(current_path) = playback.current_path.clone() else {
         return Ok(None);
     };
     let Some(canonical_current) = Path::new(&current_path).canonicalize().ok() else {
         return Ok(None);
     };
+    let queued_path = playback
+        .gapless
+        .armed_path()
+        .and_then(|path| Path::new(&path).canonicalize().ok());
     if !targets
         .iter()
         .filter_map(|target| target.canonicalize().ok())
-        .any(|target| target == canonical_current)
+        .any(|target| target == canonical_current || queued_path.as_ref() == Some(&target))
     {
         return Ok(None);
     }
-    playback.refresh()?;
     let Some(playbin) = playback.playbin.as_ref() else {
         return Ok(None);
     };
@@ -736,6 +745,7 @@ fn release_playback_for_tag_edit<'a>(
             }
         });
     }
+    playback.gapless.reset();
     drain_playback_bus(playbin);
     Ok(Some(TagEditPlaybackRelease {
         playback,
@@ -791,6 +801,9 @@ struct LibraryCache {
     playlists: Vec<Playlist>,
     last_scanned_folder: Option<String>,
     last_scanned_at: Option<i64>,
+    folders: Vec<library_scan::FolderScanReport>,
+    unavailable_track_ids: HashSet<String>,
+    ignored_track_ids: HashSet<String>,
     recovery_notice: Option<String>,
 }
 
@@ -1471,50 +1484,9 @@ async fn scan_library(
     append: Option<bool>,
     app: AppHandle,
 ) -> Result<Vec<Track>, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let scan_lock = app.state::<LibraryScanLock>();
-        let _scan = scan_lock
-            .0
-            .lock()
-            .map_err(|_| "Library scanning is unavailable.")?;
-        let library = app.state::<Mutex<LibraryDatabase>>();
-        let selected = PathBuf::from(root);
-        let append = append.unwrap_or(false);
-        let (primary, extras) = library
-            .lock()
-            .map_err(|_| "Library cache is unavailable.")?
-            .scan_roots(&selected, append)?;
-        let (extras, added) = plan_import_folders(&selected, append, &primary, extras)?;
-        let cover_art_dir = app
-            .path()
-            .app_data_dir()
-            .ok()
-            .map(|path| path.join("cover-art"));
-        let scanned_at = unix_timestamp();
-        let mut tracks = scan_audio_directory_roots(
-            std::iter::once(primary.as_path()).chain(extras.iter().map(PathBuf::as_path)),
-            scanned_at,
-            cover_art_dir.as_deref(),
-        )?;
-        let history_paths = library
-            .lock()
-            .map_err(|_| "Library cache is unavailable.")?
-            .history_paths_for_scan(&tracks)?;
-        let fingerprints = portable_history::fingerprint_scan_history(history_paths);
-        library
-            .lock()
-            .map_err(|_| "Library cache is unavailable.")?
-            .replace_library_with_import(
-                &primary,
-                &mut tracks,
-                scanned_at,
-                added.as_deref(),
-                &fingerprints,
-            )?;
-        Ok(tracks)
-    })
-    .await
-    .map_err(|error| format!("Could not scan library: {error}"))?
+    library_scan::run_scan(root, append.unwrap_or(false), None, None, app)
+        .await
+        .map(library_scan::ScanResult::into_tracks)
 }
 
 fn plan_import_folders(
@@ -1525,7 +1497,10 @@ fn plan_import_folders(
 ) -> Result<(Vec<PathBuf>, Option<PathBuf>), String> {
     let added = if append && primary != selected {
         let target = selected.canonicalize().map_err(|error| {
-            format!("Could not open rip folder {}: {error}", selected.display())
+            format!(
+                "Could not open music folder {}: {error}",
+                selected.display()
+            )
         })?;
         let already_in_library = std::iter::once(primary)
             .chain(extras.iter().map(PathBuf::as_path))
@@ -1542,7 +1517,6 @@ fn plan_import_folders(
     };
     // A missing import can return later. Keep its registration and favorites
     // while refreshing the folders that are currently present.
-    extras.retain(|folder| added.as_ref() == Some(folder) || folder.try_exists().unwrap_or(true));
     Ok((extras, added))
 }
 
@@ -2014,15 +1988,18 @@ fn read_track_lyrics(
     app: AppHandle,
     library: State<'_, Mutex<LibraryDatabase>>,
 ) -> Result<Option<TrackLyrics>, String> {
-    let (track, settings) = library
-        .lock()
-        .ok()
-        .map(|library| {
-            let track = library.track_by_id(&track_path).ok().flatten();
-            let settings = library.lyrics_settings(&track_path).unwrap_or_default();
-            (track, settings)
-        })
-        .unwrap_or_default();
+    let (track, settings) = {
+        let library = library
+            .lock()
+            .map_err(|_| "Library cache is unavailable.")?;
+        if let Some(lyrics) = library.edited_lyrics(&track_path)? {
+            return Ok(Some(lyrics));
+        }
+        (
+            library.track_by_id(&track_path)?,
+            library.lyrics_settings(&track_path)?,
+        )
+    };
     let track_path = track
         .as_ref()
         .map(|track| PathBuf::from(&track.file_path))
@@ -4005,6 +3982,16 @@ impl LibraryDatabase {
                 updated_at INTEGER NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS ignored_tracks (
+                track_id TEXT PRIMARY KEY NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS track_lyrics_edits (
+                track_id TEXT PRIMARY KEY NOT NULL,
+                kind TEXT NOT NULL CHECK(kind IN ('plain', 'synced')),
+                body TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS playlists (
                 id TEXT PRIMARY KEY NOT NULL,
                 name TEXT NOT NULL,
@@ -4225,7 +4212,7 @@ impl LibraryDatabase {
         Ok(false)
     }
 
-    fn load_cache(&self) -> Result<LibraryCache, String> {
+    fn cached_tracks(&self) -> Result<Vec<Track>, String> {
         let mut statement = self
             .connection
             .prepare(
@@ -4259,15 +4246,24 @@ impl LibraryDatabase {
             )
             .map_err(|error| format!("Could not read library cache: {error}"))?;
 
-        let mut tracks = statement
+        let tracks = statement
             .query_map([], row_to_track)
             .map_err(|error| format!("Could not read library cache: {error}"))?
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(|error| format!("Could not read cached tracks: {error}"))?;
+        Ok(tracks)
+    }
+
+    fn load_cache(&self) -> Result<LibraryCache, String> {
+        let mut tracks = self.cached_tracks()?;
         let genre_assignments = self.genre_assignments()?;
         apply_genre_assignments(&mut tracks, &genre_assignments);
+        let scan = self.scan_snapshot()?;
 
         Ok(LibraryCache {
+            folders: scan.folders,
+            unavailable_track_ids: scan.unavailable_track_ids,
+            ignored_track_ids: self.ignored_track_ids()?,
             tracks,
             album_covers: self.album_covers()?,
             playlists: self.playlists()?,
@@ -4802,7 +4798,7 @@ impl LibraryDatabase {
     ) -> Result<(), String> {
         let fingerprints =
             portable_history::fingerprint_scan_history(self.history_paths_for_scan(tracks)?);
-        self.replace_library_with_import(root_path, tracks, scanned_at, None, &fingerprints)
+        self.replace_library_with_import(root_path, tracks, scanned_at, None, &fingerprints, None)
     }
 
     fn replace_library_with_import(
@@ -4812,6 +4808,7 @@ impl LibraryDatabase {
         scanned_at: i64,
         added_folder: Option<&Path>,
         fingerprints: &HashMap<String, String>,
+        scan_snapshot: Option<&library_scan::ScanSnapshot>,
     ) -> Result<(), String> {
         let removed_history = self.removed_history_references(tracks, fingerprints)?;
         let transaction = self
@@ -4913,6 +4910,12 @@ impl LibraryDatabase {
         .map_err(|error| format!("Could not cache scanned folder: {error}"))?;
         upsert_meta(&transaction, "last_scanned_at", &scanned_at.to_string())
             .map_err(|error| format!("Could not cache scan time: {error}"))?;
+        if let Some(snapshot) = scan_snapshot {
+            let payload = serde_json::to_string(snapshot)
+                .map_err(|error| format!("Could not encode scan results: {error}"))?;
+            upsert_meta(&transaction, "library_scan_snapshot", &payload)
+                .map_err(|error| format!("Could not save scan results: {error}"))?;
+        }
         if let Some(folder) = added_folder {
             transaction.execute(
                 "INSERT OR IGNORE INTO library_import_folders (library_root, folder) VALUES (?1, ?2)",
@@ -5224,6 +5227,11 @@ impl LibraryDatabase {
         played_at: i64,
     ) -> Result<Track, String> {
         validate_play_event_id(event_id)?;
+        if self.is_track_ignored(id)? {
+            return self
+                .track_by_id(id)?
+                .ok_or_else(|| "Track is no longer in the library.".into());
+        }
         self.cache_history_reference(id);
         let transaction = self
             .connection
@@ -5728,6 +5736,7 @@ impl LibraryDatabase {
 #[tauri::command]
 fn play_track(
     file_path: String,
+    next_file_path: Option<String>,
     playback: State<'_, Mutex<PlaybackState>>,
     library: State<'_, Mutex<LibraryDatabase>>,
     media_controls: State<'_, MediaControls>,
@@ -5737,7 +5746,7 @@ fn play_track(
             .lock()
             .map_err(|_| "Playback state is unavailable.".to_owned())?;
 
-        match playback.play(&file_path) {
+        match playback.play_with_next(&file_path, next_file_path.as_deref()) {
             Ok(status) => status,
             Err(error) => {
                 if playback.current_path.is_none() {
@@ -5747,25 +5756,50 @@ fn play_track(
             }
         }
     };
+    publish_media_track(&file_path, &library, &media_controls, status.is_playing);
+    Ok(status)
+}
+
+fn publish_media_track(
+    file_path: &str,
+    library: &Mutex<LibraryDatabase>,
+    media_controls: &MediaControls,
+    playing: bool,
+) {
     let track = library
         .lock()
         .ok()
-        .and_then(|library| library.track_by_id(&file_path).ok().flatten())
+        .and_then(|library| library.track_by_id(file_path).ok().flatten())
         .map(|track| MediaTrack::from(&track));
     #[cfg(target_os = "windows")]
     let track = Some(track.unwrap_or_else(|| {
         MediaTrack {
-            title: Path::new(&file_path)
+            title: Path::new(file_path)
                 .file_stem()
                 .and_then(|stem| stem.to_str())
-                .unwrap_or(&file_path)
+                .unwrap_or(file_path)
                 .to_owned(),
             ..MediaTrack::default()
         }
     }));
-    media_controls.update_track(track, status.is_playing);
+    media_controls.update_track(track, playing);
+}
 
-    Ok(status)
+#[tauri::command]
+fn stage_gapless_track(
+    expected_file_path: String,
+    next_file_path: Option<String>,
+    playback: State<'_, Mutex<PlaybackState>>,
+) -> Result<(), String> {
+    let playback = playback
+        .lock()
+        .map_err(|_| "Playback state is unavailable.")?;
+    if playback.current_path.as_deref() == Some(expected_file_path.as_str()) {
+        playback
+            .gapless
+            .stage(&expected_file_path, next_file_path.as_deref());
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -5801,14 +5835,22 @@ fn resume_playback(
 #[tauri::command]
 fn get_playback_status(
     playback: State<'_, Mutex<PlaybackState>>,
+    library: State<'_, Mutex<LibraryDatabase>>,
     media_controls: State<'_, MediaControls>,
 ) -> Result<PlaybackStatus, String> {
     let mut playback = playback
         .lock()
         .map_err(|_| "Playback state is unavailable.".to_owned())?;
 
+    let previous = playback.current_path.clone();
     playback.refresh()?;
     let status = playback.status();
+    drop(playback);
+    if status.file_path != previous {
+        if let Some(path) = &status.file_path {
+            publish_media_track(path, &library, &media_controls, status.is_playing);
+        }
+    }
     media_controls.update_playback(status.is_playing, status.position_seconds, status.volume);
 
     Ok(status)
@@ -5848,7 +5890,16 @@ fn set_playback_volume(
 }
 
 impl PlaybackState {
+    #[cfg(test)]
     fn play(&mut self, file_path: &str) -> Result<PlaybackStatus, String> {
+        self.play_with_next(file_path, None)
+    }
+
+    fn play_with_next(
+        &mut self,
+        file_path: &str,
+        next: Option<&str>,
+    ) -> Result<PlaybackStatus, String> {
         let path = PathBuf::from(file_path);
 
         if !path.exists() {
@@ -5863,12 +5914,14 @@ impl PlaybackState {
             .map_err(|error| format!("Could not prepare track for playback: {error}"))?;
 
         let result = {
-            let playbin = self.playbin()?;
-            set_gst_state(playbin, gst::State::Null)?;
-            drain_playback_bus(playbin);
+            let playbin = self.playbin()?.clone();
+            set_gst_state(&playbin, gst::State::Null)?;
+            self.gapless.reset();
+            drain_playback_bus(&playbin);
             playbin.set_property("uri", uri.as_str());
-            set_gst_state(playbin, gst::State::Playing)
-                .and_then(|()| poll_playback_end(playbin, gst::ClockTime::from_mseconds(150)))
+            self.gapless.stage(file_path, next);
+            set_gst_state(&playbin, gst::State::Playing)
+                .and_then(|()| poll_playback_end(&playbin, gst::ClockTime::from_mseconds(150)))
         };
         self.end_observation = None;
         self.pending_eos = match result {
@@ -5882,6 +5935,7 @@ impl PlaybackState {
                 self.is_playing = false;
                 self.has_ended = false;
                 self.pending_eos = false;
+                self.gapless.reset();
                 return Err(error);
             }
         };
@@ -5894,8 +5948,9 @@ impl PlaybackState {
     }
 
     fn pause(&mut self) -> Result<PlaybackStatus, String> {
-        if let Some(playbin) = self.playbin.as_ref() {
-            set_gst_state(playbin, gst::State::Paused)?;
+        if let Some(playbin) = self.playbin.clone() {
+            set_gst_state(&playbin, gst::State::Paused)?;
+            self.refresh_gapless_current(&playbin);
             self.is_playing = false;
             self.end_observation = None;
         }
@@ -5904,11 +5959,12 @@ impl PlaybackState {
     }
 
     fn resume(&mut self) -> Result<PlaybackStatus, String> {
-        let Some(playbin) = self.playbin.as_ref() else {
+        let Some(playbin) = self.playbin.clone() else {
             return Ok(self.status());
         };
 
-        set_gst_state(playbin, gst::State::Playing)?;
+        self.refresh_gapless_current(&playbin);
+        set_gst_state(&playbin, gst::State::Playing)?;
         self.is_playing = self.current_path.is_some();
         self.has_ended = false;
         self.end_observation = None;
@@ -5921,6 +5977,7 @@ impl PlaybackState {
             return Ok(());
         };
 
+        self.refresh_gapless_current(&playbin);
         loop {
             match poll_playback_end(&playbin, gst::ClockTime::ZERO) {
                 Ok(true) => self.pending_eos = true,
@@ -5929,11 +5986,13 @@ impl PlaybackState {
                     self.is_playing = false;
                     self.pending_eos = false;
                     self.end_observation = None;
+                    self.gapless.reset();
                     return Err(error);
                 }
             }
         }
 
+        self.refresh_gapless_current(&playbin);
         if self.is_playing {
             // Some sinks can stall at the decoded endpoint without posting EOS.
             // Use the native clock, never the player's rounded time display.
@@ -5956,11 +6015,20 @@ impl PlaybackState {
                 self.has_ended = true;
                 self.pending_eos = false;
                 self.end_observation = None;
+                self.gapless.reset();
                 let _ = set_gst_state(&playbin, gst::State::Paused);
             }
         }
 
         Ok(())
+    }
+
+    fn refresh_gapless_current(&mut self, playbin: &gst::Element) {
+        if let Some(path) = self.gapless.take_current(playbin) {
+            self.current_path = Some(path);
+            self.has_ended = false;
+            self.end_observation = None;
+        }
     }
 
     fn seek(
@@ -5972,6 +6040,9 @@ impl PlaybackState {
             return Err("Seek position must be a finite number.".to_owned());
         }
 
+        if let Some(playbin) = self.playbin.clone() {
+            self.refresh_gapless_current(&playbin);
+        }
         ensure_seek_track_matches(self.current_path.as_deref(), expected_file_path)?;
 
         let Some(playbin) = self.playbin.as_ref() else {
@@ -6018,6 +6089,7 @@ impl PlaybackState {
     }
 
     fn shutdown(&mut self) {
+        self.gapless.reset();
         if let Some(playbin) = self.playbin.take() {
             let _ = set_gst_state(&playbin, gst::State::Null);
             drain_playback_bus(&playbin);
@@ -6040,6 +6112,7 @@ impl PlaybackState {
                         .to_owned()
                 })?;
 
+            self.gapless.connect(&playbin);
             self.playbin = Some(playbin);
         }
 
@@ -6201,6 +6274,53 @@ mod playback_seek_tests {
             assert!(!playback.status().is_playing);
         }
         playback.shutdown();
+    }
+
+    #[test]
+    fn playbin_switches_to_the_queued_file_without_restarting() {
+        fn write_wave(path: &Path, samples: u32) {
+            let data_size = 2 * samples;
+            let mut file = fs::File::create(path).unwrap();
+            for part in [
+                b"RIFF".as_slice(),
+                &(36 + data_size).to_le_bytes(),
+                b"WAVEfmt \x10\x00\x00\x00\x01\x00\x01\x00",
+                &8000_u32.to_le_bytes(),
+                &16000_u32.to_le_bytes(),
+                b"\x02\x00\x10\x00data",
+                &data_size.to_le_bytes(),
+            ] {
+                file.write_all(part).unwrap();
+            }
+            file.write_all(&vec![0; data_size as usize]).unwrap();
+        }
+
+        gst::init().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let first = directory.path().join("first.wav");
+        let second = directory.path().join("second.wav");
+        write_wave(&first, 8_000);
+        write_wave(&second, 16_000);
+        let mut playback = PlaybackState::default();
+        let playbin = playback.playbin().unwrap().clone();
+        let sink = gst::ElementFactory::make("fakesink")
+            .property("sync", true)
+            .build()
+            .unwrap();
+        playbin.set_property("audio-sink", sink);
+        playback
+            .play_with_next(first.to_str().unwrap(), second.to_str())
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(4);
+        while playback.current_path.as_deref() != second.to_str() && Instant::now() < deadline {
+            playback.refresh().unwrap();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let status = playback.status();
+        playback.shutdown();
+        assert_eq!(status.file_path.as_deref(), second.to_str());
+        assert!(status.is_playing);
+        assert!(!status.has_ended);
     }
 }
 
@@ -7369,6 +7489,7 @@ fn scan_directory(
     cover_art_dir: Option<&Path>,
     album_art_paths: &mut HashMap<String, CachedCoverArt>,
     tracks: &mut Vec<Track>,
+    progress: &mut impl FnMut(bool),
 ) -> Result<(), String> {
     let scan_error = |error| format!("Could not scan {}: {error}", directory.display());
     let mut entries = fs::read_dir(directory)
@@ -7384,7 +7505,14 @@ fn scan_directory(
             .map_err(|error| format!("Could not scan {}: {error}", path.display()))?;
 
         if file_type.is_dir() {
-            scan_directory(&path, scanned_at, cover_art_dir, album_art_paths, tracks)?;
+            scan_directory(
+                &path,
+                scanned_at,
+                cover_art_dir,
+                album_art_paths,
+                tracks,
+                progress,
+            )?;
         } else if file_type.is_file() && is_supported_audio_file(&path) {
             if let Some((original, kind)) = tag_sidecar(&path) {
                 if let (Some(original), "backup") = (original, kind) {
@@ -7396,6 +7524,10 @@ fn scan_directory(
                         ));
                     }
                 }
+                continue;
+            }
+            if fs::File::open(&path).is_err() {
+                progress(true);
                 continue;
             }
             if let Some((mut track, embedded_cover_art)) = track_from_path(path.clone(), scanned_at)
@@ -7440,6 +7572,9 @@ fn scan_directory(
                 }
 
                 tracks.push(track);
+                progress(false);
+            } else {
+                progress(true);
             }
         }
     }
@@ -7456,6 +7591,7 @@ fn scan_audio_directory_root(
     scan_audio_directory_roots([root_path], scanned_at, cover_art_dir)
 }
 
+#[cfg(test)]
 fn scan_audio_directory_roots<'a>(
     roots: impl IntoIterator<Item = &'a Path>,
     scanned_at: i64,
@@ -7470,6 +7606,7 @@ fn scan_audio_directory_roots<'a>(
             cover_art_dir,
             &mut album_art_paths,
             &mut tracks,
+            &mut |_| {},
         )?;
     }
     tracks.sort_by(|left, right| left.file_path.cmp(&right.file_path));
@@ -10917,6 +11054,7 @@ mod play_history_tests {
                 20,
                 added.as_deref(),
                 &HashMap::new(),
+                None,
             )
             .unwrap();
         assert_eq!(database.load_cache().unwrap().tracks.len(), 2);
@@ -13674,12 +13812,14 @@ pub fn run() {
             scan_dvd_titles,
             import_dvd_title,
             scan_library,
+            library_scan::scan_library_folders,
             get_track_tag_editor_data,
             get_album_tag_editor_data,
             update_track_tags,
             update_album_tags,
             toggle_track_favorite,
             record_track_play,
+            ignored_tracks::set_ignored_tracks,
             listening_stats::get_listening_stats,
             portable_history::export_listening_history,
             portable_history::preview_listening_history_import,
@@ -13695,6 +13835,8 @@ pub fn run() {
             remove_track_from_playlist,
             move_playlist_track,
             read_track_lyrics,
+            lyrics_edits::save_edited_lyrics,
+            lyrics_edits::restore_original_lyrics,
             auto_find_track_lyrics,
             search_track_lyrics_results,
             save_track_lyrics_result,
@@ -13709,6 +13851,7 @@ pub fn run() {
             pause_playback,
             resume_playback,
             get_playback_status,
+            stage_gapless_track,
             seek_playback,
             set_playback_volume
         ])

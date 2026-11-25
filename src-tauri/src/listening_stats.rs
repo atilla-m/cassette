@@ -66,6 +66,7 @@ impl LibraryDatabase {
                     "SELECT track_id, COUNT(*), MAX(played_at_utc) \
                  FROM track_play_events \
                  WHERE played_at_utc >= ?1 AND played_at_utc < ?2 \
+                   AND track_id NOT IN (SELECT track_id FROM ignored_tracks) \
                  GROUP BY track_id ORDER BY COUNT(*) DESC, track_id",
                 )
                 .map_err(|error| format!("Could not query playback history: {error}"))?;
@@ -88,7 +89,8 @@ impl LibraryDatabase {
                 .connection
                 .prepare(
                     "SELECT id, play_count, last_played_at FROM tracks \
-                 WHERE play_count > 0 ORDER BY play_count DESC, id",
+                 WHERE play_count > 0 AND id NOT IN (SELECT track_id FROM ignored_tracks) \
+                 ORDER BY play_count DESC, id",
                 )
                 .map_err(|error| format!("Could not query all-time totals: {error}"))?;
             let rows = statement
@@ -107,7 +109,8 @@ impl LibraryDatabase {
             let mut statement = self.connection.prepare(
                 "SELECT p.track_id, (SELECT COUNT(*) FROM track_play_events e WHERE e.track_id = p.track_id) \
                  + (SELECT COALESCE(SUM(undated_plays), 0) FROM history_legacy_baselines b WHERE b.track_id = p.track_id), \
-                 (SELECT MAX(played_at_utc) FROM track_play_events e WHERE e.track_id = p.track_id) FROM history_pending_tracks p",
+                 (SELECT MAX(played_at_utc) FROM track_play_events e WHERE e.track_id = p.track_id) FROM history_pending_tracks p \
+                 WHERE p.track_id NOT IN (SELECT track_id FROM ignored_tracks)",
             ).map_err(|error| error.to_string())?;
             let rows = statement
                 .query_map([], |row| {
@@ -126,20 +129,23 @@ impl LibraryDatabase {
         let total_plays = track_counts.iter().map(|item| item.plays).sum();
         let dated_plays: i64 = self
             .connection
-            .query_row("SELECT COUNT(*) FROM track_play_events", [], |row| {
+            .query_row("SELECT COUNT(*) FROM track_play_events WHERE track_id NOT IN (SELECT track_id FROM ignored_tracks)", [], |row| {
                 row.get(0)
             })
             .map_err(|error| format!("Could not count dated plays: {error}"))?;
         let authoritative_total: i64 = self.connection.query_row(
-            "SELECT (SELECT COALESCE(SUM(play_count), 0) FROM tracks) \
-             + (SELECT COUNT(*) FROM track_play_events e JOIN history_pending_tracks p ON p.track_id = e.track_id) \
-             + (SELECT COALESCE(SUM(undated_plays), 0) FROM history_legacy_baselines b JOIN history_pending_tracks p ON p.track_id = b.track_id)", [], |row| row.get(0),
+            "SELECT (SELECT COALESCE(SUM(play_count), 0) FROM tracks WHERE id NOT IN (SELECT track_id FROM ignored_tracks)) \
+             + (SELECT COUNT(*) FROM track_play_events e JOIN history_pending_tracks p ON p.track_id = e.track_id \
+                WHERE p.track_id NOT IN (SELECT track_id FROM ignored_tracks)) \
+             + (SELECT COALESCE(SUM(undated_plays), 0) FROM history_legacy_baselines b JOIN history_pending_tracks p ON p.track_id = b.track_id \
+                WHERE p.track_id NOT IN (SELECT track_id FROM ignored_tracks))", [], |row| row.get(0),
         ).map_err(|error| format!("Could not count all-time plays: {error}"))?;
 
         let mut daily_plays = vec![0_i64; day_boundaries_utc.len().saturating_sub(1)];
         if day_boundaries_utc.len() > 1 {
             let mut statement = self.connection.prepare(
-                "SELECT COUNT(*) FROM track_play_events WHERE played_at_utc >= ?1 AND played_at_utc < ?2",
+                "SELECT COUNT(*) FROM track_play_events WHERE played_at_utc >= ?1 AND played_at_utc < ?2 \
+                 AND track_id NOT IN (SELECT track_id FROM ignored_tracks)",
             ).map_err(|error| format!("Could not query daily plays: {error}"))?;
             for (index, pair) in day_boundaries_utc.windows(2).enumerate() {
                 daily_plays[index] = statement
@@ -269,6 +275,35 @@ mod tests {
         assert_eq!(all.dated_plays, 3);
         assert_eq!(all.daily_plays, vec![2, 1]);
         assert_eq!(all.track_counts[0].plays, 9);
+    }
+
+    #[test]
+    fn ignored_tracks_hide_legacy_and_dated_plays_and_keep_original_history() {
+        let mut database = database();
+        database
+            .connection
+            .execute("INSERT INTO ignored_tracks VALUES ('a')", [])
+            .unwrap();
+        database
+            .record_play_at("a", "00000000-0000-4000-8000-000000000001", 175)
+            .unwrap();
+        let stats = database
+            .listening_stats(None, None, &[100, 200, 300])
+            .unwrap();
+        assert_eq!(stats.total_plays, 3);
+        assert_eq!(stats.daily_plays, vec![0, 1]);
+        assert_eq!(stats.dated_plays, 1);
+        let stats = database.listening_stats(Some(100), Some(200), &[]).unwrap();
+        assert_eq!(stats.total_plays, 0);
+        database
+            .connection
+            .execute("DELETE FROM ignored_tracks", [])
+            .unwrap();
+        let restored = database
+            .listening_stats(None, None, &[100, 200, 300])
+            .unwrap();
+        assert_eq!(restored.total_plays, 12);
+        assert_eq!(restored.daily_plays, vec![2, 1]);
     }
 
     #[test]

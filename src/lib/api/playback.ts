@@ -1,8 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { PlaybackStatus, VideoCodecInfo, VideoPlaybackStatus } from "$lib/types/library";
 
-export async function playTrack(filePath: string): Promise<PlaybackStatus> {
-  return invoke<PlaybackStatus>("play_track", { filePath });
+export async function playTrack(filePath: string, nextFilePath: string | null = null): Promise<PlaybackStatus> {
+  return invoke<PlaybackStatus>("play_track", { filePath, nextFilePath });
+}
+
+export async function stageGaplessTrack(expectedFilePath: string, nextFilePath: string | null) {
+  return invoke<void>("stage_gapless_track", { expectedFilePath, nextFilePath });
 }
 
 export async function pausePlayback(): Promise<PlaybackStatus> {

@@ -52,7 +52,7 @@
   }
 
   function selectTrack(track: Track) {
-    if (unavailableTrackIds.has(track.id)) return;
+    if (track.unavailable || unavailableTrackIds.has(track.id)) return;
     onTrackSelect?.(track, tracks);
   }
 
@@ -155,8 +155,8 @@
         class:withRemove={Boolean(onRemoveTrack)}
         class="track-row"
         role="button"
-        aria-disabled={unavailableTrackIds.has(track.id)}
-        tabindex={unavailableTrackIds.has(track.id) ? -1 : 0}
+        aria-disabled={Boolean(track.unavailable || unavailableTrackIds.has(track.id))}
+        tabindex={track.unavailable || unavailableTrackIds.has(track.id) ? -1 : 0}
         title={unavailableTrackIds.has(track.id) ? "Retained history: add and associate this music to enable playback" : track.filePath}
         onclick={() => selectTrack(track)}
         oncontextmenu={(event) => openTrackContextMenu(event, track)}
@@ -178,7 +178,7 @@
           {/if}
         </div>
         <div class="track-title">
-          <span class="track-name">{track.title}</span>
+          <span class="track-name">{track.title}{track.unavailable ? " · Unavailable" : track.ignored ? " · Ignored" : ""}</span>
           <button class="track-link" type="button" disabled={unavailableTrackIds.has(track.id)} onclick={(event) => selectArtist(event, track)}>
             {displayArtist(track)}
           </button>
@@ -190,7 +190,7 @@
           <span class="track-duration">{formatDuration(track.durationSeconds)}</span>
         {/if}
         {#if track.playCount > 0}
-          <span class="play-count">{playCountLabel(track)}</span>
+          <span class="play-count">{track.ignored ? "" : playCountLabel(track)}</span>
         {:else}
           <span class="play-count empty" aria-hidden="true"></span>
         {/if}

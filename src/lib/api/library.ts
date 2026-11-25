@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import type { ListeningHistoryExport, ListeningImportPreview, ListeningImportResult, ListeningStats } from "$lib/types/listening";
 import type {
@@ -15,6 +15,8 @@ import type {
   CdRipMetadata,
   CdRipResult,
   LibraryCache,
+  LibraryScanProgress,
+  LibraryScanResult,
   LrclibLyricsResult,
   PlatformCapabilities,
   Playlist,
@@ -108,8 +110,18 @@ export async function setAlbumCover(albumId: string, imagePath: string | null): 
   return invoke("set_album_cover", { albumId, imagePath });
 }
 
-export async function scanLibrary(root: string, append = false): Promise<Track[]> {
-  return invoke<Track[]>("scan_library", { root, append });
+export async function scanLibrary(
+  root: string,
+  append: boolean,
+  onlyFolder: string | null,
+  onProgress: (progress: LibraryScanProgress) => void,
+): Promise<LibraryScanResult> {
+  const progress = new Channel<LibraryScanProgress>(onProgress);
+  return invoke<LibraryScanResult>("scan_library_folders", { root, append, onlyFolder, progress });
+}
+
+export function setIgnoredTracks(trackIds: string[], ignored: boolean) {
+  return invoke<string[]>("set_ignored_tracks", { trackIds, ignored });
 }
 
 export async function getLibraryCache(): Promise<LibraryCache> {
@@ -258,6 +270,14 @@ export async function movePlaylistTrack(
 
 export async function readTrackLyrics(trackPath: string): Promise<TrackLyrics | null> {
   return invoke<TrackLyrics | null>("read_track_lyrics", { trackPath });
+}
+
+export async function saveEditedLyrics(trackPath: string, kind: TrackLyrics["kind"], text: string) {
+  return invoke<TrackLyrics>("save_edited_lyrics", { trackPath, kind, text });
+}
+
+export async function restoreOriginalLyrics(trackPath: string) {
+  return invoke<void>("restore_original_lyrics", { trackPath });
 }
 
 export async function autoFindTrackLyrics(trackPath: string, replaceCached = false): Promise<AutoLyricsResult> {

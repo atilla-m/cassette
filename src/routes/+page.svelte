@@ -31,11 +31,14 @@
     associateListeningHistoryTrack,
     readTrackLyrics,
     removeCachedTrackLyrics,
+    restoreOriginalLyrics,
+    saveEditedLyrics,
     removeTrackFromPlaylist,
     renamePlaylist,
     ripCdToFlac,
     inspectCoverImage,
     scanLibrary,
+    setIgnoredTracks,
     scanDvdTitles,
     scanVideoFolder,
     saveTrackLyricsResult,
@@ -66,6 +69,7 @@
     seekPlayback,
     seekVideo,
     setPlaybackVolume,
+    stageGaplessTrack,
     setVideoVolume,
     stopVideo,
   } from "$lib/api/playback";
@@ -91,6 +95,7 @@
   import CompactDropdown, { type DropdownOption } from "$lib/components/CompactDropdown.svelte";
   import ContextMenu from "$lib/components/ContextMenu.svelte";
   import CoverArtViewer from "$lib/components/CoverArtViewer.svelte";
+  import LyricsEditor from "$lib/components/LyricsEditor.svelte";
   import LibrarySection from "$lib/components/LibrarySection.svelte";
   import NowPlayingBar from "$lib/components/NowPlayingBar.svelte";
   import Sidebar from "$lib/components/Sidebar.svelte";
@@ -131,6 +136,8 @@
     TrackTagEditorData,
     TrackTagValues,
     TrackLyrics,
+    LibraryFolderScan,
+    LibraryScanProgress,
     UpdateTrackTagsRequest,
     UpdateAlbumTagsRequest,
     VideoEntry,
@@ -468,13 +475,22 @@
   ];
 
   let libraryTracks = $state<Track[]>([]);
+  let libraryFolders = $state<LibraryFolderScan[]>([]);
+  let scanProgress = $state<LibraryScanProgress | null>(null);
+  let scanSummary = $state<string | null>(null);
+  let unavailableTrackIds = $state(new Set<string>());
+  let ignoredTrackIds = $state(new Set<string>());
+  let savingIgnoredTracks = $state(false);
+  let ignoredTracksError = $state<string | null>(null);
   let customAlbumCovers = $state<Record<string, string>>({});
-  let tracks = $derived(Object.keys(customAlbumCovers).length > 0
-    ? libraryTracks.map((track) => {
-      const coverArtPath = customAlbumCovers[albumIdForTrack(track)];
-      return coverArtPath ? { ...track, coverArtPath } : track;
-    })
-    : libraryTracks);
+  let tracks = $derived(libraryTracks.map((track) => {
+    const coverArtPath = customAlbumCovers[albumIdForTrack(track)] ?? track.coverArtPath;
+    const ignored = ignoredTrackIds.has(track.id);
+    const unavailable = unavailableTrackIds.has(track.id);
+    return ignored || unavailable || coverArtPath !== track.coverArtPath
+      ? { ...track, coverArtPath, ignored, unavailable, playCount: ignored ? 0 : track.playCount, lastPlayedAt: ignored ? null : track.lastPlayedAt }
+      : track;
+  }));
   let editingCoverForAlbum = $state<string | null>(null);
   let albumCoverFeedback = $state<{ albumId: string; message: string; error: boolean } | null>(null);
   let videos = $state<VideoEntry[]>([]);
@@ -525,6 +541,9 @@
   let cdDriveFound = $state<boolean | null>(null);
   let audioCdFound = $state<boolean | null>(null);
   let cdTracks = $state<CdRipTrack[]>([]);
+  let cdCompletedCount = $derived(cdTracks.filter((track) => track.status === "done").length);
+  let cdFailedCount = $derived(cdTracks.filter((track) => track.status === "error").length);
+  let cdDurationSeconds = $derived(cdTracks.reduce((total, track) => total + (track.durationSeconds ?? 0), 0));
   let cdRawOutput = $state("");
   let detectedCdKey: string | null = null;
   let cdDetectionRevision = 0;
@@ -562,6 +581,9 @@
   let isHandlingTrackEnd = $state(false);
   let platformCapabilities = $state<PlatformCapabilities | null>(null);
   let trackNotificationsEnabled = $state(false);
+  let gaplessEnabled = $state(true);
+  const listenPercentages = [25, 50, 75, 100];
+  let listenPercentage = $state(50);
   let trackNotificationStatus = $state<string | null>(null);
   let trackNotificationStatusIsError = $state(false);
   let automaticUpdateChecksEnabled = $state(true);
@@ -596,6 +618,10 @@
   let activeView = $state("Albums");
   let statsDetailSection = $state<StatsSectionId | null>(null);
   let selectedAlbumId = $state<string | null>(null);
+  let trackSelectionAlbumId = $state<string | null>(null);
+  let selectedTrackIds = $state(new Set<string>());
+  let selectionAnchor = $state<string | null>(null);
+  let isAlbumSelectingTracks = $derived(trackSelectionAlbumId !== null && trackSelectionAlbumId === selectedAlbumId);
   let albumNavigationOrigin = $state<AlbumNavigationOrigin>({ view: "Albums" });
   let selectedArtistName = $state<string | null>(null);
   let artistNavigationOrigin = $state<ArtistNavigationOrigin>({ view: "Artists" });
@@ -701,6 +727,7 @@
   let volume = $state(1);
   let contextMenu = $state<ContextMenuState | null>(null);
   let currentLyrics = $state<TrackLyrics | null>(null);
+  let lyricsEdit = $state<{ track: Track; kind: TrackLyrics["kind"]; text: string } | null>(null);
   let autoFindLyricsEnabled = $state(true);
   let selectedTheme = $state<ThemeId>(DEFAULT_THEME);
   let isLoadingLyrics = $state(false);
@@ -919,8 +946,10 @@
       ? normalizedQueueOrder(shuffledQueueOrder, playbackQueue.length)
       : playbackQueue.map((_, index) => index),
   );
-  let currentOrderIndex = $derived(queueOrderIndex(playbackOrder, currentQueueIndex));
-  let queuePanelEntries = $derived(buildQueuePanelEntries(playbackQueue, playbackOrder, currentQueueIndex));
+  let playableQueueOrder = $derived(playbackOrder.filter((index) => index === currentQueueIndex
+    || (!unavailableTrackIds.has(playbackQueue[index].id) && (!isShuffleEnabled || !ignoredTrackIds.has(playbackQueue[index].id)))));
+  let currentOrderIndex = $derived(queueOrderIndex(playableQueueOrder, currentQueueIndex));
+  let queuePanelEntries = $derived(buildQueuePanelEntries(playbackQueue, playableQueueOrder, currentQueueIndex));
   let currentTrackGenres = $derived(currentTrack ? trackGenres(currentTrack).filter((genre) => genre !== "Unknown Genre") : []);
   let currentTrackCoverArtPath = $derived(currentTrack ? trackCoverPath(currentTrack) : null);
   let currentTrackCoverArtSrc = $derived(localImageSource(currentTrackCoverArtPath));
@@ -1179,7 +1208,10 @@
     const statsCalendarIntervalId = window.setInterval(refreshStatsCalendar, 60_000);
     window.addEventListener("focus", refreshStatsCalendar);
     autoFindLyricsEnabled = readPreference(AUTO_LYRICS_SETTING_KEY) !== "off";
+    const storedListenPercentage = Number(readPreference("cassette:listen-percentage"));
+    if (listenPercentages.includes(storedListenPercentage)) listenPercentage = storedListenPercentage;
     trackNotificationsEnabled = readPreference(TRACK_NOTIFICATIONS_SETTING_KEY) === "on";
+    gaplessEnabled = readPreference("cassette:gapless") !== "off";
     showAlbumPlayCounts = readPreference(ALBUM_PLAY_COUNTS_SETTING_KEY) !== "off";
     showArtistPlayCounts = readPreference(ARTIST_PLAY_COUNTS_SETTING_KEY) !== "off";
     showGenrePlayCounts = readPreference(GENRE_PLAY_COUNTS_SETTING_KEY) !== "off";
@@ -1247,7 +1279,11 @@
 
         if (isStartingTrack || startId !== playbackStartId || controlRevision !== playbackControlRevision || isTagWriteSuspendingPlayback
           || tagWriteGeneration !== tagWritePlaybackGeneration || currentTrack?.filePath !== statusTrackPath
-          || status.filePath !== statusTrackPath || !playbackSeekCoordinator.allowsPositionUpdate(positionSnapshot)) {
+          || !playbackSeekCoordinator.allowsPositionUpdate(positionSnapshot)) {
+          return;
+        }
+        if (status.filePath !== statusTrackPath) {
+          await acceptGaplessTransition(status);
           return;
         }
 
@@ -1261,7 +1297,7 @@
       } finally {
         isPollingPlayback = false;
       }
-    }, 1000);
+    }, 250);
 
     const progressIntervalId = window.setInterval(() => {
       if (isStartingTrack || isTagWriteSuspendingPlayback || !currentTrack || !isPlaying || playbackSeekCoordinator.hasPendingSeek(currentTrack.filePath)) {
@@ -1403,6 +1439,9 @@
       const cache = await getLibraryCache();
       libraryRecoveryNotice = cache.recoveryNotice ?? null;
       libraryTracks = cache.tracks;
+      libraryFolders = cache.folders ?? [];
+      unavailableTrackIds = new Set(cache.unavailableTrackIds ?? []);
+      ignoredTrackIds = new Set(cache.ignoredTrackIds ?? []);
       customAlbumCovers = cache.albumCovers ?? {};
       playlists = cache.playlists;
       scannedFolder = cache.lastScannedFolder;
@@ -2026,6 +2065,37 @@
     return requestId === lyricsRequestId && currentTrack?.filePath === trackPath;
   }
 
+  function openLyricsEditor() {
+    if (!currentTrack) return;
+    lyricsEdit = { track: currentTrack, kind: currentLyrics?.kind ?? "plain", text: currentLyrics?.text ?? "" };
+  }
+
+  async function handleSaveEditedLyrics(kind: TrackLyrics["kind"], text: string) {
+    const trackPath = lyricsEdit?.track.filePath;
+    if (!trackPath) return;
+    const lyrics = await saveEditedLyrics(trackPath, kind, text);
+    if (currentTrack?.filePath === trackPath) {
+      lyricsRequestId += 1;
+      currentLyrics = lyrics;
+      isLoadingLyrics = false;
+      isAutoFindingLyrics = false;
+      isLyricsPickerOpen = false;
+      lyricsLookupError = null;
+      lyricsLookupMessage = "Lyrics saved.";
+    }
+  }
+
+  async function handleRestoreOriginalLyrics() {
+    const trackPath = currentTrack?.filePath;
+    if (!trackPath || !window.confirm("Discard your edits and restore the original lyrics?")) return;
+    try {
+      await restoreOriginalLyrics(trackPath);
+      if (currentTrack?.filePath === trackPath) await loadCurrentTrackLyrics(trackPath);
+    } catch (error) {
+      if (currentTrack?.filePath === trackPath) lyricsLookupError = String(error);
+    }
+  }
+
   async function handleRemoveCachedLyrics() {
     if (!currentTrack) {
       return;
@@ -2074,19 +2144,19 @@
     }
   }
 
-  async function handleScanLibrary(changeFolder = false) {
+  async function handleScanLibrary(changeFolder = false, append = false, onlyFolder: string | null = null) {
     if (isScanning) return;
     isScanning = true;
     scanError = null;
 
     try {
-      const folder = changeFolder || !scannedFolder ? await chooseLibraryFolder() : scannedFolder;
+      const folder = changeFolder || append || !scannedFolder ? await chooseLibraryFolder() : scannedFolder;
 
       if (!folder) {
         return;
       }
 
-      await scanFolderIntoLibrary(folder);
+      await scanFolderIntoLibrary(folder, append, onlyFolder);
     } catch (error) {
       scanError = error instanceof Error ? error.message : String(error);
     } finally {
@@ -2094,16 +2164,27 @@
     }
   }
 
-  async function scanFolderIntoLibrary(folder: string, append = false) {
+  async function scanFolderIntoLibrary(folder: string, append = false, onlyFolder: string | null = null) {
     isScanning = true;
     hasLoadedCache = true;
 
     const sameLibrary = scannedFolder !== null && (append || scannedFolder === folder);
-    const scannedTracks = await scanLibrary(folder, append);
-    if (!append || !scannedFolder) scannedFolder = folder;
+    scanProgress = null;
+    scanSummary = null;
+    const result = await scanLibrary(folder, append, onlyFolder, (progress) => {
+      if (isScanning) scanProgress = progress;
+    });
+    const scannedTracks = result.tracks;
+    const reports = onlyFolder ? result.folders.filter((item) => item.path === onlyFolder) : result.folders;
+    const total = (key: "added" | "updated" | "skipped") => reports.reduce((count, report) => count + report[key], 0);
+    const unavailable = reports.filter((report) => report.error).length;
+    scanSummary = `${total("added")} added · ${total("updated")} updated · ${total("skipped")} skipped${unavailable ? ` · ${unavailable} unavailable` : ""}`;
+    scannedFolder = result.primaryFolder;
     libraryTracks = scannedTracks;
+    libraryFolders = result.folders;
+    unavailableTrackIds = new Set(result.unavailableTrackIds);
     scanCount = scannedTracks.length;
-    lastScannedAt = Math.floor(Date.now() / 1000);
+    lastScannedAt = result.scannedAt;
     statsRevision += 1;
     if (sameLibrary) {
       const scannedById = new Map(scannedTracks.map((track, index) => [track.id, { track, index }]));
@@ -4135,6 +4216,7 @@
       { label: "Play next", action: () => insertTracksNext([track]) },
       { label: "Add to queue", action: () => appendTracksToQueue([track]) },
       { label: "Edit Tags", action: () => handleEditTrackTags(track) },
+      ...ignoredTrackMenuItems([track.id]),
       ...playlistAddMenuItems(track),
       { label: "Go to artist", action: () => handleTrackArtistSelect(track) },
       { label: "Go to album", action: () => handleTrackAlbumSelect(track) },
@@ -4143,6 +4225,32 @@
         action: () => handleToggleFavorite(track),
       },
     ]);
+  }
+
+  function ignoredTrackMenuItems(ids: string[]): ContextMenuItem[] {
+    const items: ContextMenuItem[] = [];
+    if (ids.some((id) => !ignoredTrackIds.has(id))) {
+      items.push({ label: ids.length === 1 ? "Ignore track" : "Ignore selected tracks", action: () => updateIgnoredTracks(ids, true) });
+    }
+    if (ids.some((id) => ignoredTrackIds.has(id))) {
+      items.push({ label: ids.length === 1 ? "Stop ignoring track" : "Stop ignoring selected tracks", action: () => updateIgnoredTracks(ids, false) });
+    }
+    return items;
+  }
+
+  async function updateIgnoredTracks(ids: string[], ignored: boolean) {
+    if (savingIgnoredTracks) return;
+    savingIgnoredTracks = true;
+    ignoredTracksError = null;
+    try {
+      ignoredTrackIds = new Set(await setIgnoredTracks(ids, ignored));
+      statsRevision += 1;
+      clearAlbumTrackSelection();
+    } catch (error) {
+      ignoredTracksError = error instanceof Error ? error.message : String(error);
+    } finally {
+      savingIgnoredTracks = false;
+    }
   }
 
   function playlistAddMenuItems(track: Track): ContextMenuItem[] {
@@ -4418,13 +4526,40 @@
     event.stopPropagation();
   }
 
-  function handleAlbumTrackSelect(track: Track) {
-    void handleTrackSelect(track, selectedAlbumTracks);
+  function clearAlbumTrackSelection() {
+    trackSelectionAlbumId = null;
+    selectedTrackIds = new Set();
+    selectionAnchor = null;
+  }
+
+  function handleAlbumTrackSelect(track: Track, event: MouseEvent | KeyboardEvent) {
+    if (!selectedAlbumId || !(isAlbumSelectingTracks || event.ctrlKey || event.metaKey || event.shiftKey)) {
+      void handleTrackSelect(track, selectedAlbumTracks);
+      return;
+    }
+    const selection = new Set(isAlbumSelectingTracks ? selectedTrackIds : []);
+    trackSelectionAlbumId = selectedAlbumId;
+    const displayed = selectedAlbumDiscGroups.flatMap((group) => group.tracks);
+    const anchorIndex = displayed.findIndex((entry) => entry.id === selectionAnchor);
+    const trackIndex = displayed.findIndex((entry) => entry.id === track.id);
+    if (event.shiftKey && anchorIndex >= 0 && trackIndex >= 0) {
+      for (const entry of displayed.slice(Math.min(anchorIndex, trackIndex), Math.max(anchorIndex, trackIndex) + 1)) {
+        selection.add(entry.id);
+      }
+    } else {
+      if (!selection.delete(track.id)) selection.add(track.id);
+      selectionAnchor = track.id;
+    }
+    selectedTrackIds = selection;
   }
 
   function openAlbumTrackContextMenu(event: MouseEvent, track: Track) {
     event.preventDefault();
     event.stopPropagation();
+    if (isAlbumSelectingTracks && selectedTrackIds.has(track.id) && selectedTrackIds.size > 1) {
+      openContextMenu(event.clientX, event.clientY, ignoredTrackMenuItems([...selectedTrackIds]));
+      return;
+    }
     openTrackContextMenu(track, selectedAlbumTracks, event.clientX, event.clientY);
   }
 
@@ -4436,7 +4571,7 @@
     if (event.key === "Enter") {
       event.preventDefault();
       event.stopPropagation();
-      handleAlbumTrackSelect(track);
+      handleAlbumTrackSelect(track, event);
     }
   }
 
@@ -4924,12 +5059,68 @@
     }
   }
 
+  function gaplessCandidate(queue: Track[], queueIndex: number, shuffle: boolean, order: number[]) {
+    if (!gaplessEnabled || repeatMode === "one") return null;
+    const filtered = order.filter((index) => index === queueIndex
+      || (!unavailableTrackIds.has(queue[index].id) && (!shuffle || !ignoredTrackIds.has(queue[index].id))));
+    const nextIndex = filtered[filtered.indexOf(queueIndex) + 1]
+      ?? (repeatMode === "all" ? filtered[0] : undefined);
+    const next = nextIndex === undefined ? null : queue[nextIndex];
+    return next && next.filePath !== queue[queueIndex].filePath
+      && !unavailableTrackIds.has(next.id) && (!shuffle || !ignoredTrackIds.has(next.id)) ? next.filePath : null;
+  }
+
+  $effect(() => {
+    if (isStartingTrack || isTagWriteSuspendingPlayback || !currentTrack) return;
+    const path = currentTrack.filePath;
+    const next = currentQueueIndex === null ? null
+      : gaplessCandidate(playbackQueue, currentQueueIndex, isShuffleEnabled, playbackOrder);
+    void stageGaplessTrack(path, next).catch(() => { /* Existing end-of-track playback is the fallback. */ });
+  });
+
+  async function acceptGaplessTransition(status: PlaybackStatus) {
+    if (!status.filePath || !currentTrack) return;
+    const nextIndex = getNextQueueIndex(true);
+    if (nextIndex !== null && playbackQueue[nextIndex]?.filePath !== status.filePath) {
+      await playQueuedTrackAtIndex(nextIndex);
+      return;
+    }
+    if (nextIndex === null) {
+      await pausePlayback();
+      updatePlaybackListenClock(false);
+      void maybeRecordTrackPlay(true);
+      isPlaying = false;
+      hasCurrentTrackEnded = true;
+      return;
+    }
+    updatePlaybackListenClock(false);
+    // Polling sees the handoff after it happens. Attribute elapsed time in the
+    // new stream to its own session.
+    playbackSessionListenedSeconds = Math.max(0, playbackSessionListenedSeconds - status.positionSeconds);
+    void maybeRecordTrackPlay(true);
+    const track = playbackQueue[nextIndex];
+    const trackIndex = tracks.findIndex((candidate) => candidate.id === track.id);
+    currentTrack = trackIndex >= 0 ? tracks[trackIndex] : track;
+    currentTrackIndex = trackIndex >= 0 ? trackIndex : null;
+    currentQueueIndex = nextIndex;
+    playbackSeekCoordinator.reset(track.filePath);
+    resetPlaybackListenSession(currentTrack);
+    playbackSessionListenedSeconds = status.positionSeconds;
+    applyPlaybackStatus(status);
+    void notifyTrackPlaybackStarted(currentTrack, ++playbackStartId);
+    await handlePlaybackStatusUpdate(status);
+  }
+
   async function playQueuedTrackAtIndex(
     queueIndex: number,
     nextQueue?: { tracks: Track[]; shuffle: boolean; order: number[] },
   ) {
     const track = (nextQueue?.tracks ?? playbackQueue)[queueIndex];
     if (!track || isStartingTrack || isTagWriteSuspendingPlayback) {
+      return;
+    }
+    if (unavailableTrackIds.has(track.id)) {
+      playbackError = "This track is unavailable. Reconnect its music folder and rescan it.";
       return;
     }
 
@@ -4945,7 +5136,12 @@
           videoBackendStatus = null;
         }
       }
-      const status = await playTrack(track.filePath);
+      const queue = nextQueue?.tracks ?? playbackQueue;
+      const shuffle = nextQueue?.shuffle ?? isShuffleEnabled;
+      const order = nextQueue
+        ? (shuffle ? normalizedQueueOrder(nextQueue.order, queue.length) : queue.map((_, index) => index))
+        : playbackOrder;
+      const status = await playTrack(track.filePath, gaplessCandidate(queue, queueIndex, shuffle, order));
       if (status.filePath !== track.filePath) {
         throw new Error("The selected track could not be started.");
       }
@@ -5025,7 +5221,7 @@
   }
 
   async function handlePlaybackStatusUpdate(status: PlaybackStatus) {
-    void maybeRecordTrackPlay();
+    void maybeRecordTrackPlay(status.hasEnded);
     if (status.hasEnded) await handleTrackEnd();
   }
 
@@ -5072,12 +5268,13 @@
     }
   }
 
-  async function maybeRecordTrackPlay() {
+  async function maybeRecordTrackPlay(naturalEnd = false) {
     if (
       !currentTrack
       || !playbackSessionEventId
+      || ignoredTrackIds.has(currentTrack.id)
       || countedPlaybackTrackId === currentTrack.id
-      || !hasReachedPlayCountThreshold(currentTrack)
+      || !hasReachedPlayCountThreshold(currentTrack, naturalEnd)
     ) {
       return;
     }
@@ -5137,11 +5334,12 @@
     playbackSessionStartedAtMs = nextIsPlaying ? now : null;
   }
 
-  function hasReachedPlayCountThreshold(track: Track) {
+  function hasReachedPlayCountThreshold(track: Track, naturalEnd: boolean) {
+    if (playbackSessionTrackId !== track.id || playbackSessionListenedSeconds <= 0) return false;
     const duration = durationSeconds ?? track.durationSeconds;
-    const threshold = duration && duration > 0 ? Math.min(30, duration * 0.5) : 30;
-
-    return playbackSessionTrackId === track.id && playbackSessionListenedSeconds >= threshold;
+    if (!duration || duration <= 0) return naturalEnd;
+    const tolerance = naturalEnd && listenPercentage === 100 ? 0.25 : 0;
+    return playbackSessionListenedSeconds + tolerance >= duration * listenPercentage / 100;
   }
 
   async function handleSaveAlbumGenres() {
@@ -5347,7 +5545,8 @@
   }
 
   async function playTrackSet(libraryTracks: Track[], shouldShuffle = false) {
-    const queue = shouldShuffle ? shuffleTracks(libraryTracks) : orderedContextTracks(libraryTracks);
+    const available = libraryTracks.filter((track) => !unavailableTrackIds.has(track.id));
+    const queue = shouldShuffle ? shuffleTracks(available) : orderedContextTracks(available);
 
     if (queue.length === 0) {
       return;
@@ -5468,7 +5667,11 @@
         if (!isCurrent()) return;
       }
       const status = action === "resume" ? await resumePlayback() : await pausePlayback();
-      if (!isCurrent() || status.filePath !== trackPath) return;
+      if (!isCurrent()) return;
+      if (status.filePath !== trackPath) {
+        await acceptGaplessTransition(status);
+        return;
+      }
 
       applyPlaybackStatus(status, {
         applyPosition: playbackSeekCoordinator.allowsPositionUpdate(positionSnapshot),
@@ -5883,6 +6086,7 @@
   }
 
   function lyricsKindLabel(lyrics: TrackLyrics) {
+    if (lyrics.source === "edited") return lyrics.kind === "synced" ? "Edited synced lyrics" : "Edited plain lyrics";
     if (lyrics.source === "lrclib") {
       return lyrics.kind === "synced" ? "Cached LRCLIB synced" : "Cached LRCLIB plain";
     }
@@ -6233,6 +6437,7 @@
   }
 
   function trackMatchesMixFilters(track: Track) {
+    if (ignoredTrackIds.has(track.id) || unavailableTrackIds.has(track.id)) return false;
     if (mixLikedOnly && !track.isFavorite) {
       return false;
     }
@@ -6257,7 +6462,7 @@
   }
 
   function shuffleTracks(libraryTracks: Track[]) {
-    const shuffled = [...libraryTracks];
+    const shuffled = libraryTracks.filter((track) => !ignoredTrackIds.has(track.id) && !unavailableTrackIds.has(track.id));
 
     for (let index = shuffled.length - 1; index > 0; index -= 1) {
       const swapIndex = Math.floor(Math.random() * (index + 1));
@@ -6384,18 +6589,19 @@
       return null;
     }
 
-    if (isAutoAdvance && repeatMode === "one") {
+    if (isAutoAdvance && repeatMode === "one" && !unavailableTrackIds.has(playbackQueue[currentQueueIndex].id)) {
       return currentQueueIndex;
     }
 
     const nextOrderIndex = currentOrderIndex + 1;
 
-    if (nextOrderIndex < playbackOrder.length) {
-      return playbackOrder[nextOrderIndex];
+    if (nextOrderIndex < playableQueueOrder.length) {
+      return playableQueueOrder[nextOrderIndex];
     }
 
     if (repeatMode === "all") {
-      return playbackOrder[0] ?? null;
+      return playableQueueOrder.find((index) => !unavailableTrackIds.has(playbackQueue[index].id)
+        && (!isShuffleEnabled || !ignoredTrackIds.has(playbackQueue[index].id))) ?? null;
     }
 
     return null;
@@ -6409,11 +6615,12 @@
     const previousOrderIndex = currentOrderIndex - 1;
 
     if (previousOrderIndex >= 0) {
-      return playbackOrder[previousOrderIndex];
+      return playableQueueOrder[previousOrderIndex];
     }
 
     if (repeatMode === "all") {
-      return playbackOrder.at(-1) ?? null;
+      return [...playableQueueOrder].reverse().find((index) => !unavailableTrackIds.has(playbackQueue[index].id)
+        && (!isShuffleEnabled || !ignoredTrackIds.has(playbackQueue[index].id))) ?? null;
     }
 
     return null;
@@ -7016,7 +7223,7 @@
 
   function viewStatus() {
     if (isScanning) {
-      return "Scanning your local music files...";
+      return scanProgress ? `Scanning… ${scanProgress.checked} audio files checked` : "Scanning your local music files…";
     }
 
     if (!hasLoadedCache) {
@@ -7033,7 +7240,7 @@
       return [
         songCountLabel(tracks.length),
         `${hasLoadedCache ? displayAlbums.length : 0} ${(hasLoadedCache ? displayAlbums.length : 0) === 1 ? "album" : "albums"}`,
-        scannedFolder,
+        scanSummary ?? scannedFolder,
       ].filter(Boolean).join(" · ");
     }
 
@@ -7179,6 +7386,9 @@
       {#if playbackError}
         <div class="scan-error" role="alert">{playbackError}</div>
       {/if}
+      {#if ignoredTracksError}
+        <div class="scan-error" role="alert">{ignoredTracksError}</div>
+      {/if}
       {#if activeView === "Videos" && videoError}
         <div class="scan-error" role="alert">{videoError}</div>
       {:else if activeView === "Videos" && videoMessage}
@@ -7258,7 +7468,7 @@
                       <span>{currentTrack.year}</span>
                     {/if}
                     <span>{currentTrack.extension.toUpperCase()}</span>
-                    {#if currentTrack.playCount > 0}
+                    {#if currentTrack.playCount > 0 && !ignoredTrackIds.has(currentTrack.id)}
                       <span>{playCountLabel(currentTrack)}</span>
                     {/if}
                   </div>
@@ -7360,9 +7570,16 @@
                 </div>
 
                 <div class="lyrics-option-actions">
+                  <button type="button" disabled={isLoadingLyrics} onclick={openLyricsEditor}>
+                    {currentLyrics ? "Edit lyrics" : "Add lyrics"}
+                  </button>
+                  {#if currentLyrics?.source === "edited"}
+                    <button type="button" onclick={() => void handleRestoreOriginalLyrics()}>Restore original lyrics</button>
+                  {:else}
                   <button type="button" disabled={isAutoFindingLyrics} onclick={() => void handleAutoFindLyrics({ mode: "manual", replaceCached: true })}>
                     {isAutoFindingLyrics ? "Searching..." : currentLyrics ? "Change Lyrics" : "Search Lyrics"}
                   </button>
+                  {/if}
                   {#if currentLyrics?.source === "lrclib"}
                     <button type="button" onclick={() => void handleRemoveCachedLyrics()}>
                       Remove Cached Lyrics
@@ -7966,6 +8183,21 @@
 
             <LibrarySection title="Album Songs" viewAllLabel="">
               {#snippet headerActions()}
+                <button class="album-selection-button" type="button" aria-pressed={isAlbumSelectingTracks}
+                  onclick={() => {
+                    const selecting = isAlbumSelectingTracks;
+                    clearAlbumTrackSelection();
+                    if (!selecting) trackSelectionAlbumId = selectedAlbumId;
+                  }}>
+                  {isAlbumSelectingTracks ? "Done selecting" : "Select tracks"}
+                </button>
+                {#if isAlbumSelectingTracks && selectedTrackIds.size > 0}
+                  {@const ignore = [...selectedTrackIds].some((id) => !ignoredTrackIds.has(id))}
+                  <button class="album-selection-button" type="button" disabled={savingIgnoredTracks}
+                    onclick={() => void updateIgnoredTracks([...selectedTrackIds], ignore)}>
+                    {ignore ? "Ignore" : "Stop ignoring"} {selectedTrackIds.size}
+                  </button>
+                {/if}
                 <TrackSortMenu
                   value={albumTrackSort}
                   direction={albumTrackSortDirection}
@@ -7994,11 +8226,13 @@
                       <div
                         class:active={track.id === currentTrack?.id}
                         class:with-play-counts={showAlbumTrackPlayCounts}
+                        class:bulk-selected={isAlbumSelectingTracks && selectedTrackIds.has(track.id)}
                         class="album-track-row"
                         role="button"
                         tabindex="0"
                         title={track.filePath}
-                        onclick={() => handleAlbumTrackSelect(track)}
+                        aria-pressed={isAlbumSelectingTracks ? selectedTrackIds.has(track.id) : undefined}
+                        onclick={(event) => handleAlbumTrackSelect(track, event)}
                         oncontextmenu={(event) => openAlbumTrackContextMenu(event, track)}
                         onkeydown={(event) => handleAlbumTrackKeydown(event, track)}
                       >
@@ -8006,13 +8240,13 @@
                           {albumTrackNumberLabel(track)}
                         </span>
                         <div class="track-title">
-                          <span class="track-name">{track.title}</span>
+                          <span class="track-name">{track.title}{track.unavailable ? " · Unavailable" : track.ignored ? " · Ignored" : ""}</span>
                           <button class="track-link" type="button" onclick={(event) => { event.stopPropagation(); handleTrackArtistSelect(track); }}>
                             {track.artist ?? "Unknown Artist"}
                           </button>
                         </div>
                         {#if showAlbumTrackPlayCounts}
-                          <span class="album-track-play-count">{playsLabel(track.playCount)}</span>
+                          <span class="album-track-play-count">{track.ignored ? "" : playsLabel(track.playCount)}</span>
                         {/if}
                         <span class="album-track-duration">{track.durationSeconds === null ? "" : formatTrackDuration(track.durationSeconds)}</span>
                         <button
@@ -9350,56 +9584,57 @@
         </section>
       {:else if activeView === "CD Rip"}
         <section class="cd-ripper-page" aria-labelledby="cd-ripper-title">
-          <div class="settings-intro">
-            <p class="eyebrow">System Tools</p>
-            <h3 id="cd-ripper-title">CD Ripper</h3>
-            <p>{isWindows ? "Save an audio CD to your computer as lossless FLAC files." : "Cassette uses cdparanoia and flac to rip audio CDs on Linux."}</p>
-          </div>
+          <header class="cd-ripper-header">
+            <div>
+              <h2 id="cd-ripper-title">CD Rip</h2>
+              <p>Save your audio CD as lossless FLAC files.</p>
+            </div>
+            <div class="cd-rip-actions">
+              <button class:primary={!audioCdFound} type="button" disabled={isDetectingCd || isRippingCd} onclick={() => void handleDetectCd()}>
+                {isDetectingCd ? "Detecting…" : audioCdFound ? "Detect again" : "Detect CD"}
+              </button>
+              <button class:primary={audioCdFound} type="button" disabled={isDetectingCd || isRippingCd} onclick={() => void handleRipCd()}>
+                {isRippingCd ? "Ripping…" : "Rip CD"}
+              </button>
+            </div>
+          </header>
+
+          <dl class="cd-overview" aria-label="Disc and rip status">
+            <div>
+              <dt>Optical drive</dt>
+              <dd>{cdDriveFound === null ? "Not checked" : cdDriveFound ? "Connected" : "Not detected"}</dd>
+            </div>
+            <div>
+              <dt>Audio CD</dt>
+              <dd>{audioCdFound === null ? "Not checked" : audioCdFound ? "Ready" : "No disc"}</dd>
+            </div>
+            <div>
+              <dt>Tracks</dt>
+              <dd>{cdTracks.length || "—"}</dd>
+              {#if cdDurationSeconds > 0}<small>{formatTrackDuration(cdDurationSeconds)}</small>{/if}
+            </div>
+          </dl>
 
           <section class="cd-status-card" aria-labelledby="cd-status-title">
             <div class="settings-section-header">
-              <div>
-                <p class="eyebrow">Drive Status</p>
-                <h4 id="cd-status-title">Audio CD</h4>
-              </div>
-              <span class="settings-pill">{isRippingCd ? "Ripping" : isDetectingCd ? "Detecting" : "Idle"}</span>
+              <h4 id="cd-status-title">Destination</h4>
+              <span class="settings-pill">FLAC</span>
             </div>
-
-            <div class="cd-status-grid">
-              <div>
-                <span>CD drive</span>
-                <strong>{cdDriveFound === null ? "Not checked" : cdDriveFound ? "Detected" : "Not detected"}</strong>
+            <div class="cd-destination">
+              <div class="cd-output-folder">
+                <span>Output folder</span>
+                <strong>{cdOutputFolder ?? "Choose where to save your tracks"}</strong>
               </div>
-              <div>
-                <span>Audio CD</span>
-                <strong>{audioCdFound === null ? "Not checked" : audioCdFound ? "Detected" : "Not detected"}</strong>
-              </div>
-              <div>
-                <span>Tracks</span>
-                <strong>{cdTracks.length > 0 ? cdTracks.length : "Not available"}</strong>
-              </div>
-            </div>
-
-            <div class="cd-rip-actions">
-              <button type="button" disabled={isDetectingCd || isRippingCd} onclick={() => void handleDetectCd()}>
-                {isDetectingCd ? "Detecting..." : "Detect CD"}
-              </button>
-              <button type="button" disabled={isRippingCd} onclick={() => void handleChooseCdOutputFolder()}>
-                Choose Output Folder
-              </button>
-              <button class="primary" type="button" disabled={isDetectingCd || isRippingCd} onclick={() => void handleRipCd()}>
-                {isRippingCd ? "Ripping..." : "Rip CD"}
-              </button>
-              {#if lastRippedFolder}
-                <button type="button" disabled={isScanning || isRippingCd} onclick={() => void handleScanRippedFolder()}>
-                  {isScanning ? "Scanning..." : "Scan ripped folder"}
+              <div class="cd-rip-actions">
+                <button type="button" disabled={isRippingCd} onclick={() => void handleChooseCdOutputFolder()}>
+                  {cdOutputFolder ? "Change folder" : "Choose folder"}
                 </button>
-              {/if}
-            </div>
-
-            <div class="cd-output-folder">
-              <span>Output folder</span>
-              <strong>{cdOutputFolder ?? "No output folder selected"}</strong>
+                {#if lastRippedFolder}
+                  <button type="button" disabled={isScanning || isRippingCd} onclick={() => void handleScanRippedFolder()}>
+                    {isScanning ? "Scanning…" : "Add ripped tracks to library"}
+                  </button>
+                {/if}
+              </div>
             </div>
 
             {#if lastRippedFolder}
@@ -9419,15 +9654,14 @@
           <section class="cd-metadata-section" aria-labelledby="cd-metadata-title">
             <div class="settings-section-header">
               <div>
-                <p class="eyebrow">MusicBrainz</p>
-                <h4 id="cd-metadata-title">Metadata</h4>
+                <h4 id="cd-metadata-title">Album details</h4>
               </div>
               <span class="settings-pill">{cdDiscId ? `Disc ID ${cdDiscId}` : "Manual mode"}</span>
             </div>
 
             <div class="cd-rip-actions">
               <button type="button" disabled={isLookingUpCdMetadata || isDetectingCd || isRippingCd} onclick={() => void handleLookupCdMetadata()}>
-                {isLookingUpCdMetadata ? "Looking up metadata..." : "Lookup Metadata"}
+                {isLookingUpCdMetadata ? "Looking up metadata…" : "Look up on MusicBrainz"}
               </button>
             </div>
 
@@ -9553,11 +9787,20 @@
           <section class="cd-track-section" aria-labelledby="cd-track-list-title">
             <div class="settings-section-header">
               <div>
-                <p class="eyebrow">Rip Queue</p>
                 <h4 id="cd-track-list-title">Tracks</h4>
               </div>
               <span class="settings-pill">{cdTracks.length} {cdTracks.length === 1 ? "track" : "tracks"}</span>
             </div>
+            {#if isRippingCd || cdCompletedCount || cdFailedCount}
+              <div class="cd-rip-progress">
+                <div>
+                  <strong>{isRippingCd ? "Ripping tracks" : "Rip results"}</strong>
+                  <span>{cdCompletedCount} of {cdTracks.length} saved{cdFailedCount ? ` · ${cdFailedCount} failed` : ""}</span>
+                </div>
+                <progress aria-label="CD rip progress" max={Math.max(1, cdTracks.length)}
+                  value={cdTracks.length ? cdCompletedCount + cdFailedCount : undefined}></progress>
+              </div>
+            {/if}
 
             {#if cdTracks.length === 0}
               <div class="group-empty compact">
@@ -9828,6 +10071,30 @@
                 <span>Current folder</span>
                 <strong>{scannedFolder ?? "No library folder selected"}</strong>
               </div>
+              {#if isScanning && scanProgress}
+                <div class="folder-scan-progress" role="status">
+                  <progress aria-label="Scanning library"></progress>
+                  <span>{scanProgress.checked} audio files checked in {scanProgress.path}</span>
+                </div>
+              {:else if scanSummary}
+                <p class="settings-note" role="status">{scanSummary}</p>
+              {/if}
+              {#if libraryFolders.length > 0}
+                <ul class="folder-scan-list">
+                  {#each libraryFolders as folder (folder.path)}
+                    <li>
+                      <div><strong>{folder.path}</strong>
+                        {#if folder.error}
+                          <small>{folder.error} · Existing tracks kept</small>
+                        {:else if folder.scannedAt}
+                          <small>{folder.added} added · {folder.updated} updated · {folder.skipped} skipped</small>
+                        {/if}
+                      </div>
+                      <button type="button" disabled={isScanning} onclick={() => void handleScanLibrary(false, false, folder.path)}>Rescan folder</button>
+                    </li>
+                  {/each}
+                </ul>
+              {/if}
 
               <div class="settings-stat-grid" aria-label="Library summary">
                 {#each librarySettingsStats as stat}
@@ -9849,6 +10116,7 @@
                 <button type="button" disabled={isScanning} onclick={() => void handleScanLibrary(true)}>
                   Change Library Folder
                 </button>
+                <button type="button" disabled={isScanning} onclick={() => void handleScanLibrary(false, true)}>Add Music Folder</button>
                 <button class="primary" type="button" onclick={handleLibraryHealthSelect}>
                   Open Library Health
                 </button>
@@ -9866,6 +10134,33 @@
                   <h4 id="history-transfer-title">Portable listening history</h4>
                 </div>
               </div>
+              <label class="listen-threshold">
+                <span>Count a listen after</span>
+                <select value={listenPercentage} onchange={(event) => {
+                  listenPercentage = Number(selectValue(event));
+                  writePreference("cassette:listen-percentage", String(listenPercentage));
+                }}>
+                  {#each listenPercentages as percentage}
+                    <option value={percentage}>{percentage}% of the track</option>
+                  {/each}
+                </select>
+              </label>
+              <details class="ignored-tracks">
+                <summary>Ignored tracks ({ignoredTrackIds.size})</summary>
+                {#if ignoredTrackIds.size === 0}
+                  <p>Right-click a song to ignore it. On an album, choose Select tracks to ignore several together.</p>
+                {:else}
+                  <ul class="folder-scan-list">
+                    {#each [...ignoredTrackIds].sort() as id (id)}
+                      {@const track = libraryTracksById.get(id)}
+                      <li>
+                        <div><strong>{track?.title ?? id}</strong>{#if track?.album}<small>{track.album}</small>{/if}</div>
+                        <button type="button" disabled={savingIgnoredTracks} onclick={() => void updateIgnoredTracks([id], false)}>Stop ignoring</button>
+                      </li>
+                    {/each}
+                  </ul>
+                {/if}
+              </details>
               <p>Export includes your full history, regardless of the period selected in Stats. Backups contain no audio files or explicit music-folder paths. Original event IDs are retained. Import previews matches, duplicates and conflicts before changing data.</p>
               <div class="stats-transfer-actions">
                 <button type="button" disabled={historyBusy} onclick={() => void handleExportListeningHistory()}>Export listening history</button>
@@ -9917,6 +10212,13 @@
                 </div>
                 <span class="settings-pill">{isPlaying ? "Playing" : currentTrack ? "Paused" : "Idle"}</span>
               </div>
+              <label class="settings-toggle-row">
+                <input type="checkbox" checked={gaplessEnabled} onchange={(event) => {
+                  gaplessEnabled = event.currentTarget.checked;
+                  writePreference("cassette:gapless", gaplessEnabled ? "on" : "off");
+                }} />
+                <span>Gapless playback</span>
+              </label>
 
               <div class="settings-status-list">
                 <div>
@@ -10366,6 +10668,12 @@
       items={contextMenu.items}
       onClose={closeContextMenu}
     />
+  {/if}
+
+  {#if lyricsEdit}
+    <LyricsEditor title={lyricsEdit.track.title} initial={lyricsEdit}
+      position={lyricsEdit.track.id === currentTrack?.id ? positionSeconds : null}
+      onSave={handleSaveEditedLyrics} onClose={() => { lyricsEdit = null; }} />
   {/if}
 
   {#if isAlbumTagEditorOpen}
@@ -15152,8 +15460,49 @@
 
   .cd-ripper-page {
     display: grid;
-    max-width: 1040px;
-    gap: 16px;
+    grid-template-columns: minmax(0, 1fr);
+    width: min(100%, 1320px);
+    margin-inline: auto;
+    gap: 22px;
+    container: cd-rip / inline-size;
+  }
+
+  .cd-ripper-header {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: end;
+    justify-content: space-between;
+    gap: 14px;
+  }
+
+  .cd-ripper-header h2 {
+    margin: 0;
+    font-size: clamp(2.5rem, 4.8vw, 3.65rem);
+    line-height: 1.05;
+    letter-spacing: -0.04em;
+  }
+
+  .cd-ripper-header p { margin: 8px 0 0; color: var(--text-soft); }
+  .cd-overview {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    margin: 0;
+    background: var(--panel-soft);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+  }
+  .cd-overview > div { padding: clamp(12px, 3cqw, 22px); min-width: 0; }
+  .cd-overview > div + div { border-left: 1px solid var(--border); }
+  .cd-overview dt, .cd-overview small, .cd-rip-progress span { color: var(--text-soft); font-size: 0.83rem; }
+  .cd-overview dd { margin: 5px 0 0; font-size: clamp(1rem, 3cqw, 1.65rem); font-weight: 750; overflow-wrap: anywhere; }
+  .cd-destination { display: flex; justify-content: space-between; align-items: end; gap: 12px; flex-wrap: wrap; }
+  .cd-destination > div { min-width: 0; max-width: 100%; }
+  .cd-rip-progress { display: grid; gap: 8px; }
+  .cd-rip-progress > div { display: flex; gap: 8px; justify-content: space-between; flex-wrap: wrap; }
+  .cd-rip-progress progress { width: 100%; accent-color: var(--accent); }
+
+  @container cd-rip (max-width: 380px) {
+    .cd-overview > div { padding-inline: 8px; }
   }
 
   .settings-intro {
@@ -15240,7 +15589,6 @@
   }
 
   .library-folder-card span,
-  .cd-status-grid span,
   .cd-output-folder span,
   .settings-stat-tile span,
   .settings-status-list span,
@@ -15273,7 +15621,6 @@
   }
 
   .settings-stat-grid,
-  .cd-status-grid,
   .settings-status-list,
   .settings-control-list,
   .about-grid {
@@ -15288,7 +15635,6 @@
   }
 
   .settings-stat-tile,
-  .cd-status-grid > div,
   .settings-status-list > div,
   .settings-control-list > div,
   .settings-control-list > label,
@@ -15305,7 +15651,6 @@
   }
 
   .settings-stat-tile strong,
-  .cd-status-grid strong,
   .settings-status-list strong,
   .settings-control-list strong,
   .about-grid strong {
@@ -15331,6 +15676,32 @@
     color: var(--text-soft);
     font-size: 0.8rem;
     font-weight: 760;
+  }
+
+  .folder-scan-list { display: grid; gap: 8px; list-style: none; margin: 0; padding: 0; }
+  .folder-scan-list li { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 10px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; }
+  .folder-scan-list li > div { display: grid; gap: 4px; min-width: 0; overflow-wrap: anywhere; }
+  .folder-scan-list small { color: var(--text-soft); }
+  .folder-scan-progress { display: grid; gap: 8px; overflow-wrap: anywhere; }
+  .folder-scan-progress progress { width: 100%; }
+  .ignored-tracks summary { cursor: pointer; font-weight: 700; padding: 8px 0; }
+  .album-track-row.bulk-selected { outline: 1px solid var(--accent); outline-offset: -1px; background: color-mix(in srgb, var(--accent) 13%, transparent); }
+  .album-selection-button { padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); color: inherit; font: inherit; }
+
+  .listen-threshold {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .listen-threshold select {
+    font: inherit;
+    color: CanvasText;
+    background: Canvas;
+    padding: 7px 10px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
   }
 
   .settings-toggle-row {
@@ -17146,7 +17517,6 @@
     }
 
     .settings-stat-grid,
-    .cd-status-grid,
     .cd-metadata-form,
     .settings-status-list,
     .settings-tool-grid {
@@ -17497,7 +17867,6 @@
     .video-edit-form,
     .dvd-status-grid,
     .dvd-import-form,
-    .cd-status-grid,
     .cd-metadata-form,
     .settings-status-list,
     .settings-tool-grid {

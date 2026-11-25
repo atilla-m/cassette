@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { copyFile, mkdir } from "node:fs/promises";
+import { copyFile, mkdir, rename } from "node:fs/promises";
 import net from "node:net";
 import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -161,6 +161,36 @@ try {
   const rescanned = await invoke("scan_library", { root: fixtureDirectory });
   assert.equal(rescanned.length, extensions.length + 1);
   console.log("Installed Cassette added a separate folder and kept its tracks on rescan.");
+
+  const importedTrack = imported.find(({ filePath }) => filePath.startsWith(importFolder));
+  assert(importedTrack);
+  const disconnected = join(testDirectory, "disconnected-import");
+  await rename(importFolder, disconnected);
+  try {
+    const retained = await invoke("scan_library", { root: fixtureDirectory });
+    assert(retained.some(({ id }) => id === importedTrack.id));
+    const cache = await invoke("get_library_cache");
+    assert(cache.unavailableTrackIds.includes(importedTrack.id));
+    assert(cache.folders.find(({ path }) => path === importFolder)?.error);
+  } finally {
+    await rename(disconnected, importFolder);
+  }
+  await invoke("scan_library", { root: fixtureDirectory });
+  assert(!(await invoke("get_library_cache")).unavailableTrackIds.includes(importedTrack.id));
+  console.log("Installed Cassette kept a disconnected folder’s tracks and restored availability on rescan.");
+
+  const lyrics = "[00:01.50] Synthetic lyric";
+  const edited = await invoke("save_edited_lyrics", { trackPath: sample.id, kind: "synced", text: lyrics });
+  assert.equal(edited.source, "edited");
+  assert.equal((await invoke("read_track_lyrics", { trackPath: sample.id })).text, lyrics);
+  await invoke("restore_original_lyrics", { trackPath: sample.id });
+  assert.notEqual((await invoke("read_track_lyrics", { trackPath: sample.id }))?.source, "edited");
+  const added = await invoke("set_ignored_tracks", { trackIds: [sample.id, importedTrack.id], ignored: true });
+  assert(added.includes(sample.id) && added.includes(importedTrack.id));
+  const cachedIgnores = (await invoke("get_library_cache")).ignoredTrackIds;
+  assert(cachedIgnores.includes(sample.id) && cachedIgnores.includes(importedTrack.id));
+  await invoke("set_ignored_tracks", { trackIds: [sample.id, importedTrack.id], ignored: false });
+  console.log("Installed Cassette saved and restored lyrics and bulk ignored tracks in its isolated library.");
 
   const light = await evaluate(`(() => {
     const preset = [...document.querySelectorAll('.theme-preset-grid button')]

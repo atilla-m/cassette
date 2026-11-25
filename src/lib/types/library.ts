@@ -1,4 +1,6 @@
 export type Track = {
+  ignored?: boolean;
+  unavailable?: boolean;
   id: string;
   filePath: string;
   fileName: string;
@@ -293,13 +295,35 @@ export type LibraryCache = {
   lastScannedFolder: string | null;
   lastScannedAt: number | null;
   recoveryNotice?: string | null;
+  folders?: LibraryFolderScan[];
+  unavailableTrackIds?: string[];
+  ignoredTrackIds?: string[];
+};
+
+export type LibraryFolderScan = {
+  path: string;
+  scannedAt: number | null;
+  added: number;
+  updated: number;
+  skipped: number;
+  error: string | null;
+};
+
+export type LibraryScanProgress = { path: string; checked: number };
+
+export type LibraryScanResult = {
+  tracks: Track[];
+  folders: LibraryFolderScan[];
+  unavailableTrackIds: string[];
+  primaryFolder: string;
+  scannedAt: number;
 };
 
 export type TrackLyrics = {
   path: string;
   kind: "synced" | "plain";
   text: string;
-  source: "local" | "lrclib";
+  source: "local" | "lrclib" | "edited";
   fetchedAt: number | null;
   trackPath: string | null;
   selectedTrackName: string | null;
