@@ -1306,11 +1306,6 @@
 
       updatePlaybackListenClock(true);
       void maybeRecordTrackPlay();
-
-      const duration = durationSeconds ?? currentTrack.durationSeconds;
-      const nextPosition = positionSeconds + 0.25;
-      positionSeconds = duration ? Math.min(nextPosition, duration) : nextPosition;
-
     }, 250);
 
     const videoProgressIntervalId = ENABLE_EXPERIMENTAL_VIDEOS
@@ -7257,18 +7252,6 @@
         : "No library folder is cached yet.";
     }
 
-    if (activeView === "CD Rip") {
-      if (isRippingCd) {
-        return "Ripping audio CD to FLAC files...";
-      }
-
-      if (audioCdFound && cdTracks.length > 0) {
-        return `${cdTracks.length} ${cdTracks.length === 1 ? "track" : "tracks"} ready to rip.`;
-      }
-
-      return "Detect an audio CD, choose an output folder, then rip to FLAC.";
-    }
-
     if (activeView === "Videos") {
       if (isScanningVideos) {
         return "Scanning local video files...";
@@ -7338,7 +7321,7 @@
       bind:this={mainElement}
       tabindex="-1"
     >
-      {#if activeView !== "Now Playing" && activeView !== "Stats" && !isAlbumDetailView && !isArtistDetailView && !isGenreDetailView && !isPlaylistDetailView}
+      {#if activeView !== "Now Playing" && activeView !== "Stats" && activeView !== "CD Rip" && !isAlbumDetailView && !isArtistDetailView && !isGenreDetailView && !isPlaylistDetailView}
         <header class="home-header">
           <div>
             <p class="eyebrow">{viewEyebrow()}</p>
@@ -9651,6 +9634,16 @@
               </div>
             {/if}
 
+            {#if isRippingCd || cdCompletedCount || cdFailedCount}
+              <div class="cd-rip-progress">
+                <div>
+                  <strong>{isRippingCd ? "Ripping tracks" : "Rip results"}</strong>
+                  <span>{cdCompletedCount} of {cdTracks.length} saved{cdFailedCount ? ` · ${cdFailedCount} failed` : ""}</span>
+                </div>
+                <progress aria-label="CD rip progress" max={Math.max(1, cdTracks.length)}
+                  value={cdTracks.length ? cdCompletedCount + cdFailedCount : undefined}></progress>
+              </div>
+            {/if}
             {#if cdRipError}
               <div class="scan-error" role="alert">{cdRipError}</div>
             {:else if cdRipMessage}
@@ -9798,17 +9791,6 @@
               </div>
               <span class="settings-pill">{cdTracks.length} {cdTracks.length === 1 ? "track" : "tracks"}</span>
             </div>
-            {#if isRippingCd || cdCompletedCount || cdFailedCount}
-              <div class="cd-rip-progress">
-                <div>
-                  <strong>{isRippingCd ? "Ripping tracks" : "Rip results"}</strong>
-                  <span>{cdCompletedCount} of {cdTracks.length} saved{cdFailedCount ? ` · ${cdFailedCount} failed` : ""}</span>
-                </div>
-                <progress aria-label="CD rip progress" max={Math.max(1, cdTracks.length)}
-                  value={cdTracks.length ? cdCompletedCount + cdFailedCount : undefined}></progress>
-              </div>
-            {/if}
-
             {#if cdTracks.length === 0}
               <div class="group-empty compact">
                 <h3>No CD tracks detected</h3>

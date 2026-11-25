@@ -556,8 +556,8 @@ struct PlaybackStatus {
     file_path: Option<String>,
     is_playing: bool,
     has_ended: bool,
-    position_seconds: u64,
-    duration_seconds: Option<u64>,
+    position_seconds: f64,
+    duration_seconds: Option<f64>,
     volume: f64,
 }
 
@@ -1254,7 +1254,11 @@ async fn play_video(
 
     if let Ok(mut playback) = playback.lock() {
         let status = playback.pause()?;
-        media_controls.update_playback(status.is_playing, status.position_seconds, status.volume);
+        media_controls.update_playback(
+            status.is_playing,
+            status.position_seconds as u64,
+            status.volume,
+        );
     }
 
     let mut video_playback = video_playback
@@ -5812,7 +5816,11 @@ fn pause_playback(
         .map_err(|_| "Playback state is unavailable.".to_owned())?;
 
     let status = playback.pause()?;
-    media_controls.update_playback(status.is_playing, status.position_seconds, status.volume);
+    media_controls.update_playback(
+        status.is_playing,
+        status.position_seconds as u64,
+        status.volume,
+    );
 
     Ok(status)
 }
@@ -5827,7 +5835,11 @@ fn resume_playback(
         .map_err(|_| "Playback state is unavailable.".to_owned())?;
 
     let status = playback.resume()?;
-    media_controls.update_playback(status.is_playing, status.position_seconds, status.volume);
+    media_controls.update_playback(
+        status.is_playing,
+        status.position_seconds as u64,
+        status.volume,
+    );
 
     Ok(status)
 }
@@ -5851,7 +5863,11 @@ fn get_playback_status(
             publish_media_track(path, &library, &media_controls, status.is_playing);
         }
     }
-    media_controls.update_playback(status.is_playing, status.position_seconds, status.volume);
+    media_controls.update_playback(
+        status.is_playing,
+        status.position_seconds as u64,
+        status.volume,
+    );
 
     Ok(status)
 }
@@ -5868,7 +5884,11 @@ fn seek_playback(
         .map_err(|_| "Playback state is unavailable.".to_owned())?;
 
     let status = playback.seek(position_seconds, &expected_file_path)?;
-    media_controls.update_playback(status.is_playing, status.position_seconds, status.volume);
+    media_controls.update_playback(
+        status.is_playing,
+        status.position_seconds as u64,
+        status.volume,
+    );
 
     Ok(status)
 }
@@ -5884,7 +5904,11 @@ fn set_playback_volume(
         .map_err(|_| "Playback state is unavailable.".to_owned())?;
 
     let status = playback.set_volume(volume)?;
-    media_controls.update_playback(status.is_playing, status.position_seconds, status.volume);
+    media_controls.update_playback(
+        status.is_playing,
+        status.position_seconds as u64,
+        status.volume,
+    );
 
     Ok(status)
 }
@@ -6126,7 +6150,7 @@ impl PlaybackState {
             .playbin
             .as_ref()
             .map(playback_details)
-            .unwrap_or((0, None, 1.0));
+            .unwrap_or((0.0, None, 1.0));
 
         PlaybackStatus {
             file_path: self.current_path.clone(),
@@ -6154,7 +6178,7 @@ fn status_with_accepted_seek_position(
     mut status: PlaybackStatus,
     position_seconds: f64,
 ) -> PlaybackStatus {
-    status.position_seconds = position_seconds.floor() as u64;
+    status.position_seconds = position_seconds;
     status
 }
 
@@ -6162,22 +6186,22 @@ fn status_with_accepted_seek_position(
 mod playback_seek_tests {
     use super::*;
 
-    fn status_at(position_seconds: u64) -> PlaybackStatus {
+    fn status_at(position_seconds: f64) -> PlaybackStatus {
         PlaybackStatus {
             file_path: Some("/music/track.flac".to_owned()),
             is_playing: true,
             has_ended: false,
             position_seconds,
-            duration_seconds: Some(60),
+            duration_seconds: Some(60.0),
             volume: 1.0,
         }
     }
 
     #[test]
     fn accepted_seek_target_replaces_a_transient_zero_position() {
-        let status = status_with_accepted_seek_position(status_at(0), 23.75);
+        let status = status_with_accepted_seek_position(status_at(0.0), 23.75);
 
-        assert_eq!(status.position_seconds, 23);
+        assert_eq!(status.position_seconds, 23.75);
     }
 
     #[test]
@@ -7047,15 +7071,15 @@ fn read_mpv_log(log_path: &Path) -> String {
         .join("\n")
 }
 
-fn playback_details(playbin: &gst::Element) -> (u64, Option<u64>, f64) {
+fn playback_details(playbin: &gst::Element) -> (f64, Option<f64>, f64) {
     let position_seconds = playbin
         .query_position::<gst::ClockTime>()
-        .map(|position| position.seconds())
-        .unwrap_or(0);
+        .map(gst::ClockTime::seconds_f64)
+        .unwrap_or(0.0);
     let duration_seconds = playbin
         .query_duration::<gst::ClockTime>()
-        .map(|duration| duration.seconds())
-        .filter(|duration| *duration > 0);
+        .map(gst::ClockTime::seconds_f64)
+        .filter(|duration| *duration > 0.0);
     let volume = playbin.property::<f64>("volume").clamp(0.0, 1.0);
 
     (position_seconds, duration_seconds, volume)
@@ -12827,7 +12851,7 @@ mod tag_editor_tests {
         assert_eq!(status.is_playing, !paused);
         assert!(!status.has_ended);
         assert!(
-            status.position_seconds >= 1,
+            status.position_seconds >= 1.0,
             "position was lost: {status:?}"
         );
         playback.shutdown();
