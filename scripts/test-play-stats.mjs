@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { buildAlbums, buildArtists, buildGenres } from "../src/lib/data/libraryViews.ts";
-import { PlaybackListenProgress } from "../src/lib/utils/playbackListenProgress.ts";
+import { ListeningTimeBuffer, PlaybackListenProgress } from "../src/lib/utils/playbackListenProgress.ts";
 import {
   nextStatsLimit,
   rankMostPlayedTracks,
@@ -57,6 +57,24 @@ test("an end after seeking to the tail does not qualify, and a new track starts 
   assert.equal(progress.qualifies(10, 25, false), false);
   assert.equal(progress.qualifies(null, 50, false), false);
   assert.equal(progress.qualifies(null, 50, true), true);
+});
+
+test("measured audio is split across a minute boundary and in-flight samples retain later updates", () => {
+  const progress = new PlaybackListenProgress();
+  const buffer = new ListeningTimeBuffer();
+  progress.reset(0);
+  buffer.start("a", "fixture-session-a");
+  buffer.observe(progress.observe(1.5, 1500, true), 60_500);
+  const firstWrite = buffer.batch();
+  assert.deepEqual(firstWrite.map(({ minuteUtc, listenedMs }) => [minuteUtc, listenedMs]), [[0, 1000], [60, 500]]);
+  buffer.observe(progress.observe(50, 1750, true), 60_750);
+  buffer.observe(progress.observe(50, 9000, false), 68_000);
+  buffer.observe(progress.observe(50.5, 9500, true), 68_500);
+  buffer.saved(firstWrite);
+  assert.deepEqual(buffer.batch().map(({ minuteUtc, listenedMs }) => [minuteUtc, listenedMs]), [[60, 1000]]);
+  buffer.start("b", "fixture-session-b");
+  buffer.observe(0.7, 69_000);
+  assert.deepEqual(buffer.batch().map(({ trackId, listenedMs }) => [trackId, listenedMs]), [["a", 1000], ["b", 700]]);
 });
 
 function track(overrides) {

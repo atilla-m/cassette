@@ -27,10 +27,10 @@ function directedOptionalNumber(left: number | null, right: number | null, direc
 
 // Pure display ordering: never mutates the input or writes tags. Album-level
 // playback actions keep using their original track-number order.
-export function sortAlbumDisplayTracks(tracks: Track[], key: AlbumTrackSortKey, direction: AlbumTrackSortDirection) {
+export function sortAlbumDisplayTracks(tracks: Track[], key: AlbumTrackSortKey, direction: AlbumTrackSortDirection, activity = (track: Track) => track.playCount) {
   return [...tracks].sort((left, right) => {
     if (key === "mostPlayed" || key === "leastPlayed") {
-      return (key === "mostPlayed" ? right.playCount - left.playCount : left.playCount - right.playCount)
+      return (key === "mostPlayed" ? activity(right) - activity(left) : activity(left) - activity(right))
         || trackOrder(left, right);
     }
 
@@ -54,6 +54,6 @@ export function sortAlbumDisplayTracks(tracks: Track[], key: AlbumTrackSortKey, 
   });
 }
 
-export function topPlayedTracks(tracks: Track[], limit = 10) {
-  return sortAlbumDisplayTracks(tracks, "mostPlayed", "asc").slice(0, Math.max(0, limit));
+export function topPlayedTracks(tracks: Track[], limit = 10, activity = (track: Track) => track.playCount) {
+  return sortAlbumDisplayTracks(tracks, "mostPlayed", "asc", activity).slice(0, Math.max(0, limit));
 }

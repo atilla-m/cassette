@@ -1,6 +1,7 @@
 <script lang="ts">
   import {
     addTrackToPlaylist,
+    addTracksToPlaylist,
     autoFindTrackLyrics,
     chooseCoverImage,
     chooseDvdImportOutputFolder,
@@ -23,6 +24,8 @@
     movePlaylistTrack,
     recordTrackPlay,
     getListeningStats,
+    getListeningTimeByTrack,
+    saveListeningMinutes,
     removeListeningEvent,
     chooseHistoryExportPath,
     chooseHistoryImportPath,
@@ -49,6 +52,7 @@
     setArtistGenres,
     setTrackLyricsOffset,
     toggleTrackFavorite,
+    setTracksFavorite,
     updateTrackTags,
     updateAlbumTags,
     updateVideoInfo,
@@ -104,7 +108,7 @@
   import TrackList from "$lib/components/TrackList.svelte";
   import { buildAlbums, buildArtists, buildGenres } from "$lib/data/libraryViews";
   import { statsRangeForPeriod, type StatsPeriod } from "$lib/utils/statsPeriod";
-  import { resolveStatsPlayback, statsDayValueLabel } from "$lib/utils/listeningStats";
+  import { listeningDurationLabel, resolveStatsPlayback, statsDayValueLabel } from "$lib/utils/listeningStats";
   import type { ListeningStats, ListeningImportPreview, RecentListen } from "$lib/types/listening";
   import { albums as mockAlbums, artists as mockArtists, genres as mockGenres, navItems } from "$lib/data/mockLibrary";
   import { ENABLE_EXPERIMENTAL_VIDEOS } from "$lib/featureFlags";
@@ -150,7 +154,7 @@
   } from "$lib/types/library";
   import { sendLinuxPlaybackNotification } from "$lib/utils/linuxNotifications";
   import { localImageSource } from "$lib/utils/localImage";
-  import { PlaybackListenProgress } from "$lib/utils/playbackListenProgress";
+  import { ListeningTimeBuffer, PlaybackListenProgress } from "$lib/utils/playbackListenProgress";
   import {
     PlaybackSeekCoordinator,
     failedSeekRecoveryPosition,
@@ -458,20 +462,23 @@
       title: "Navigation",
       shortcuts: [
         { keys: ["?"], description: "Open keyboard shortcuts" },
-        { keys: ["Ctrl", "/"], description: "Open keyboard shortcuts" },
-        { keys: ["Escape"], description: "Close the shortcuts overlay first" },
+        { keys: ["Ctrl or ⌘", "/"], description: "Open keyboard shortcuts" },
       ],
     },
     {
-      title: "Library / Search",
+      title: "Album track selection",
       shortcuts: [
-        { keys: ["Escape"], description: "Clear the active search" },
+        { keys: ["Ctrl or ⌘", "Click"], description: "Toggle a track in the selection" },
+        { keys: ["Shift", "Click"], description: "Select a range of tracks" },
+        { keys: ["Right-click"], description: "Choose Select tracks, or open actions for the selection" },
+        { keys: ["Enter or Space"], description: "Toggle the focused track while selecting" },
+        { keys: ["Escape"], description: "Clear the track selection" },
       ],
     },
     {
-      title: "Queue / Panels",
+      title: "Search and panels",
       shortcuts: [
-        { keys: ["Escape"], description: "Close context menus and overlays" },
+        { keys: ["Escape"], description: "Clear search or close an open panel or menu" },
       ],
     },
   ];
@@ -482,6 +489,8 @@
   let scanSummary = $state<string | null>(null);
   let unavailableTrackIds = $state(new Set<string>());
   let ignoredTrackIds = $state(new Set<string>());
+  let listeningTimeEnabled = $state(false);
+  let listeningTimeByTrack = $state<Record<string, number>>({});
   let savingIgnoredTracks = $state(false);
   let ignoredTracksError = $state<string | null>(null);
   let customAlbumCovers = $state<Record<string, string>>({});
@@ -489,8 +498,9 @@
     const coverArtPath = customAlbumCovers[albumIdForTrack(track)] ?? track.coverArtPath;
     const ignored = ignoredTrackIds.has(track.id);
     const unavailable = unavailableTrackIds.has(track.id);
-    return ignored || unavailable || coverArtPath !== track.coverArtPath
-      ? { ...track, coverArtPath, ignored, unavailable, playCount: ignored ? 0 : track.playCount, lastPlayedAt: ignored ? null : track.lastPlayedAt }
+    const listenedMs = ignored ? 0 : listeningTimeByTrack[track.id] ?? 0;
+    return ignored || unavailable || listenedMs || coverArtPath !== track.coverArtPath
+      ? { ...track, coverArtPath, ignored, unavailable, listenedMs, playCount: ignored ? 0 : track.playCount, lastPlayedAt: ignored ? null : track.lastPlayedAt }
       : track;
   }));
   let editingCoverForAlbum = $state<string | null>(null);
@@ -623,6 +633,8 @@
   let trackSelectionAlbumId = $state<string | null>(null);
   let selectedTrackIds = $state(new Set<string>());
   let selectionAnchor = $state<string | null>(null);
+  let bulkTrackFeedback = $state<{ albumId: string; message: string; error: boolean } | null>(null);
+  let savingBulkTracks = false;
   let isAlbumSelectingTracks = $derived(trackSelectionAlbumId !== null && trackSelectionAlbumId === selectedAlbumId);
   let albumNavigationOrigin = $state<AlbumNavigationOrigin>({ view: "Albums" });
   let selectedArtistName = $state<string | null>(null);
@@ -719,6 +731,9 @@
   let countedPlaybackTrackId = $state<string | null>(null);
   let playbackSessionEventId: string | null = null;
   const playbackListenProgress = new PlaybackListenProgress();
+  const listeningTimeBuffer = new ListeningTimeBuffer();
+  let listeningTimeWrite: Promise<void> | null = null;
+  let listeningTimeRevision = 0;
   let isTagWriteSuspendingPlayback = false;
   let tagWritePlaybackGeneration = 0;
   let positionSeconds = $state(0);
@@ -768,9 +783,9 @@
   let tagEditorDiscardModalElement: HTMLElement | undefined = $state();
   let albumTagEditorModalElement: HTMLElement | undefined = $state();
   let lyricsPanelElement: HTMLElement | undefined = $state();
-  let displayAlbums = $derived(!hasLoadedCache ? mockAlbums : buildAlbums(tracks));
-  let displayArtists = $derived(!hasLoadedCache ? mockArtists : buildArtists(tracks));
-  let displayGenres = $derived(!hasLoadedCache ? mockGenres : buildGenres(tracks));
+  let displayAlbums = $derived(!hasLoadedCache ? mockAlbums : buildAlbums(tracks, trackActivity));
+  let displayArtists = $derived(!hasLoadedCache ? mockArtists : buildArtists(tracks, trackActivity));
+  let displayGenres = $derived(!hasLoadedCache ? mockGenres : buildGenres(tracks, trackActivity));
   let visibleNavItems = $derived(navItems.filter((item) =>
     item.label !== "Home"
       && (ENABLE_EXPERIMENTAL_VIDEOS || item.label !== "Videos")
@@ -784,7 +799,8 @@
   let sortedArtists = $derived(sortArtists(displayArtists, artistSort, artistSortDirection));
   let sortedGenres = $derived(sortGenres(displayGenres, genreSort, genreSortDirection));
   let statsRange = $derived(statsRangeForPeriod(statsPeriod, new Date(statsClock), statsCustomFrom, statsCustomTo, statsSelectedMonth, statsSelectedYear));
-  let statsSelectedDayLabel = $derived(statsDayValueLabel(statsSelectedDay, statsRange?.chartDates ?? [], statsSnapshot?.dailyPlays ?? []));
+  let statsDailyActivity = $derived((listeningTimeEnabled ? statsSnapshot?.listeningTime?.dailyListenedMs : statsSnapshot?.dailyPlays) ?? []);
+  let statsSelectedDayLabel = $derived(statsDayValueLabel(statsSelectedDay, statsRange?.chartDates ?? [], statsDailyActivity, activityLabel));
   let statsTrackCounts = $derived(new Map(statsSnapshot?.trackCounts.map((item) => [item.trackId, item]) ?? []));
   let statsPendingTracks = $derived<Track[]>((statsSnapshot?.pendingTracks ?? []).map((item) => ({
     id: item.trackId, filePath: "", fileName: "Retained listening history (not in library)", extension: "history",
@@ -792,19 +808,28 @@
     trackNumber: null, discNumber: null, year: null, durationSeconds: null, modifiedTime: null,
     fileSize: null, scannedAt: null, coverArtPath: null, lyricsPath: null, lyricsKind: null, isFavorite: false,
     playCount: statsTrackCounts.get(item.trackId)?.plays ?? 0,
+    listenedMs: statsSnapshot?.listeningTime?.trackTimes[item.trackId] ?? 0,
     lastPlayedAt: statsTrackCounts.get(item.trackId)?.lastPlayedAt ?? null,
   })));
   let statsUnavailableIds = $derived(new Set(statsPendingTracks.map((track) => track.id)));
   let periodTracks = $derived([...tracks.map((track) => {
     if (statsPeriod === "all") return track;
     const count = statsTrackCounts.get(track.id);
-    return { ...track, playCount: count?.plays ?? 0, lastPlayedAt: count?.lastPlayedAt ?? null };
+    return { ...track, playCount: count?.plays ?? 0, lastPlayedAt: count?.lastPlayedAt ?? null,
+      listenedMs: statsSnapshot?.listeningTime?.trackTimes[track.id] ?? 0 };
   }), ...statsPendingTracks]);
   let allStatsTopTracks = $derived(mostPlayed(periodTracks));
-  let statsRecentQueue = $derived(recentlyPlayed(periodTracks));
   let statsTracksById = $derived(new Map(periodTracks.map((track) => [track.id, track])));
-  let statsRecentListens = $derived(statsSnapshot?.recentListens ?? []);
-  let statsRecentCount = $derived((statsPeriod === "all" ? statsSnapshot?.datedPlays : statsSnapshot?.totalPlays) ?? 0);
+  let statsRecentListens = $derived((listeningTimeEnabled ? statsSnapshot?.listeningTime?.recentSessions : statsSnapshot?.recentListens) ?? []);
+  let statsRecentQueue = $derived(listeningTimeEnabled
+    ? [...new Set(statsRecentListens.map((listen) => listen.trackId))].flatMap((id) => {
+      const track = statsTracksById.get(id);
+      return track ? [track] : [];
+    })
+    : recentlyPlayed(periodTracks));
+  let statsRecentCount = $derived((listeningTimeEnabled
+    ? statsSnapshot?.listeningTime?.sessionCount
+    : statsPeriod === "all" ? statsSnapshot?.datedPlays : statsSnapshot?.totalPlays) ?? 0);
   let allStatsTopArtists = $derived(buildTopArtistStats(periodTracks, buildArtists(periodTracks)));
   let allStatsTopAlbums = $derived(buildTopAlbumStats(periodTracks, buildAlbums(periodTracks)));
   let allStatsTopGenres = $derived(buildTopGenreStats(periodTracks, buildGenres(periodTracks)));
@@ -812,14 +837,14 @@
   let statsTopArtists = $derived(visibleStatsItems(allStatsTopArtists, statsSectionExpanded("artists"), statsVisibleLimits.artists, STATS_PREVIEW_LIMITS.artists));
   let statsTopAlbums = $derived(visibleStatsItems(allStatsTopAlbums, statsSectionExpanded("albums"), statsVisibleLimits.albums, STATS_PREVIEW_LIMITS.albums));
   let statsTopGenres = $derived(visibleStatsItems(allStatsTopGenres, statsSectionExpanded("genres"), statsVisibleLimits.genres, STATS_PREVIEW_LIMITS.genres));
-  let statsTotalPlays = $derived(statsSnapshot?.totalPlays ?? (statsPeriod === "all" ? tracks.reduce((total, track) => total + track.playCount, 0) : 0));
-  let statsDistinctTracks = $derived(periodTracks.filter((track) => track.playCount > 0).length);
-  let statsDistinctArtists = $derived(new Set(periodTracks.filter((track) => track.playCount > 0)
+  let statsTotalActivity = $derived((listeningTimeEnabled ? statsSnapshot?.listeningTime?.totalListenedMs : statsSnapshot?.totalPlays)
+    ?? (statsPeriod === "all" ? tracks.reduce((total, track) => total + trackActivity(track), 0) : 0));
+  let statsDistinctTracks = $derived(periodTracks.filter((track) => trackActivity(track) > 0).length);
+  let statsDistinctArtists = $derived(new Set(periodTracks.filter((track) => trackActivity(track) > 0)
     .map((track) => track.artist ?? track.albumArtist ?? "Unknown Artist")).size);
-  let statsMaxDailyPlays = $derived(Math.max(1, ...(statsSnapshot?.dailyPlays ?? [])));
-  let statsChartStep = $derived(Math.max(1, Math.ceil(statsMaxDailyPlays / 4)));
-  let statsActiveDays = $derived(statsSnapshot?.dailyPlays.filter((count) => count > 0).length ?? 0);
-  let statsChartHasPlays = $derived((statsSnapshot?.dailyPlays ?? []).some((count) => count > 0));
+  let statsChartUnit = $derived(listeningTimeEnabled ? 1000 : 1);
+  let statsChartStep = $derived(Math.max(1, Math.ceil(Math.max(0, ...statsDailyActivity) / (4 * statsChartUnit))) * statsChartUnit);
+  let statsActiveDays = $derived(statsDailyActivity.filter((amount) => amount > 0).length);
   let statsChartDates = $derived(statsRange?.chartDates.slice(statsChartOffset, statsChartOffset + 90) ?? []);
   let statsChartDateLabel = $derived(statsChartDates.length
     ? statsRangeFormat.formatRange(new Date(statsChartDates[0]), new Date(statsChartDates[statsChartDates.length - 1]))
@@ -861,7 +886,7 @@
     selectedAlbum ? tracksForAlbum(selectedAlbum) : [],
   );
   let selectedAlbumSearchTracks = $derived(searchFilterAlbumTracks(selectedAlbumTracks, normalizedSearchQuery));
-  let selectedAlbumDisplayTracks = $derived(sortAlbumDisplayTracks(selectedAlbumSearchTracks, albumTrackSort, albumTrackSortDirection));
+  let selectedAlbumDisplayTracks = $derived(sortAlbumDisplayTracks(selectedAlbumSearchTracks, albumTrackSort, albumTrackSortDirection, trackActivity));
   let selectedAlbumDiscGroups = $derived(albumTrackSort === "trackNumber"
     ? albumDiscGroups(selectedAlbumDisplayTracks)
     : [{ discNumber: null, tracks: selectedAlbumDisplayTracks }]);
@@ -869,16 +894,16 @@
   let selectedAlbumDurationLabel = $derived(albumTotalDurationLabel(selectedAlbumTracks));
   let selectedAlbumFormatSummary = $derived(albumFormatSummary(selectedAlbumTracks));
   let selectedArtistTracks = $derived(selectedArtist ? tracksForArtist(selectedArtist) : []);
-  let selectedArtistDisplayTracks = $derived(sortAlbumDisplayTracks(selectedArtistTracks, artistTrackSort, artistTrackSortDirection));
-  let selectedArtistRankedTracks = $derived(topPlayedTracks(selectedArtistTracks, selectedArtistTracks.length));
+  let selectedArtistDisplayTracks = $derived(sortAlbumDisplayTracks(selectedArtistTracks, artistTrackSort, artistTrackSortDirection, trackActivity));
+  let selectedArtistRankedTracks = $derived(topPlayedTracks(selectedArtistTracks, selectedArtistTracks.length, trackActivity));
   let selectedArtistTopTracks = $derived(selectedArtistRankedTracks.slice(0, 10));
   let selectedArtistAlbums = $derived(
     selectedArtist ? sortedAlbums.filter((album) => album.artist === selectedArtist.name) : [],
   );
   let selectedArtistSearchAlbums = $derived(searchFilterAlbums(selectedArtistAlbums, normalizedSearchQuery));
   let selectedGenreTracks = $derived(selectedGenre ? tracksForGenre(selectedGenre) : []);
-  let selectedGenreDisplayTracks = $derived(sortAlbumDisplayTracks(selectedGenreTracks, genreTrackSort, genreTrackSortDirection));
-  let selectedGenreRankedTracks = $derived(topPlayedTracks(selectedGenreTracks, selectedGenreTracks.length));
+  let selectedGenreDisplayTracks = $derived(sortAlbumDisplayTracks(selectedGenreTracks, genreTrackSort, genreTrackSortDirection, trackActivity));
+  let selectedGenreRankedTracks = $derived(topPlayedTracks(selectedGenreTracks, selectedGenreTracks.length, trackActivity));
   let selectedGenreTopTracks = $derived(selectedGenreRankedTracks.slice(0, 10));
   let selectedGenreAlbums = $derived(selectedGenre ? albumsForTracks(selectedGenreTracks, sortedAlbums) : []);
   let selectedGenreArtists = $derived(selectedGenre ? buildArtists(selectedGenreTracks) : []);
@@ -906,12 +931,11 @@
   let libraryDiagnostics = $derived(buildLibraryDiagnostics(tracks, displayAlbums, displayArtists));
   let libraryHealthIssueCount = $derived(libraryHealthTotalIssueCount(libraryDiagnostics));
   let librarySettingsStats = $derived([
-    { label: "Tracks", value: String(hasLoadedCache ? tracks.length : 0) },
-    { label: "Albums", value: String(hasLoadedCache ? displayAlbums.length : 0) },
-    { label: "Artists", value: String(hasLoadedCache ? displayArtists.length : 0) },
-    { label: "Genres", value: String(hasLoadedCache ? displayGenres.length : 0) },
+    { label: "Tracks", value: tracks.length },
+    { label: "Albums", value: displayAlbums.length },
+    { label: "Artists", value: displayArtists.length },
+    { label: "Genres", value: displayGenres.length },
   ]);
-  let queueLengthLabel = $derived(`${playbackQueue.length} ${playbackQueue.length === 1 ? "track" : "tracks"}`);
   let volumePercentLabel = $derived(`${Math.round(volume * 100)}%`);
   let lastScanLabel = $derived(lastScannedAt ? formatDateTime(lastScannedAt) : "Not available");
   let updateIsBusy = $derived(updateCheckState === "checking" || updateCheckState === "confirming" || updateCheckState === "downloading" || updateCheckState === "installing");
@@ -950,8 +974,8 @@
       ? normalizedQueueOrder(shuffledQueueOrder, playbackQueue.length)
       : playbackQueue.map((_, index) => index),
   );
-  let playableQueueOrder = $derived(playbackOrder.filter((index) => index === currentQueueIndex
-    || (!unavailableTrackIds.has(playbackQueue[index].id) && (!isShuffleEnabled || !ignoredTrackIds.has(playbackQueue[index].id)))));
+  let playableQueueOrder = $derived(playbackOrder.filter((index) => index === currentQueueIndex || isQueueEligible(playbackQueue[index])));
+  let queueLengthLabel = $derived(`${playableQueueOrder.length} ${playableQueueOrder.length === 1 ? "track" : "tracks"}`);
   let currentOrderIndex = $derived(queueOrderIndex(playableQueueOrder, currentQueueIndex));
   let queuePanelEntries = $derived(buildQueuePanelEntries(playbackQueue, playableQueueOrder, currentQueueIndex));
   let currentTrackGenres = $derived(currentTrack ? trackGenres(currentTrack).filter((genre) => genre !== "Unknown Genre") : []);
@@ -1214,6 +1238,7 @@
     window.addEventListener("focus", refreshStatsCalendar);
     autoFindLyricsEnabled = readPreference(AUTO_LYRICS_SETTING_KEY) !== "off";
     const storedListenPercentage = Number(readPreference("cassette:listen-percentage"));
+    listeningTimeEnabled = readPreference("cassette:listening-time") === "1";
     if (listenPercentages.includes(storedListenPercentage)) listenPercentage = storedListenPercentage;
     trackNotificationsEnabled = readPreference(TRACK_NOTIFICATIONS_SETTING_KEY) === "on";
     gaplessEnabled = readPreference("cassette:gapless") !== "off";
@@ -1304,6 +1329,10 @@
       }
     }, 250);
 
+    const listeningTimeIntervalId = window.setInterval(() => void flushListeningTime(), 5000);
+    const flushBeforeHide = () => { void flushListeningTime(); };
+    window.addEventListener("pagehide", flushBeforeHide);
+
     const videoProgressIntervalId = ENABLE_EXPERIMENTAL_VIDEOS
       ? window.setInterval(() => {
           void refreshNativeVideoStatus(false);
@@ -1371,6 +1400,11 @@
         isQueueOpen = false;
         return;
       }
+      if (event.key === "Escape" && isAlbumSelectingTracks && !contextMenu) {
+        event.preventDefault();
+        clearAlbumTrackSelection();
+        return;
+      }
 
       if (shouldIgnoreShortcut(event.target)
         || (isAlbumSelectingTracks && event.code === "Space" && event.target instanceof HTMLElement
@@ -1403,6 +1437,8 @@
       window.clearInterval(statsCalendarIntervalId);
       window.removeEventListener("focus", refreshStatsCalendar);
       window.clearInterval(statusIntervalId);
+      window.clearInterval(listeningTimeIntervalId);
+      window.removeEventListener("pagehide", flushBeforeHide);
       if (videoProgressIntervalId !== null) {
         window.clearInterval(videoProgressIntervalId);
       }
@@ -1431,6 +1467,7 @@
       const cache = await getLibraryCache();
       libraryRecoveryNotice = cache.recoveryNotice ?? null;
       libraryTracks = cache.tracks;
+      void reloadListeningTime();
       libraryFolders = cache.folders ?? [];
       unavailableTrackIds = new Set(cache.unavailableTrackIds ?? []);
       ignoredTrackIds = new Set(cache.ignoredTrackIds ?? []);
@@ -1455,6 +1492,34 @@
     } catch (error) {
       videoError = error instanceof Error ? error.message : String(error);
     }
+  }
+
+  async function reloadListeningTime() {
+    const revision = ++listeningTimeRevision;
+    try {
+      const totals = await getListeningTimeByTrack();
+      if (revision === listeningTimeRevision) listeningTimeByTrack = totals ?? {};
+    } catch (error) {
+      console.warn("Could not read listening time", error);
+    }
+  }
+
+  function flushListeningTime() {
+    if (listeningTimeWrite || removingListenId) return;
+    const batch = listeningTimeBuffer.batch();
+    if (batch.length === 0) return;
+    listeningTimeWrite = saveListeningMinutes(batch)
+      .then((totals) => {
+        listeningTimeBuffer.saved(batch);
+        listeningTimeRevision += 1;
+        listeningTimeByTrack = { ...listeningTimeByTrack, ...totals };
+        if (activeView === "Stats" && listeningTimeEnabled) {
+          statsClock = Date.now();
+          statsRevision += 1;
+        }
+      })
+      .catch((error) => console.warn("Could not save listening time", error))
+      .finally(() => { listeningTimeWrite = null; });
   }
 
   function applyVideoLibrary(library: VideoLibrary) {
@@ -1987,9 +2052,14 @@
   function handleReviewAvailableUpdate() {
     showUpdateNotice = false;
     activeView = "Settings";
-    requestAnimationFrame(() => {
-      document.getElementById("settings-updates-title")?.scrollIntoView({ block: "center", behavior: "smooth" });
-    });
+    isLibraryHealthOpen = false;
+    requestAnimationFrame(() => jumpToSetting("settings-updates-title"));
+  }
+
+  function jumpToSetting(headingId: string) {
+    const heading = document.getElementById(headingId);
+    heading?.focus({ preventScroll: true });
+    heading?.closest("section")?.scrollIntoView({ block: "start" });
   }
 
   function safeUpdateError(error: unknown) {
@@ -2173,6 +2243,7 @@
     scanSummary = `${total("added")} added · ${total("updated")} updated · ${total("skipped")} skipped${unavailable ? ` · ${unavailable} unavailable` : ""}`;
     scannedFolder = result.primaryFolder;
     libraryTracks = scannedTracks;
+    void reloadListeningTime();
     libraryFolders = result.folders;
     unavailableTrackIds = new Set(result.unavailableTrackIds);
     scanCount = scannedTracks.length;
@@ -4202,8 +4273,9 @@
     contextMenu = null;
   }
 
-  function openTrackContextMenu(track: Track, queue: Track[], x: number, y: number) {
+  function openTrackContextMenu(track: Track, queue: Track[], x: number, y: number, firstItems: ContextMenuItem[] = []) {
     openContextMenu(x, y, [
+      ...firstItems,
       { label: "Play", action: () => handleTrackSelect(track, queue) },
       { label: "Play next", action: () => insertTracksNext([track]) },
       { label: "Add to queue", action: () => appendTracksToQueue([track]) },
@@ -4315,9 +4387,9 @@
     event.preventDefault();
     event.stopPropagation();
 
-    openContextMenu(event.clientX, event.clientY, [
+    const trigger = (event.currentTarget as HTMLElement).getBoundingClientRect();
+    openContextMenu(trigger.left, trigger.bottom, [
       { label: "Rename playlist", action: () => handleRenamePlaylist(playlist) },
-      { label: isPlaylistEditMode ? "Done editing" : "Edit order", action: () => { isPlaylistEditMode = !isPlaylistEditMode; } },
       { label: "Delete playlist", action: () => openDeletePlaylistConfirmation(playlist) },
     ]);
   }
@@ -4524,7 +4596,65 @@
     selectionAnchor = null;
   }
 
-  function handleAlbumTrackSelect(track: Track, event: MouseEvent | KeyboardEvent) {
+  function dismissAlbumTrackSelection(event: PointerEvent) {
+    if (isAlbumSelectingTracks && event.target instanceof Element
+      && !event.target.closest(".album-track-row, .album-selection-controls, .context-menu")) {
+      clearAlbumTrackSelection();
+    }
+  }
+
+  function albumSelectionMenuItems(albumId: string): ContextMenuItem[] {
+    const selection = selectedAlbumTracks.filter((track) => selectedTrackIds.has(track.id));
+    const ids = selection.map((track) => track.id);
+    const queueTracks = selection.filter(isQueueEligible);
+
+    function changeSelection(action: () => Promise<string>) {
+      return async () => {
+        if (savingBulkTracks) return;
+        savingBulkTracks = true;
+        try {
+          bulkTrackFeedback = { albumId, message: await action(), error: false };
+        } catch (error) {
+          bulkTrackFeedback = { albumId, message: String(error), error: true };
+        } finally {
+          savingBulkTracks = false;
+        }
+      };
+    }
+
+    function addToPlaylist(playlistId: string | null, name: string | null) {
+      return changeSelection(async () => {
+        const playlist = await addTracksToPlaylist(playlistId, name, ids);
+        applyUpdatedPlaylist(playlist);
+        return `Selection added to ${playlist.name}.`;
+      });
+    }
+
+    function likeSelection(favorite: boolean) {
+      return changeSelection(async () => {
+        await setTracksFavorite(ids, favorite);
+        applyTrackFavorites(new Set(ids), favorite);
+        return favorite ? "Selected tracks liked." : "Selected tracks unliked.";
+      });
+    }
+
+    return [
+      { label: "Play next", disabled: queueTracks.length === 0, action: () => insertTracksNext(queueTracks) },
+      { label: "Add to queue", disabled: queueTracks.length === 0, action: () => appendTracksToQueue(queueTracks) },
+      { label: "Add to playlist", items: [
+        ...playlists.map((playlist) => ({ label: playlist.name, action: addToPlaylist(playlist.id, null) })),
+        { label: "New playlist…", action: async () => {
+          const name = window.prompt("Playlist name")?.trim();
+          if (name) await addToPlaylist(null, name)();
+        } },
+      ] },
+      ...(selection.some((track) => !track.isFavorite) ? [{ label: "Like selected tracks", action: likeSelection(true) }] : []),
+      ...(selection.some((track) => track.isFavorite) ? [{ label: "Unlike selected tracks", action: likeSelection(false) }] : []),
+      ...ignoredTrackMenuItems(ids),
+    ];
+  }
+
+  function handleAlbumTrackSelect(track: Track, event: Pick<MouseEvent, "ctrlKey" | "metaKey" | "shiftKey">) {
     if (!selectedAlbumId || !(isAlbumSelectingTracks || event.ctrlKey || event.metaKey || event.shiftKey)) {
       void handleTrackSelect(track, selectedAlbumTracks);
       return;
@@ -4548,11 +4678,14 @@
   function openAlbumTrackContextMenu(event: MouseEvent, track: Track) {
     event.preventDefault();
     event.stopPropagation();
-    if (isAlbumSelectingTracks && selectedTrackIds.has(track.id) && selectedTrackIds.size > 1) {
-      openContextMenu(event.clientX, event.clientY, ignoredTrackMenuItems([...selectedTrackIds]));
+    if (selectedAlbumId && isAlbumSelectingTracks && selectedTrackIds.has(track.id)) {
+      openContextMenu(event.clientX, event.clientY, albumSelectionMenuItems(selectedAlbumId));
       return;
     }
-    openTrackContextMenu(track, selectedAlbumTracks, event.clientX, event.clientY);
+    openTrackContextMenu(track, selectedAlbumTracks, event.clientX, event.clientY, [{
+      label: isAlbumSelectingTracks ? "Add to selection" : "Select tracks",
+      action: () => handleAlbumTrackSelect(track, { ctrlKey: true, metaKey: false, shiftKey: false }),
+    }]);
   }
 
   function handleAlbumTrackKeydown(event: KeyboardEvent, track: Track) {
@@ -4750,12 +4883,14 @@
     playlistNameDraft = "";
     playlistError = null;
     playlistMessage = null;
+    requestAnimationFrame(() => document.getElementById("playlist-name")?.focus());
   }
 
   function handleCancelCreatePlaylist() {
     isCreatePlaylistOpen = false;
     playlistNameDraft = "";
     playlistError = null;
+    requestAnimationFrame(() => document.getElementById("new-playlist-button")?.focus());
   }
 
   async function handleCreatePlaylist() {
@@ -5051,22 +5186,26 @@
     }
   }
 
-  function gaplessCandidate(queue: Track[], queueIndex: number, shuffle: boolean, order: number[]) {
+  function isQueueEligible(track: Track) {
+    return !unavailableTrackIds.has(track.id) && !ignoredTrackIds.has(track.id);
+  }
+
+  function gaplessCandidate(queue: Track[], queueIndex: number, order: number[]) {
     if (!gaplessEnabled || repeatMode === "one") return null;
     const filtered = order.filter((index) => index === queueIndex
-      || (!unavailableTrackIds.has(queue[index].id) && (!shuffle || !ignoredTrackIds.has(queue[index].id))));
+      || isQueueEligible(queue[index]));
     const nextIndex = filtered[filtered.indexOf(queueIndex) + 1]
       ?? (repeatMode === "all" ? filtered[0] : undefined);
     const next = nextIndex === undefined ? null : queue[nextIndex];
     return next && next.filePath !== queue[queueIndex].filePath
-      && !unavailableTrackIds.has(next.id) && (!shuffle || !ignoredTrackIds.has(next.id)) ? next.filePath : null;
+      && isQueueEligible(next) ? next.filePath : null;
   }
 
   $effect(() => {
     if (isStartingTrack || isTagWriteSuspendingPlayback || !currentTrack) return;
     const path = currentTrack.filePath;
     const next = currentQueueIndex === null ? null
-      : gaplessCandidate(playbackQueue, currentQueueIndex, isShuffleEnabled, playbackOrder);
+      : gaplessCandidate(playbackQueue, currentQueueIndex, playbackOrder);
     void stageGaplessTrack(path, next).catch(() => { /* Existing end-of-track playback is the fallback. */ });
   });
 
@@ -5128,7 +5267,7 @@
         ? (shuffle ? normalizedQueueOrder(nextQueue.order, queue.length) : queue.map((_, index) => index))
         : playbackOrder;
       const nextFilePath = queue[queueIndex]?.id === track.id
-        ? gaplessCandidate(queue, queueIndex, shuffle, order)
+        ? gaplessCandidate(queue, queueIndex, order)
         : null;
       await sampleListenBeforeTrackChange();
       const startedAt = performance.now();
@@ -5235,7 +5374,7 @@
 
     try {
       const isFavorite = await toggleTrackFavorite(track.id);
-      applyTrackFavorite(track.id, isFavorite);
+      applyTrackFavorites(new Set([track.id]), isFavorite);
     } catch (error) {
       playbackError = error instanceof Error ? error.message : String(error);
     }
@@ -5247,11 +5386,11 @@
     }
   }
 
-  function applyTrackFavorite(trackId: string, isFavorite: boolean) {
-    libraryTracks = libraryTracks.map((track) => (track.id === trackId ? { ...track, isFavorite } : track));
-    playbackQueue = playbackQueue.map((track) => (track.id === trackId ? { ...track, isFavorite } : track));
+  function applyTrackFavorites(trackIds: Set<string>, isFavorite: boolean) {
+    libraryTracks = libraryTracks.map((track) => (trackIds.has(track.id) ? { ...track, isFavorite } : track));
+    playbackQueue = playbackQueue.map((track) => (trackIds.has(track.id) ? { ...track, isFavorite } : track));
 
-    if (currentTrack?.id === trackId) {
+    if (currentTrack && trackIds.has(currentTrack.id)) {
       currentTrack = { ...currentTrack, isFavorite };
     }
   }
@@ -5284,7 +5423,9 @@
   }
 
   function resetPlaybackListenSession(track: Track | null, startedAt = performance.now()) {
+    void flushListeningTime();
     playbackSessionEventId = track ? crypto.randomUUID() : null;
+    listeningTimeBuffer.start(track?.id ?? null, playbackSessionEventId);
     playbackListenProgress.reset(startedAt);
     countedPlaybackTrackId = null;
   }
@@ -5292,17 +5433,26 @@
   function observeListenPosition(status: PlaybackStatus) {
     if (!currentTrack || status.filePath !== currentTrack.filePath) return;
     const endedAt = status.durationSeconds ?? currentTrack.durationSeconds;
-    playbackListenProgress.observe(
+    const now = performance.now();
+    observeListeningAdvance(
       status.hasEnded && endedAt !== null ? endedAt : status.positionSeconds,
-      performance.now(),
+      now,
       isPlaying || status.isPlaying,
     );
+    if (status.hasEnded || !status.isPlaying) void flushListeningTime();
   }
 
   function observeGaplessEnd(changedAt: number) {
     const duration = durationSeconds ?? currentTrack?.durationSeconds ?? null;
-    if (duration !== null) playbackListenProgress.observe(duration, changedAt, isPlaying);
+    if (duration !== null) observeListeningAdvance(duration, changedAt, isPlaying);
     void maybeRecordTrackPlay(true);
+  }
+
+  function observeListeningAdvance(position: number, observedAt: number, wasPlaying: boolean) {
+    const advance = playbackListenProgress.observe(position, observedAt, wasPlaying);
+    if (currentTrack && !ignoredTrackIds.has(currentTrack.id)) {
+      listeningTimeBuffer.observe(advance, performance.timeOrigin + observedAt);
+    }
   }
 
   async function sampleListenBeforeTrackChange() {
@@ -5524,7 +5674,7 @@
   }
 
   async function playTrackSet(libraryTracks: Track[], shouldShuffle = false) {
-    const available = libraryTracks.filter((track) => !unavailableTrackIds.has(track.id));
+    const available = libraryTracks.filter(isQueueEligible);
     const queue = shouldShuffle ? shuffleTracks(available) : orderedContextTracks(available);
 
     if (queue.length === 0) {
@@ -5845,7 +5995,7 @@
     }
 
     details.push(songCountLabel(albumTracks.length));
-    if (showAlbumPlayCounts) details.push(playsLabel(album.playCount));
+    if (showAlbumPlayCounts) details.push(activityLabel(album.playCount));
 
     if (selectedAlbumDurationLabel) {
       details.push(selectedAlbumDurationLabel);
@@ -6141,12 +6291,23 @@
     ].filter((label): label is string => Boolean(label));
   }
 
-  function playCountLabel(track: Track) {
-    return `${track.playCount} ${track.playCount === 1 ? "play" : "plays"}`;
+  function trackActivity(track: Track) {
+    return listeningTimeEnabled ? track.listenedMs ?? 0 : track.playCount;
   }
 
-  function playsLabel(totalPlays: number) {
-    return `${totalPlays} ${totalPlays === 1 ? "play" : "plays"}`;
+  function trackActivityLabel(track: Track) {
+    const amount = trackActivity(track);
+    return amount ? activityLabel(amount) : "";
+  }
+
+  function activityLabel(amount: number) {
+    return listeningTimeEnabled ? listeningDurationLabel(amount) : `${amount} ${amount === 1 ? "play" : "plays"}`;
+  }
+
+  function activitySortLabel(label: string) {
+    return listeningTimeEnabled
+      ? label.replace("Most played", "Most listening time").replace("Least played", "Least listening time")
+      : label;
   }
 
   function lastPlayedLabel(track: Track) {
@@ -6569,7 +6730,7 @@
       return null;
     }
 
-    if (isAutoAdvance && repeatMode === "one" && !unavailableTrackIds.has(playbackQueue[currentQueueIndex].id)) {
+    if (isAutoAdvance && repeatMode === "one" && isQueueEligible(playbackQueue[currentQueueIndex])) {
       return currentQueueIndex;
     }
 
@@ -6580,8 +6741,7 @@
     }
 
     if (repeatMode === "all") {
-      return playableQueueOrder.find((index) => !unavailableTrackIds.has(playbackQueue[index].id)
-        && (!isShuffleEnabled || !ignoredTrackIds.has(playbackQueue[index].id))) ?? null;
+      return playableQueueOrder.find((index) => isQueueEligible(playbackQueue[index])) ?? null;
     }
 
     return null;
@@ -6599,8 +6759,7 @@
     }
 
     if (repeatMode === "all") {
-      return [...playableQueueOrder].reverse().find((index) => !unavailableTrackIds.has(playbackQueue[index].id)
-        && (!isShuffleEnabled || !ignoredTrackIds.has(playbackQueue[index].id))) ?? null;
+      return [...playableQueueOrder].reverse().find((index) => isQueueEligible(playbackQueue[index])) ?? null;
     }
 
     return null;
@@ -6698,7 +6857,7 @@
       }
 
       if (sortKey === "playCount") {
-        result = left.playCount - right.playCount
+        result = trackActivity(left) - trackActivity(right)
           || (left.lastPlayedAt ?? 0) - (right.lastPlayedAt ?? 0)
           || compareText(left.title, right.title);
         return applySortDirection(result, direction);
@@ -6728,8 +6887,13 @@
     removingListenId = listen.eventId;
     removeListenError = null;
     try {
-      const track = await removeListeningEvent(listen.eventId);
-      if (track) applyUpdatedTrack(track);
+      await listeningTimeWrite;
+      const removed = await removeListeningEvent(listen.eventId);
+      if (removed) {
+        if (removed.track) applyUpdatedTrack(removed.track);
+        listeningTimeRevision += 1;
+        listeningTimeByTrack = { ...listeningTimeByTrack, [removed.trackId]: removed.listenedMs };
+      }
       statsRevision += 1;
     } catch (error) {
       removeListenError = error instanceof Error ? error.message : String(error);
@@ -6817,7 +6981,7 @@
   }
 
   function mostPlayed(libraryTracks: Track[]) {
-    return rankMostPlayedTracks(libraryTracks);
+    return rankMostPlayedTracks(libraryTracks, trackActivity);
   }
 
   function statsSectionExpanded(section: StatsSectionId) {
@@ -6869,7 +7033,7 @@
         songCount: 0,
       };
 
-      current.totalPlays += track.playCount;
+      current.totalPlays += trackActivity(track);
       current.songCount += 1;
       statsByName.set(name, current);
     }
@@ -6901,7 +7065,7 @@
         songCount: 0,
       };
 
-      current.totalPlays += track.playCount;
+      current.totalPlays += trackActivity(track);
       current.songCount += 1;
       statsByAlbumId.set(albumId, current);
     }
@@ -6933,7 +7097,7 @@
           songCount: 0,
         };
 
-        current.totalPlays += track.playCount;
+        current.totalPlays += trackActivity(track);
         current.songCount += 1;
         statsByGenreName.set(genreName, current);
       }
@@ -7284,6 +7448,8 @@
   }
 </script>
 
+<svelte:window onpointerdown={dismissAlbumTrackSelection} />
+
 <svelte:head>
   <title>Cassette</title>
 </svelte:head>
@@ -7314,7 +7480,7 @@
       bind:this={mainElement}
       tabindex="-1"
     >
-      {#if activeView !== "Now Playing" && activeView !== "Stats" && activeView !== "CD Rip" && !isAlbumDetailView && !isArtistDetailView && !isGenreDetailView && !isPlaylistDetailView}
+      {#if activeView !== "Now Playing" && activeView !== "Stats" && activeView !== "CD Rip" && activeView !== "Settings" && activeView !== "Playlists" && !isAlbumDetailView && !isArtistDetailView && !isGenreDetailView}
         <header class="home-header">
           <div>
             <p class="eyebrow">{viewEyebrow()}</p>
@@ -7451,8 +7617,8 @@
                       <span>{currentTrack.year}</span>
                     {/if}
                     <span>{currentTrack.extension.toUpperCase()}</span>
-                    {#if currentTrack.playCount > 0 && !ignoredTrackIds.has(currentTrack.id)}
-                      <span>{playCountLabel(currentTrack)}</span>
+                    {#if !ignoredTrackIds.has(currentTrack.id) && trackActivityLabel(libraryTracksById.get(currentTrack.id) ?? currentTrack)}
+                      <span>{trackActivityLabel(libraryTracksById.get(currentTrack.id) ?? currentTrack)}</span>
                     {/if}
                   </div>
                   {#if currentTrackGenres.length > 0}
@@ -7726,7 +7892,7 @@
           <section class="stats-chart-panel" aria-labelledby="daily-plays-title">
           <dl class="stats-overview-grid" aria-label="Selected listening period">
             {#each [
-              { label: "Plays", value: statsTotalPlays },
+              { label: listeningTimeEnabled ? "Listening time" : "Plays", value: listeningTimeEnabled ? listeningDurationLabel(statsTotalActivity) : statsTotalActivity },
               { label: "Songs played", value: statsDistinctTracks },
               { label: "Artists played", value: statsDistinctArtists },
               { label: "Active days", value: statsActiveDays },
@@ -7740,21 +7906,21 @@
           </dl>
 
             <div class="stats-chart-heading">
-              <h2 id="daily-plays-title">Daily plays</h2>
+              <h2 id="daily-plays-title">{listeningTimeEnabled ? "Daily listening time" : "Daily plays"}</h2>
               <span>{statsChartDateLabel}</span>
             </div>
-            {#if statsSnapshot && statsRange && statsChartHasPlays}
+            {#if statsSnapshot && statsRange && statsActiveDays > 0}
               <div class="stats-chart">
                 <div class="stats-chart-scale" aria-hidden="true">
                   {#each [4, 3, 2, 1, 0] as tick}
-                    <span>{(tick * statsChartStep).toLocaleString()}</span>
+                    <span>{listeningTimeEnabled ? listeningDurationLabel(tick * statsChartStep) : (tick * statsChartStep).toLocaleString()}</span>
                   {/each}
                 </div>
-                <div class="stats-chart-scroll" role="region" aria-label="Daily play counts">
+                <div class="stats-chart-scroll" role="region" aria-labelledby="daily-plays-title">
                 <div class="stats-chart-bars" style:--chart-days={statsChartDates.length} class:dense={statsChartDates.length > 35}>
                   {#each statsChartDates as day, index (day)}
-                    {@const count = statsSnapshot.dailyPlays[index + statsChartOffset] ?? 0}
-                    {@const caption = `${day}: ${playsLabel(count)}`}
+                    {@const count = statsDailyActivity[index + statsChartOffset] ?? 0}
+                    {@const caption = `${day}: ${activityLabel(count)}`}
                     <button type="button" class="stats-chart-day" aria-pressed={statsSelectedDay === day} aria-label={caption} title={caption} onclick={() => {
                       statsSelectedDay = day;
                     }}>
@@ -7779,18 +7945,20 @@
                 </div>
               {/if}
             {:else if statsSnapshot}
-              <p class="stats-chart-empty">No plays with dates in this period.</p>
+              <p class="stats-chart-empty">{listeningTimeEnabled ? "No listening time recorded in this period." : "No plays with dates in this period."}</p>
             {/if}
             {#if statsSnapshot}
               <details class="stats-coverage">
                 <summary>Tracking coverage</summary>
                 <p class="stats-coverage-note">
-                  {#if statsPeriod === "all"}
+                  {#if listeningTimeEnabled}
+                    Listening time is measured from new playback. {statsPeriod === "all" ? "The chart covers the last 30 days." : ""}
+                  {:else if statsPeriod === "all"}
                     All-time totals include {statsSnapshot.undatedLegacyPlays} plays without dates. The chart covers the last 30 days.
                   {:else}
                     This period includes plays with recorded dates.
                   {/if}
-                  {#if statsSnapshot.coverageSources.length > 0}
+                  {#if !listeningTimeEnabled && statsSnapshot.coverageSources.length > 0}
                     Detailed tracking began on {statsSnapshot.coverageSources.map((source) => source.detailedTrackingStartedAtUtc !== null ? new Date(source.detailedTrackingStartedAtUtc * 1000).toLocaleDateString() : "an unknown date").join(", ")}.
                   {/if}
                   {#if statsSnapshot.pendingTracks.length > 0}
@@ -7811,9 +7979,10 @@
             onViewAll={!statsDetailSection && allStatsTopTracks.length > STATS_PREVIEW_LIMITS.tracks ? () => openStatsSection("tracks") : undefined}
           >
             {#if statsTopTracks.length === 0}
-              <p class="stats-empty">No track plays in this period.</p>
+              <p class="stats-empty">{listeningTimeEnabled ? "No listening time recorded for these tracks." : "No track plays in this period."}</p>
             {:else if statsDetailSection === "tracks"}
               <TrackList
+                activityLabel={trackActivityLabel}
                 tracks={statsTopTracks}
                 unavailableTrackIds={statsUnavailableIds}
                 isScanning={false}
@@ -7848,7 +8017,7 @@
                         <strong title={track.title}>{track.title}</strong>
                         <small>{track.artist ?? track.albumArtist ?? "Unknown Artist"}</small>
                       </span>
-                      <span class="stats-rank-count">{playsLabel(track.playCount)}</span>
+                      <span class="stats-rank-count">{activityLabel(trackActivity(track))}</span>
                     </button>
                   </li>
                 {/each}
@@ -7864,7 +8033,7 @@
               onViewAll={!statsDetailSection && allStatsTopArtists.length > STATS_PREVIEW_LIMITS.artists ? () => openStatsSection("artists") : undefined}
             >
               {#if statsTopArtists.length === 0}
-                <p class="stats-empty">No artist plays in this period.</p>
+                <p class="stats-empty">{listeningTimeEnabled ? "No listening time recorded for these artists." : "No artist plays in this period."}</p>
               {:else}
                 <div class="stats-rank-list">
                   {#each statsTopArtists as stat, index}
@@ -7877,7 +8046,7 @@
                         <strong>{stat.name}</strong>
                         <small>{songCountLabel(stat.songCount)}</small>
                       </span>
-                      <span class="stats-rank-count">{playsLabel(stat.totalPlays)}</span>
+                      <span class="stats-rank-count">{activityLabel(stat.totalPlays)}</span>
                     </button>
                   {/each}
                 </div>
@@ -7900,7 +8069,7 @@
               onViewAll={!statsDetailSection && allStatsTopAlbums.length > STATS_PREVIEW_LIMITS.albums ? () => openStatsSection("albums") : undefined}
             >
               {#if statsTopAlbums.length === 0}
-                <p class="stats-empty">No album plays in this period.</p>
+                <p class="stats-empty">{listeningTimeEnabled ? "No listening time recorded for these albums." : "No album plays in this period."}</p>
               {:else}
                 <div class="stats-rank-list">
                   {#each statsTopAlbums as stat, index}
@@ -7922,7 +8091,7 @@
                         <strong>{stat.album.title}</strong>
                         <small>{stat.album.artist}</small>
                       </span>
-                      <span class="stats-rank-count">{playsLabel(stat.totalPlays)}</span>
+                      <span class="stats-rank-count">{activityLabel(stat.totalPlays)}</span>
                     </button>
                   {/each}
                 </div>
@@ -7945,7 +8114,7 @@
               onViewAll={!statsDetailSection && allStatsTopGenres.length > STATS_PREVIEW_LIMITS.genres ? () => openStatsSection("genres") : undefined}
             >
               {#if statsTopGenres.length === 0}
-                <p class="stats-empty">No genre plays in this period.</p>
+                <p class="stats-empty">{listeningTimeEnabled ? "No listening time recorded for these genres." : "No genre plays in this period."}</p>
               {:else}
                 <div class="stats-rank-list">
                   {#each statsTopGenres as stat, index}
@@ -7958,7 +8127,7 @@
                         <strong>{stat.genre.name}</strong>
                         <small>{songCountLabel(stat.songCount)}</small>
                       </span>
-                      <span class="stats-rank-count">{playsLabel(stat.totalPlays)}</span>
+                      <span class="stats-rank-count">{activityLabel(stat.totalPlays)}</span>
                     </button>
                   {/each}
                 </div>
@@ -7982,7 +8151,7 @@
             >
               {#if removeListenError}<p class="stats-status" role="alert">{removeListenError}</p>{/if}
               {#if statsRecentListens.length === 0}
-                <p class="stats-empty">No dated listens in this period.</p>
+                <p class="stats-empty">No listens recorded in this period.</p>
               {:else}
                 <div class="stats-recent-list">
                   {#each statsRecentListens as listen (listen.eventId)}
@@ -8007,7 +8176,7 @@
                           <strong>{title}</strong>
                           <small>{track?.artist ?? "Unknown Artist"}{track?.album ? ` · ${track.album}` : ""}</small>
                         </span>
-                        <span class="stats-played-at">{formatDateTime(listen.playedAtUtc)}</span>
+                        <span class="stats-played-at">{listen.listenedMs ? `${listeningDurationLabel(listen.listenedMs)} · ` : ""}{formatDateTime(listen.playedAtUtc)}</span>
                       </button>
                       <button
                         class="stats-remove-listen"
@@ -8114,7 +8283,7 @@
                   {/if}
                   <span>{songCountLabel(selectedAlbumTracks.length)}</span>
                   {#if showAlbumPlayCounts}
-                    <span>{playsLabel(selectedAlbum.playCount)}</span>
+                    <span>{activityLabel(selectedAlbum.playCount)}</span>
                   {/if}
                   {#if selectedAlbumDurationLabel}
                     <span>{selectedAlbumDurationLabel}</span>
@@ -8179,6 +8348,7 @@
 
             <LibrarySection title="Album Songs" viewAllLabel="">
               {#snippet headerActions()}
+                <div class="album-selection-controls">
                 <button class="album-selection-button" type="button" aria-pressed={isAlbumSelectingTracks}
                   onclick={() => {
                     const selecting = isAlbumSelectingTracks;
@@ -8188,20 +8358,25 @@
                   {isAlbumSelectingTracks ? "Done selecting" : "Select tracks"}
                 </button>
                 {#if isAlbumSelectingTracks && selectedTrackIds.size > 0}
-                  {@const ignore = [...selectedTrackIds].some((id) => !ignoredTrackIds.has(id))}
-                  <button class="album-selection-button" type="button" disabled={savingIgnoredTracks}
-                    onclick={() => void updateIgnoredTracks([...selectedTrackIds], ignore)}>
-                    {ignore ? "Ignore" : "Stop ignoring"} {selectedTrackIds.size}
+                  <button class="album-selection-button" type="button" aria-haspopup="menu" onclick={(event) => {
+                    const bounds = event.currentTarget.getBoundingClientRect();
+                    openContextMenu(bounds.left, bounds.bottom, albumSelectionMenuItems(selectedAlbum.id));
+                  }}>
+                    {selectedTrackIds.size} selected ▾
                   </button>
                 {/if}
+                </div>
                 <TrackSortMenu
                   value={albumTrackSort}
                   direction={albumTrackSortDirection}
-                  options={albumTrackSortOptions}
+                  options={albumTrackSortOptions.map((option) => ({ ...option, label: activitySortLabel(option.label) }))}
                   onSortChange={(value) => albumTrackSort = value}
                   onDirectionChange={(direction) => albumTrackSortDirection = direction}
                 />
               {/snippet}
+              {#if bulkTrackFeedback?.albumId === selectedAlbum.id}
+                <p class="form-message" class:error={bulkTrackFeedback.error} role={bulkTrackFeedback.error ? "alert" : "status"}>{bulkTrackFeedback.message}</p>
+              {/if}
               {#if selectedAlbumTracks.length === 0}
                 <div class="group-empty">
                   <h3>No songs found for this album</h3>
@@ -8242,7 +8417,7 @@
                           </button>
                         </div>
                         {#if showAlbumTrackPlayCounts}
-                          <span class="album-track-play-count">{track.ignored ? "" : playsLabel(track.playCount)}</span>
+                          <span class="album-track-play-count">{track.ignored ? "" : activityLabel(trackActivity(track))}</span>
                         {/if}
                         <span class="album-track-duration">{track.durationSeconds === null ? "" : formatTrackDuration(track.durationSeconds)}</span>
                         <button
@@ -8273,8 +8448,8 @@
                   <option value="artist">Artist</option>
                   <option value="year">Year</option>
                   <option value="trackCount">Song count</option>
-                  <option value="mostPlayed">Most played</option>
-                  <option value="leastPlayed">Least played</option>
+                  <option value="mostPlayed">{activitySortLabel("Most played")}</option>
+                  <option value="leastPlayed">{activitySortLabel("Least played")}</option>
                 </select>
               </label>
               {#if albumSort !== "mostPlayed" && albumSort !== "leastPlayed"}
@@ -8329,7 +8504,7 @@
                       </div>
                       <button class="album-card-copy" type="button" onclick={() => handleAlbumSelect(album)}>
                         <strong>{album.title}</strong>
-                        <small>{albumDetail(album)}{showAlbumPlayCounts ? ` · ${playsLabel(album.playCount)}` : ""}</small>
+                        <small>{albumDetail(album)}{showAlbumPlayCounts ? ` · ${activityLabel(album.playCount)}` : ""}</small>
                       </button>
                     </div>
                   </article>
@@ -8356,10 +8531,10 @@
               <div class="detail-copy">
                 <p class="eyebrow">Artist</p>
                 <h3 id="artist-detail-title">{selectedArtist.name}</h3>
-                <div class="album-detail-meta" aria-label={`${selectedArtist.name} summary${showArtistPlayCounts ? `, ${playsLabel(selectedArtist.playCount)}` : ""}`}>
+                <div class="album-detail-meta" aria-label={`${selectedArtist.name} summary${showArtistPlayCounts ? `, ${activityLabel(selectedArtist.playCount)}` : ""}`}>
                   <span>{artistSongCount(selectedArtist)}</span>
                   <span>{selectedArtistAlbums.length} {selectedArtistAlbums.length === 1 ? "album" : "albums"}</span>
-                  {#if showArtistPlayCounts}<span>{playsLabel(selectedArtist.playCount)}</span>{/if}
+                  {#if showArtistPlayCounts}<span>{activityLabel(selectedArtist.playCount)}</span>{/if}
                 </div>
                 <div class="album-genre-chip-list" aria-label="Artist genres">
                   {#each selectedArtistGenres as genre}
@@ -8422,7 +8597,7 @@
                         </div>
                         <button class="album-card-copy" type="button" onclick={() => handleAlbumSelect(album)}>
                           <strong>{album.title}</strong>
-                          <small>{albumDetail(album)}{showAlbumPlayCounts ? ` · ${playsLabel(album.playCount)}` : ""}</small>
+                          <small>{albumDetail(album)}{showAlbumPlayCounts ? ` · ${activityLabel(album.playCount)}` : ""}</small>
                         </button>
                       </div>
                     </article>
@@ -8441,7 +8616,7 @@
                   <TrackSortMenu
                     value={artistTrackSort}
                     direction={artistTrackSortDirection}
-                    options={groupedTrackSortOptions}
+                    options={groupedTrackSortOptions.map((option) => ({ ...option, label: activitySortLabel(option.label) }))}
                     onSortChange={(value) => artistTrackSort = value}
                     onDirectionChange={(direction) => artistTrackSortDirection = direction}
                   />
@@ -8451,6 +8626,7 @@
                 <div class="group-empty"><h3>No songs found for this artist</h3></div>
               {:else}
                 <TrackList
+                  activityLabel={trackActivityLabel}
                   tracks={detailSongsView === "artist" ? selectedArtistDisplayTracks.slice(0, artistTrackVisibleLimit) : selectedArtistTopTracks}
                   isScanning={false}
                   variant="library"
@@ -8476,8 +8652,8 @@
                   <option value="name">Artist name</option>
                   <option value="songCount">Song count</option>
                   <option value="albumCount">Album count</option>
-                  <option value="mostPlayed">Most played</option>
-                  <option value="leastPlayed">Least played</option>
+                  <option value="mostPlayed">{activitySortLabel("Most played")}</option>
+                  <option value="leastPlayed">{activitySortLabel("Least played")}</option>
                 </select>
               </label>
               {#if artistSort !== "mostPlayed" && artistSort !== "leastPlayed"}
@@ -8505,7 +8681,7 @@
                     </div>
                     <div>
                       <h3>{artist.name}</h3>
-                      <p>{artistSongCount(artist)}{showArtistPlayCounts ? ` · ${playsLabel(artist.playCount)}` : ""}</p>
+                      <p>{artistSongCount(artist)}{showArtistPlayCounts ? ` · ${activityLabel(artist.playCount)}` : ""}</p>
                     </div>
                   </button>
                 {/each}
@@ -8530,11 +8706,11 @@
               <div class="detail-copy">
                 <p class="eyebrow">Genre</p>
                 <h3 id="genre-detail-title">{selectedGenre.name}</h3>
-                <div class="album-detail-meta" aria-label={`${selectedGenre.name} summary${showGenrePlayCounts ? `, ${playsLabel(selectedGenre.playCount)}` : ""}`}>
+                <div class="album-detail-meta" aria-label={`${selectedGenre.name} summary${showGenrePlayCounts ? `, ${activityLabel(selectedGenre.playCount)}` : ""}`}>
                   <span>{songCountLabel(selectedGenreTracks.length)}</span>
                   <span>{selectedGenreArtists.length} {selectedGenreArtists.length === 1 ? "artist" : "artists"}</span>
                   <span>{selectedGenreAlbums.length} {selectedGenreAlbums.length === 1 ? "album" : "albums"}</span>
-                  {#if showGenrePlayCounts}<span>{playsLabel(selectedGenre.playCount)}</span>{/if}
+                  {#if showGenrePlayCounts}<span>{activityLabel(selectedGenre.playCount)}</span>{/if}
                 </div>
                 <div class="album-detail-actions genre-detail-actions">
                   <button type="button" disabled={selectedGenreTracks.length === 0} onclick={() => void handlePlaySelectedGenre()}>
@@ -8592,7 +8768,7 @@
                         </div>
                         <button class="album-card-copy" type="button" onclick={() => handleAlbumSelect(album)}>
                           <strong>{album.title}</strong>
-                          <small>{albumDetail(album)}{showAlbumPlayCounts ? ` · ${playsLabel(album.playCount)}` : ""}</small>
+                          <small>{albumDetail(album)}{showAlbumPlayCounts ? ` · ${activityLabel(album.playCount)}` : ""}</small>
                         </button>
                       </div>
                     </article>
@@ -8616,7 +8792,7 @@
                       </div>
                       <div>
                         <h3>{artist.name}</h3>
-                        <p>{artistSongCount(artist)}{showArtistPlayCounts ? ` · ${playsLabel(artistTotalPlays(artist.name))}` : ""}</p>
+                        <p>{artistSongCount(artist)}{showArtistPlayCounts ? ` · ${activityLabel(artistTotalPlays(artist.name))}` : ""}</p>
                       </div>
                     </button>
                   {/each}
@@ -8634,7 +8810,7 @@
                   <TrackSortMenu
                     value={genreTrackSort}
                     direction={genreTrackSortDirection}
-                    options={groupedTrackSortOptions}
+                    options={groupedTrackSortOptions.map((option) => ({ ...option, label: activitySortLabel(option.label) }))}
                     onSortChange={(value) => genreTrackSort = value}
                     onDirectionChange={(direction) => genreTrackSortDirection = direction}
                   />
@@ -8644,6 +8820,7 @@
                 <div class="group-empty"><h3>No songs found for this genre</h3></div>
               {:else}
                 <TrackList
+                  activityLabel={trackActivityLabel}
                   tracks={detailSongsView === "genre" ? selectedGenreDisplayTracks.slice(0, genreTrackVisibleLimit) : selectedGenreTopTracks}
                   isScanning={false}
                   variant="library"
@@ -8671,8 +8848,8 @@
                   <option value="songCount">Song count</option>
                   <option value="artistCount">Artist count</option>
                   <option value="albumCount">Album count</option>
-                  <option value="mostPlayed">Most played</option>
-                  <option value="leastPlayed">Least played</option>
+                  <option value="mostPlayed">{activitySortLabel("Most played")}</option>
+                  <option value="leastPlayed">{activitySortLabel("Least played")}</option>
                 </select>
               </label>
               {#if genreSort !== "mostPlayed" && genreSort !== "leastPlayed"}
@@ -8700,7 +8877,7 @@
                     </div>
                     <div>
                       <h3>{genre.name}</h3>
-                      <p>{genreDetail(genre)}{showGenrePlayCounts ? ` · ${playsLabel(genre.playCount)}` : ""}</p>
+                      <p>{genreDetail(genre)}{showGenrePlayCounts ? ` · ${activityLabel(genre.playCount)}` : ""}</p>
                     </div>
                   </button>
                 {/each}
@@ -8714,7 +8891,7 @@
             <CompactDropdown
               label="Sort"
               value={songSort}
-              options={songSortOptions}
+              options={songSortOptions.map((option) => ({ ...option, label: activitySortLabel(option.label) }))}
               onChange={handleSongSortChange}
             />
             <button
@@ -8734,6 +8911,7 @@
           </div>
           {#if isScanning}
             <TrackList
+              activityLabel={trackActivityLabel}
               tracks={visibleSongTracks}
               {isScanning}
               variant="library"
@@ -8765,6 +8943,7 @@
             </div>
           {:else}
             <TrackList
+              activityLabel={trackActivityLabel}
               tracks={visibleSongTracks}
               {isScanning}
               variant="library"
@@ -8779,17 +8958,26 @@
           {/if}
         </LibrarySection>
       {:else if activeView === "Playlists"}
+        {#snippet playlistSearch()}
+          <div class="playlist-search" role="search">
+            <input
+              type="search"
+              bind:value={searchQuery}
+              placeholder={searchPlaceholder()}
+              aria-label={searchPlaceholder()}
+              onkeydown={handleSearchKeydown}
+            />
+          </div>
+        {/snippet}
         {#if isLikedSongsOpen}
           <section class="playlist-detail-page" aria-labelledby="liked-songs-title">
             <button class="back-button playlist-detail-back" type="button" onclick={handleBackToPlaylists}>Back to Playlists</button>
             <section class="playlist-hero smart" aria-labelledby="liked-songs-title">
               <div class="playlist-hero-art liked" aria-hidden="true">★</div>
               <div class="playlist-hero-copy">
-                <p class="eyebrow">Smart Playlist</p>
-                <h3 id="liked-songs-title">Liked Songs</h3>
+                <h2 id="liked-songs-title">Liked Songs</h2>
                 <div class="playlist-hero-meta">
                   <span>{smartPlaylistMetaLabel(favoriteTracks)}</span>
-                  <span>Protected</span>
                 </div>
                 <div class="playlist-hero-actions">
                   <button type="button" disabled={favoriteTracks.length === 0} onclick={() => void handlePlayLikedSongs()}>Play Playlist</button>
@@ -8805,6 +8993,7 @@
               <p class="playlist-status-pill" role="status">{playlistMessage}</p>
             {/if}
 
+            {#if favoriteTracks.length}{@render playlistSearch()}{/if}
             <LibrarySection title="Songs" viewAllLabel={normalizedSearchQuery ? `${filteredLikedTracks.length} ${filteredLikedTracks.length === 1 ? "match" : "matches"}` : `${favoriteTracks.length} total`}>
               {#if favoriteTracks.length === 0}
                 <div class="group-empty">
@@ -8818,6 +9007,7 @@
                 </div>
               {:else}
                 <TrackList
+                  activityLabel={trackActivityLabel}
                   tracks={filteredLikedTracks}
                   isScanning={false}
                   variant="library"
@@ -8851,8 +9041,7 @@
                 {/if}
               </div>
               <div class="playlist-hero-copy">
-                <p class="eyebrow">Custom Playlist</p>
-                <h3 id="custom-playlist-title">{selectedPlaylist.name}</h3>
+                <h2 id="custom-playlist-title">{selectedPlaylist.name}</h2>
                 <div class="playlist-hero-meta">
                   <span>{playlistTrackLabel(selectedPlaylist)}</span>
                   {#if selectedPlaylistDurationLabel}
@@ -8866,9 +9055,8 @@
                     <button type="button" disabled={selectedPlaylistTracks.length === 0} onclick={() => handleAddPlaylistToQueue(selectedPlaylist)}>Add to Queue</button>
                   </div>
                   <div class="playlist-hero-actions playlist-management-actions">
-                    <button class="secondary" type="button" onclick={() => void handleRenamePlaylist(selectedPlaylist)}>Rename</button>
                     <button class:active={isPlaylistEditMode} class="secondary" type="button" onclick={() => isPlaylistEditMode = !isPlaylistEditMode}>{isPlaylistEditMode ? "Done" : "Edit Order"}</button>
-                    <button class="secondary more" type="button" aria-label="More playlist actions" onclick={(event) => openPlaylistMoreMenu(event, selectedPlaylist)}>More</button>
+                    <button class="secondary more" type="button" aria-label="More playlist actions" onclick={(event) => openPlaylistMoreMenu(event, selectedPlaylist)}>⋯</button>
                   </div>
                 </div>
               </div>
@@ -8885,6 +9073,7 @@
               </div>
             {/if}
 
+            {#if selectedPlaylistTracks.length}{@render playlistSearch()}{/if}
             <LibrarySection title="Songs" viewAllLabel={isPlaylistEditMode ? "Editing order" : normalizedSearchQuery ? `${selectedPlaylistSearchTracks.length} ${selectedPlaylistSearchTracks.length === 1 ? "match" : "matches"}` : `${selectedPlaylistTracks.length} playable`}>
               {#if selectedPlaylistTracks.length === 0}
                 <div class="group-empty">
@@ -8903,6 +9092,7 @@
                 </div>
               {:else}
                 <TrackList
+                  activityLabel={trackActivityLabel}
                   tracks={selectedPlaylistSearchTracks}
                   isScanning={false}
                   variant="library"
@@ -8923,7 +9113,7 @@
             </LibrarySection>
           </section>
         {:else if isMixBuilderOpen}
-          <section class="detail-view" aria-labelledby="mix-builder-title">
+          <section class="detail-view playlists-page" aria-labelledby="mix-builder-title">
             <button class="back-button" type="button" onclick={handleBackToPlaylists}>Back to Playlists</button>
             <div class="playlist-detail-header">
               <div class="mix-mark" aria-hidden="true">M</div>
@@ -9053,86 +9243,64 @@
           </section>
         {:else}
           <section class="playlists-page" aria-labelledby="playlists-title">
+            <header class="organizer-header">
+              <h2 id="playlists-title">Playlists</h2>
+              {#if !isCreatePlaylistOpen}
+                <div class="settings-actions">
+                  <button id="new-playlist-button" class="primary" type="button" onclick={handleOpenCreatePlaylist}>New playlist</button>
+                </div>
+              {/if}
+            </header>
             {#if playlistError && !isCreatePlaylistOpen}
               <div class="scan-error" role="alert">{playlistError}</div>
             {:else if playlistMessage && !isCreatePlaylistOpen}
               <p class="playlist-status-pill" role="status">{playlistMessage}</p>
             {/if}
 
-            <LibrarySection title="Smart Playlists" viewAllLabel={`${favoriteTracks.length} liked`}>
-              <div class="playlist-card-grid smart">
-                <article class="playlist-library-card smart">
-                  <button class="playlist-card-main" type="button" onclick={handleLikedSongsSelect}>
-                    <div class="playlist-card-art liked" aria-hidden="true">★</div>
-                    <div class="playlist-card-copy">
-                      <p class="eyebrow">Smart Playlist</p>
-                      <h3 id="playlists-title">Liked Songs</h3>
-                      <p>{smartPlaylistMetaLabel(favoriteTracks)}</p>
-                    </div>
-                  </button>
-                  <div class="playlist-card-actions">
-                    <button type="button" disabled={favoriteTracks.length === 0} onclick={(event) => { stopCardAction(event); void handlePlayLikedSongs(); }}>Play</button>
-                    <button type="button" disabled={favoriteTracks.length === 0} onclick={(event) => { stopCardAction(event); void handlePlayLikedSongs(true); }}>Shuffle</button>
-                  </div>
-                </article>
-              </div>
-            </LibrarySection>
-
-            <LibrarySection title="Mixes / Tools" viewAllLabel={`${tracks.length} available`}>
-              <div class="playlist-card-grid tools">
-                <button class="mix-tool-card" type="button" onclick={handleMixBuilderSelect}>
-                  <div class="mix-mark" aria-hidden="true">M</div>
-                  <div>
-                    <p class="eyebrow">Mix Builder</p>
-                    <h3>Build a Mix</h3>
-                    <p>Build a local queue from genres, artists, albums, formats, and liked songs.</p>
+            {#if isCreatePlaylistOpen}
+              <form class="playlist-create-panel" onsubmit={(event) => { event.preventDefault(); void handleCreatePlaylist(); }}>
+                <label for="playlist-name">Playlist name</label>
+                <input id="playlist-name" type="text" bind:value={playlistNameDraft} aria-invalid={Boolean(playlistError)} />
+                <div class="playlist-create-actions">
+                  <button type="submit" disabled={!canCreatePlaylist}>Create</button>
+                  <button class="secondary" type="button" onclick={handleCancelCreatePlaylist}>Cancel</button>
+                </div>
+                {#if playlistError}<p class="form-message error" role="alert">{playlistError}</p>{/if}
+              </form>
+            {/if}
+            <div class="playlist-feature-grid">
+              <article class="playlist-library-card smart">
+                <button class="playlist-card-main" type="button" onclick={handleLikedSongsSelect}>
+                  <div class="playlist-card-art liked" aria-hidden="true">★</div>
+                  <div class="playlist-card-copy">
+                    <h3>Liked Songs</h3>
+                    <p>{smartPlaylistMetaLabel(favoriteTracks)}</p>
                   </div>
                 </button>
-              </div>
-            </LibrarySection>
+                <div class="playlist-card-actions">
+                  <button type="button" disabled={favoriteTracks.length === 0} onclick={() => void handlePlayLikedSongs()}>Play</button>
+                  <button type="button" disabled={favoriteTracks.length === 0} onclick={() => void handlePlayLikedSongs(true)}>Shuffle</button>
+                </div>
+              </article>
+              <button class="mix-tool-card" type="button" onclick={handleMixBuilderSelect}>
+                <span class="mix-mark" aria-hidden="true">♪</span>
+                <span class="mix-tool-copy">
+                  <strong>Mix Builder</strong>
+                  <small>Build a queue from artists, genres, albums, or liked songs.</small>
+                </span>
+                <span class="mix-tool-arrow" aria-hidden="true">›</span>
+              </button>
+            </div>
 
-            <LibrarySection
-              title="Custom Playlists"
-              viewAllLabel={isCreatePlaylistOpen ? "Cancel" : "New Playlist"}
-              onViewAll={isCreatePlaylistOpen ? handleCancelCreatePlaylist : handleOpenCreatePlaylist}
-            >
-              {#if isCreatePlaylistOpen}
-                <form class="playlist-create-panel" onsubmit={(event) => { event.preventDefault(); void handleCreatePlaylist(); }}>
-                  <div>
-                    <p class="eyebrow">New Playlist</p>
-                    <h3>Create Playlist</h3>
-                  </div>
-                  <input
-                    id="playlist-name"
-                    type="text"
-                    bind:value={playlistNameDraft}
-                    placeholder="Playlist name"
-                    aria-label="Playlist name"
-                    aria-invalid={playlistError ? "true" : "false"}
-                  />
-                  <div class="playlist-create-actions">
-                    <button type="submit" disabled={!canCreatePlaylist}>Create</button>
-                    <button class="secondary" type="button" onclick={handleCancelCreatePlaylist}>Cancel</button>
-                  </div>
-                  {#if playlistError}
-                    <p class="form-message error" role="alert">{playlistError}</p>
-                  {:else if playlistMessage}
-                    <p class="form-message" role="status">{playlistMessage}</p>
-                  {/if}
-                </form>
-              {/if}
-
+            <LibrarySection title="Your playlists" viewAllLabel={playlists.length ? `${playlists.length} total` : ""}>
               {#if playlists.length === 0}
                 <div class="group-empty playlist-empty-state">
-                  <h3>No custom playlists yet</h3>
-                  <p>Create your first playlist, then add songs from any track context menu.</p>
-                  {#if !isCreatePlaylistOpen}
-                    <button type="button" onclick={handleOpenCreatePlaylist}>Create your first playlist</button>
-                  {/if}
+                  <h3>No playlists yet</h3>
+                  <p>Create a playlist, then add songs from a track’s menu.</p>
                 </div>
               {:else}
                 <div class="playlist-card-grid">
-                  {#each playlists as playlist}
+                  {#each playlists as playlist (playlist.id)}
                     {@const playlistTracks = tracksForPlaylist(playlist)}
                     <article class="playlist-library-card" oncontextmenu={(event) => openPlaylistContextMenu(event, playlist)}>
                       <button class="playlist-card-main" type="button" onclick={() => handlePlaylistSelect(playlist)}>
@@ -9151,8 +9319,7 @@
                           {/if}
                         </div>
                         <div class="playlist-card-copy">
-                          <p class="eyebrow">Custom Playlist</p>
-                          <h3>{playlist.name}</h3>
+                          <h3 title={playlist.name}>{playlist.name}</h3>
                           <p>{playlistMetaLabel(playlist)}</p>
                         </div>
                       </button>
@@ -9160,7 +9327,7 @@
                         <button type="button" disabled={playlistTracks.length === 0} onclick={(event) => { stopCardAction(event); void handlePlayPlaylist(playlist); }}>Play</button>
                         <button type="button" disabled={playlistTracks.length === 0} onclick={(event) => { stopCardAction(event); void handlePlayPlaylist(playlist, true); }}>Shuffle</button>
                         <button type="button" disabled={playlistTracks.length === 0} onclick={(event) => { stopCardAction(event); handleAddPlaylistToQueue(playlist); }}>Queue</button>
-                        <button class="secondary" type="button" onclick={(event) => { stopCardAction(event); void handleRenamePlaylist(playlist); }}>Rename</button>
+                        <button class="secondary playlist-card-menu" type="button" aria-label={`More actions for ${playlist.name}`} onclick={(event) => openPlaylistMoreMenu(event, playlist)}>⋯</button>
                       </div>
                     </article>
                   {/each}
@@ -9901,6 +10068,7 @@
                   {/each}
                 </div>
                 <TrackList
+                  activityLabel={trackActivityLabel}
                   tracks={libraryDiagnostics.missingGenreTracks}
                   isScanning={false}
                   selectedTrackId={currentTrack?.id}
@@ -9934,6 +10102,7 @@
                   </div>
                 {/if}
                 <TrackList
+                  activityLabel={trackActivityLabel}
                   tracks={libraryDiagnostics.missingCoverTracks}
                   isScanning={false}
                   selectedTrackId={currentTrack?.id}
@@ -9951,6 +10120,7 @@
                 <div class="group-empty compact"><h3>No issues found</h3><p>No tracks have an empty or unknown artist.</p></div>
               {:else}
                 <TrackList
+                  activityLabel={trackActivityLabel}
                   tracks={libraryDiagnostics.unknownArtistTracks}
                   isScanning={false}
                   selectedTrackId={currentTrack?.id}
@@ -9968,6 +10138,7 @@
                 <div class="group-empty compact"><h3>No issues found</h3><p>No tracks have an empty or unknown album.</p></div>
               {:else}
                 <TrackList
+                  activityLabel={trackActivityLabel}
                   tracks={libraryDiagnostics.unknownAlbumTracks}
                   isScanning={false}
                   selectedTrackId={currentTrack?.id}
@@ -9985,6 +10156,7 @@
                 <div class="group-empty compact"><h3>No issues found</h3><p>All cached tracks have track numbers.</p></div>
               {:else}
                 <TrackList
+                  activityLabel={trackActivityLabel}
                   tracks={libraryDiagnostics.missingTrackNumberTracks}
                   isScanning={false}
                   selectedTrackId={currentTrack?.id}
@@ -10002,6 +10174,7 @@
                 <div class="group-empty compact"><h3>No issues found</h3><p>All cached tracks have year metadata.</p></div>
               {:else}
                 <TrackList
+                  activityLabel={trackActivityLabel}
                   tracks={libraryDiagnostics.missingYearTracks}
                   isScanning={false}
                   selectedTrackId={currentTrack?.id}
@@ -10047,521 +10220,458 @@
           </section>
         {:else}
           <section class="settings-panel" aria-labelledby="settings-title">
-            <div class="settings-intro">
-              <p class="eyebrow">Control Center</p>
-              <h3 id="settings-title">Settings</h3>
-              <p>Manage Cassette's local library, playback state, app tools, and build details.</p>
-            </div>
-
-            <section class="settings-section" aria-labelledby="settings-library-title">
-              <div class="settings-section-header">
-                <div>
-                  <p class="eyebrow">Library</p>
-                  <h4 id="settings-library-title">Local library</h4>
-                </div>
-                <span class="settings-pill">{hasLoadedCache ? "Cache loaded" : "Loading cache"}</span>
-              </div>
-
-              <div class="library-folder-card">
-                <span>Current folder</span>
-                <strong>{scannedFolder ?? "No library folder selected"}</strong>
-              </div>
-              {#if isScanning && scanProgress}
-                <div class="folder-scan-progress" role="status">
-                  <progress aria-label="Scanning library"></progress>
-                  <span>{scanProgress.checked} audio files checked in {scanProgress.path}</span>
-                </div>
-              {:else if scanSummary}
-                <p class="settings-note" role="status">{scanSummary}</p>
-              {/if}
-              {#if libraryFolders.length > 0}
-                <ul class="folder-scan-list">
-                  {#each libraryFolders as folder (folder.path)}
-                    <li>
-                      <div><strong>{folder.path}</strong>
-                        {#if folder.error}
-                          <small>{folder.error} · Existing tracks kept</small>
-                        {:else if folder.scannedAt}
-                          <small>{folder.added} added · {folder.updated} updated · {folder.skipped} skipped</small>
-                        {/if}
-                      </div>
-                      <button type="button" disabled={isScanning} onclick={() => void handleScanLibrary(false, false, folder.path)}>Rescan folder</button>
-                    </li>
-                  {/each}
-                </ul>
-              {/if}
-
-              <div class="settings-stat-grid" aria-label="Library summary">
-                {#each librarySettingsStats as stat}
-                  <div class="settings-stat-tile">
-                    <span>{stat.label}</span>
-                    <strong>{stat.value}</strong>
-                  </div>
+            <header class="organizer-header">
+              <h2 id="settings-title">Settings</h2>
+            </header>
+            <div class="settings-layout">
+              <nav class="settings-index" aria-label="Settings sections">
+                {#each [
+                  { id: "settings-library-title", label: "Library" },
+                  { id: "settings-playback-title", label: "Playback" },
+                  { id: "history-transfer-title", label: "Listening history" },
+                  { id: "settings-interface-title", label: "Appearance" },
+                  { id: "settings-tools-title", label: "Tools" },
+                  { id: "settings-updates-title", label: "Updates" },
+                  { id: "settings-about-title", label: "About" },
+                ] as section (section.id)}
+                  <button type="button" onclick={() => jumpToSetting(section.id)}>{section.label}</button>
                 {/each}
-                <div class="settings-stat-tile wide">
-                  <span>Last scan</span>
-                  <strong>{lastScanLabel}</strong>
-                </div>
-              </div>
+              </nav>
+              <div class="settings-sections">
 
-              <div class="settings-actions">
-                <button class="primary" type="button" disabled={isScanning} onclick={() => void handleScanLibrary()}>
-                  {isScanning ? "Scanning..." : scannedFolder ? "Rescan Library" : "Scan Library"}
-                </button>
-                <button type="button" disabled={isScanning} onclick={() => void handleScanLibrary(true)}>
-                  Change Library Folder
-                </button>
-                <button type="button" disabled={isScanning} onclick={() => void handleScanLibrary(false, true)}>Add Music Folder</button>
-                <button class="primary" type="button" onclick={handleLibraryHealthSelect}>
-                  Open Library Health
-                </button>
-                <button class="danger" type="button" disabled title="Coming later: needs a safe cache-only migration path">
-                  Clear Library Cache
-                  <span>Coming later</span>
-                </button>
-              </div>
-            </section>
+                <section class="settings-section" aria-labelledby="settings-library-title">
+                  <div class="settings-section-header">
+                    <h3 id="settings-library-title" tabindex="-1">Library</h3>
+                    {#if !hasLoadedCache}<span class="settings-pill">Loading library…</span>{/if}
+                  </div>
 
-            <section class="settings-section stats-transfer-panel" aria-labelledby="history-transfer-title">
-              <div class="settings-section-header">
-                <div>
-                  <p class="eyebrow">Listening data</p>
-                  <h4 id="history-transfer-title">Portable listening history</h4>
-                </div>
-              </div>
-              <label class="listen-threshold">
-                <span>Count a listen after</span>
-                <select value={listenPercentage} onchange={(event) => {
-                  listenPercentage = Number(selectValue(event));
-                  writePreference("cassette:listen-percentage", String(listenPercentage));
-                }}>
-                  {#each listenPercentages as percentage}
-                    <option value={percentage}>{percentage}% of the track</option>
-                  {/each}
-                </select>
-              </label>
-              <details class="ignored-tracks">
-                <summary>Ignored tracks ({ignoredTrackIds.size})</summary>
-                {#if ignoredTrackIds.size === 0}
-                  <p>Right-click a song to ignore it. On an album, choose Select tracks to ignore several together.</p>
-                {:else}
-                  <ul class="folder-scan-list">
-                    {#each [...ignoredTrackIds].sort() as id (id)}
-                      {@const track = libraryTracksById.get(id)}
-                      <li>
-                        <div><strong>{track?.title ?? id}</strong>{#if track?.album}<small>{track.album}</small>{/if}</div>
-                        <button type="button" disabled={savingIgnoredTracks} onclick={() => void updateIgnoredTracks([id], false)}>Stop ignoring</button>
-                      </li>
+                  <dl class="settings-stat-grid" aria-label="Library summary">
+                    {#each librarySettingsStats as stat (stat.label)}
+                      <div><dt>{stat.label}</dt><dd>{hasLoadedCache ? stat.value.toLocaleString() : "—"}</dd></div>
                     {/each}
-                  </ul>
-                {/if}
-              </details>
-              <p>Export includes your full history, regardless of the period selected in Stats. Backups contain no audio files or explicit music-folder paths. Original event IDs are retained. Import previews matches, duplicates and conflicts before changing data.</p>
-              <div class="stats-transfer-actions">
-                <button type="button" disabled={historyBusy} onclick={() => void handleExportListeningHistory()}>Export listening history</button>
-                <button type="button" disabled={historyBusy} onclick={() => void handlePreviewListeningHistory()}>Import listening history…</button>
-              </div>
-              {#if historyBusy}<p role="status" class="stats-status">Preparing listening history… Verifying audio identities can take a while for a large library.</p>{/if}
-              {#if historyError}<p role="alert" class="stats-status">{historyError}</p>{/if}
-              {#if historyMessage}<p role="status" class="stats-status">{historyMessage}</p>{/if}
-              {#if historyImportPreview}
-                <div class="stats-import-preview">
-                  <h5>Import preview</h5>
-                  <p>{historyImportPreview.matchedTracks} matched · {historyImportPreview.unmatchedTracks} unmatched · {historyImportPreview.ambiguousTracks} ambiguous tracks</p>
-                  <p>{historyImportPreview.newEvents} new · {historyImportPreview.duplicateEvents} duplicate dated events · {historyImportPreview.undatedPlays} source undated plays</p>
-                  {#if historyImportPreview.conflicts.length > 0}
-                    <ul>{#each historyImportPreview.conflicts as conflict}<li>{conflict}</li>{/each}</ul>
+                  </dl>
+                  <div class="library-folder-card">
+                    <span>Music folder</span>
+                    <strong>{scannedFolder ?? "No library folder selected"}</strong>
+                    {#if lastScannedAt}<small>Last scan {lastScanLabel}</small>{/if}
+                  </div>
+                  {#if isScanning && scanProgress}
+                    <div class="folder-scan-progress" role="status">
+                      <progress aria-label="Scanning library"></progress>
+                      <span>{scanProgress.checked} audio files checked in {scanProgress.path}</span>
+                    </div>
+                  {:else if scanSummary}
+                    <p class="settings-note" role="status">{scanSummary}</p>
                   {/if}
-                  <div class="stats-import-tracks">
-                    {#each historyImportPreview.tracks.slice(0, historyPreviewLimit) as item (item.referenceId)}
-                      <div class="stats-import-track">
-                        <strong>{item.title}</strong><span>{item.artist ?? "Unknown Artist"} · {item.status} · {item.newEvents} new / {item.duplicateEvents} duplicate events</span>
-                        {#if item.conflict}<small>{item.conflict}</small>{/if}
-                        {#if item.status === "ambiguous" && item.candidates.length > 0}
-                          <label for={`associate-${item.referenceId}`}>Associate audio-identical track</label>
-                          <select id={`associate-${item.referenceId}`} value={historyAssociationTargets[item.pendingTrackId] ?? ""} onchange={(event) => { historyAssociationTargets[item.pendingTrackId] = event.currentTarget.value; }}>
-                            <option value="">Choose a track</option>
-                            {#each item.candidates as candidate}<option value={candidate}>{tracks.find((track) => track.id === candidate)?.title ?? candidate}</option>{/each}
-                          </select>
-                          <button type="button" disabled={historyBusy || !item.retained || !historyAssociationTargets[item.pendingTrackId]} onclick={() => void handleAssociateListeningHistory(item.pendingTrackId)}>Associate retained history</button>
-                          {#if !item.retained}<small>Import first to retain this history, then choose an audio-identical track.</small>{/if}
-                        {/if}
-                      </div>
-                    {/each}
-                  </div>
-                  {#if historyPreviewLimit < historyImportPreview.tracks.length}
-                    <button type="button" onclick={() => { historyPreviewLimit = nextStatsLimit(historyPreviewLimit, historyImportPreview?.tracks.length ?? 0); }}>Show 50 more track references</button>
-                  {/if}
-                  <p>Showing {Math.min(historyPreviewLimit, historyImportPreview.tracks.length)} of {historyImportPreview.tracks.length} track references. All references are included when importing.</p>
-                  <button type="button" disabled={historyBusy || historyImportPreview.conflicts.length > 0} onclick={() => void handleApplyListeningHistory()}>Import new history</button>
-                  <button type="button" disabled={historyBusy} onclick={() => { historyImportPreview = null; historyImportPath = null; }}>Cancel preview</button>
-                </div>
-              {/if}
-            </section>
-
-            <section class="settings-section" aria-labelledby="settings-playback-title">
-              <div class="settings-section-header">
-                <div>
-                  <p class="eyebrow">Playback</p>
-                  <h4 id="settings-playback-title">Current session</h4>
-                </div>
-                <span class="settings-pill">{isPlaying ? "Playing" : currentTrack ? "Paused" : "Idle"}</span>
-              </div>
-              <label class="settings-toggle-row">
-                <input type="checkbox" checked={gaplessEnabled} onchange={(event) => {
-                  gaplessEnabled = event.currentTarget.checked;
-                  writePreference("cassette:gapless", gaplessEnabled ? "on" : "off");
-                }} />
-                <span>Gapless playback</span>
-              </label>
-
-              <div class="settings-status-list">
-                <div>
-                  <span>Shuffle</span>
-                  <strong>{isShuffleEnabled ? "On" : "Off"}</strong>
-                </div>
-                <div>
-                  <span>Repeat</span>
-                  <strong>{repeatMode}</strong>
-                </div>
-                <div>
-                  <span>Volume</span>
-                  <strong>{volumePercentLabel}</strong>
-                </div>
-                <div>
-                  <span>Queue</span>
-                  <strong>{queueLengthLabel}</strong>
-                </div>
-              </div>
-
-              <div class="settings-control-list">
-                {#if platformCapabilities?.linuxNotifications !== false}
-                  <label class="settings-toggle-row">
-                    <span>Track change notifications</span>
-                    <input
-                      type="checkbox"
-                      checked={trackNotificationsEnabled}
-                      onchange={handleTrackNotificationsSettingChange}
-                    />
-                    <strong>{trackNotificationsEnabled ? "On" : "Off"}</strong>
-                  </label>
-                  <div>
-                    <span>Notification support</span>
-                    <strong>Linux only</strong>
-                    <small>Uses the system desktop notification service.</small>
-                  </div>
-                {:else}
-                  <div>
-                    <span>Track change notifications</span>
-                    <strong>Unavailable</strong>
-                    <small>Linux-only in Cassette 0.1.0-beta.9.</small>
-                  </div>
-                {/if}
-              </div>
-
-              {#if platformCapabilities?.linuxNotifications !== false && trackNotificationsEnabled}
-                <div class="settings-actions">
-                  <button type="button" onclick={handleTestTrackNotification}>
-                    Test Notification
-                  </button>
-                </div>
-                {#if trackNotificationStatus}
-                  <p class="form-message" class:error={trackNotificationStatusIsError} role="status">{trackNotificationStatus}</p>
-                {/if}
-              {/if}
-
-              <div class="settings-actions">
-                <button type="button" disabled={playbackQueue.length === 0} onclick={handleSettingsClearQueue}>
-                  Clear Queue
-                </button>
-                <button class="primary" type="button" onclick={openShortcutHelp}>
-                  Keyboard Shortcut Help
-                </button>
-                <button type="button" disabled title="Coming later: reset needs explicit playback-engine semantics">
-                  Reset Playback State
-                  <span>Coming later</span>
-                </button>
-              </div>
-            </section>
-
-            <section class="settings-section" aria-labelledby="settings-lyrics-title">
-              <div class="settings-section-header">
-                <div>
-                  <p class="eyebrow">Lyrics</p>
-                  <h4 id="settings-lyrics-title">Lookup</h4>
-                </div>
-                <span class="settings-pill">{autoFindLyricsEnabled ? "Auto" : "Manual"}</span>
-              </div>
-
-              <div class="settings-control-list">
-                <label class="settings-toggle-row">
-                  <span>Auto-find lyrics</span>
-                  <input
-                    type="checkbox"
-                    checked={autoFindLyricsEnabled}
-                    onchange={handleAutoFindLyricsSettingChange}
-                  />
-                  <strong>{autoFindLyricsEnabled ? "On" : "Off"}</strong>
-                </label>
-              </div>
-            </section>
-
-            <section class="settings-section" aria-labelledby="settings-interface-title">
-              <div class="settings-section-header">
-                <div>
-                  <p class="eyebrow">Interface</p>
-                  <h4 id="settings-interface-title">Display preferences</h4>
-                </div>
-                <span class="settings-pill">{themePresets.find((theme) => theme.id === selectedTheme)?.name ?? "Cassette Teal"}</span>
-              </div>
-
-              <div class="theme-preset-grid" aria-label="Theme presets">
-                {#each themePresets as theme}
-                  <button
-                    class:selected={selectedTheme === theme.id}
-                    type="button"
-                    aria-pressed={selectedTheme === theme.id}
-                    onclick={() => handleThemeSelect(theme.id)}
-                  >
-                    <span class="theme-swatch-row" aria-hidden="true">
-                      {#each theme.swatches as swatch}
-                        <span style={`--swatch-color: ${swatch}`}></span>
+                  {#if libraryFolders.length > 0}
+                    <ul class="folder-scan-list">
+                      {#each libraryFolders as folder (folder.path)}
+                        <li>
+                          <div><strong>{folder.path}</strong>
+                            {#if folder.error}
+                              <small>{folder.error} · Existing tracks kept</small>
+                            {:else if folder.scannedAt}
+                              <small>{folder.added} added · {folder.updated} updated · {folder.skipped} skipped</small>
+                            {/if}
+                          </div>
+                          <button type="button" disabled={isScanning} onclick={() => void handleScanLibrary(false, false, folder.path)}>Rescan folder</button>
+                        </li>
                       {/each}
-                    </span>
-                    <strong>{theme.name}</strong>
-                    <small>{theme.description}</small>
-                  </button>
-                {/each}
-              </div>
+                    </ul>
+                  {/if}
 
-              <div class="settings-control-list">
-                <label class="settings-toggle-row">
-                  <span>Songs list numbers</span>
-                  <input type="checkbox" checked={showSongListNumbers} onchange={handleSongListNumbersSettingChange} />
-                  <strong>{showSongListNumbers ? "Shown" : "Hidden"}</strong>
-                  <small>Show positions in the current Songs sort and filters. Choose Most played to see listening rank.</small>
-                </label>
-                <div>
-                  <span>Album track numbers</span>
-                  <strong>Enabled</strong>
-                  <small>Always shown in album detail</small>
-                </div>
-                <label class="settings-toggle-row">
-                  <span>Album play totals</span>
-                  <input type="checkbox" checked={showAlbumPlayCounts} onchange={(event) => updatePlayCountVisibility(event, "albums")} />
-                  <strong>{showAlbumPlayCounts ? "Shown" : "Hidden"}</strong>
-                  <small>Sum of the play counts for tracks on each album.</small>
-                </label>
-                <label class="settings-toggle-row">
-                  <span>Artist play totals</span>
-                  <input type="checkbox" checked={showArtistPlayCounts} onchange={(event) => updatePlayCountVisibility(event, "artists")} />
-                  <strong>{showArtistPlayCounts ? "Shown" : "Hidden"}</strong>
-                  <small>Sum of play counts for tracks credited to each artist.</small>
-                </label>
-                <label class="settings-toggle-row">
-                  <span>Genre play totals</span>
-                  <input type="checkbox" checked={showGenrePlayCounts} onchange={(event) => updatePlayCountVisibility(event, "genres")} />
-                  <strong>{showGenrePlayCounts ? "Shown" : "Hidden"}</strong>
-                  <small>Each track contributes its plays to every assigned genre.</small>
-                </label>
-                <label class="settings-toggle-row">
-                  <span>Album track play counts</span>
-                  <input type="checkbox" checked={showAlbumTrackPlayCounts} onchange={(event) => updatePlayCountVisibility(event, "albumTracks")} />
-                  <strong>{showAlbumTrackPlayCounts ? "Shown" : "Hidden"}</strong>
-                  <small>Show individual all-time counts in album detail.</small>
-                </label>
-              </div>
-            </section>
-
-            <section class="settings-section" aria-labelledby="settings-tools-title">
-              <div class="settings-section-header">
-                <div>
-                  <p class="eyebrow">Tools</p>
-                  <h4 id="settings-tools-title">Library utilities</h4>
-                </div>
-              </div>
-
-              <div class="settings-tool-grid">
-                <button type="button" onclick={handleLibraryHealthSelect}>
-                  <span class="health-mark" aria-hidden="true">H</span>
-                  <strong>Library Health</strong>
-                  <small>{libraryHealthIssueCount} {libraryHealthIssueCount === 1 ? "issue" : "issues"} found</small>
-                </button>
-                <button type="button" onclick={openShortcutHelp}>
-                  <span class="shortcut-mark" aria-hidden="true">?</span>
-                  <strong>Keyboard Shortcuts</strong>
-                  <small>Show the shortcut overlay</small>
-                </button>
-                <button type="button" onclick={handleMixBuilderSelect}>
-                  <span class="mix-tool-mark" aria-hidden="true">M</span>
-                  <strong>Mix Builder</strong>
-                  <small>Build a local queue from genres, artists, and albums</small>
-                </button>
-              </div>
-            </section>
-
-            <section class="settings-section updates-section" aria-labelledby="settings-updates-title">
-              <div class="settings-section-header">
-                <div>
-                  <p class="eyebrow">Updates</p>
-                  <h4 id="settings-updates-title">{isWindows ? "Windows prerelease" : "Linux beta channel"}</h4>
-                </div>
-                <span class="settings-pill">Version {appVersion}</span>
-              </div>
-
-                <div class="settings-control-list">
-                  <label class="settings-toggle-row">
-                    <span>Automatic update checks</span>
-                    <input
-                      type="checkbox"
-                      checked={automaticUpdateChecksEnabled}
-                      onchange={handleAutomaticUpdateSettingChange}
-                    />
-                    <strong>{automaticUpdateChecksEnabled ? "On" : "Off"}</strong>
-                    <small>At most once every 24 hours. Available updates are never installed automatically.</small>
-                  </label>
-                  <div>
-                    <span>Installation type</span>
-                    <strong>{updatePackageLabel}</strong>
-                    <small>
-                      {updateRuntime?.canSelfInstall
-                        ? "Cassette installs verified updates after you confirm."
-                        : "You can download a new installer from GitHub Releases."}
-                    </small>
+                  <div class="settings-actions">
+                    <button class="primary" type="button" disabled={isScanning} onclick={() => void handleScanLibrary()}>
+                      {isScanning ? "Scanning..." : scannedFolder ? "Rescan Library" : "Scan Library"}
+                    </button>
+                    <button type="button" disabled={isScanning} onclick={() => void handleScanLibrary(true)}>
+                      Change Library Folder
+                    </button>
+                    <button type="button" disabled={isScanning} onclick={() => void handleScanLibrary(false, true)}>Add Music Folder</button>
                   </div>
-                </div>
+                </section>
 
-                <div class="settings-actions">
-                  <button type="button" disabled={!updateRuntime || updateIsBusy} onclick={handleManualUpdateCheck}>
-                    {updateCheckState === "checking" ? "Checking..." : "Check for updates"}
-                  </button>
-                  <button type="button" onclick={handleViewUpdateDownload}>GitHub Releases</button>
-                </div>
-
-                {#if updateRuntime?.packageKind === "appimage" && !updateRuntime.development}
-                  <div class="settings-control-list">
+                <section class="settings-section" aria-labelledby="settings-playback-title">
+                  <div class="settings-section-header">
+                    <h3 id="settings-playback-title" tabindex="-1">Playback</h3>
+                    <span class="settings-pill">{isPlaying ? "Playing" : currentTrack ? "Paused" : "Idle"}</span>
+                  </div>
+                  <div class="settings-status-list">
                     <div>
-                      <span>Applications menu</span>
-                      <strong>
-                        {appImageMenuStatus?.needsRefresh
-                          ? "Launcher needs refresh"
-                          : appImageMenuStatus?.installed
-                            ? "Cassette AppImage launcher added"
-                            : "Launcher not added"}
-                      </strong>
-                      <small>
-                        The launcher points to this AppImage's current location. If you move or delete the AppImage,
-                        launch it from the new location and add or refresh the launcher again.
-                      </small>
-                      {#if appImageMenuStatus}
-                        <small>Current AppImage: {appImageMenuStatus.imagePath}</small>
-                      {/if}
+                      <span>Shuffle</span>
+                      <strong>{isShuffleEnabled ? "On" : "Off"}</strong>
+                    </div>
+                    <div>
+                      <span>Repeat</span>
+                      <strong>{repeatMode === "all" ? "Queue" : repeatMode === "one" ? "Track" : "Off"}</strong>
+                    </div>
+                    <div>
+                      <span>Volume</span>
+                      <strong>{volumePercentLabel}</strong>
+                    </div>
+                    <div>
+                      <span>Queue</span>
+                      <strong>{queueLengthLabel}</strong>
                     </div>
                   </div>
-                  <div class="settings-actions">
-                    <button type="button" disabled={appImageMenuBusy || updateIsBusy} onclick={handleAddAppImageToMenu}>
-                      {appImageMenuBusy ? "Working..." : appImageMenuStatus?.installed ? "Refresh applications-menu launcher" : "Add to applications menu"}
-                    </button>
-                    {#if appImageMenuStatus?.installed}
-                      <button class="danger" type="button" disabled={appImageMenuBusy || updateIsBusy} onclick={handleRemoveAppImageFromMenu}>
-                        Remove AppImage launcher
-                      </button>
+
+                  <div class="settings-control-list">
+                    <label class="settings-toggle-row">
+                      <span>Gapless playback</span>
+                      <input type="checkbox" checked={gaplessEnabled} onchange={(event) => {
+                        gaplessEnabled = event.currentTarget.checked;
+                        writePreference("cassette:gapless", gaplessEnabled ? "on" : "off");
+                      }} />
+                      <small>Play consecutive tracks without a pause between them.</small>
+                    </label>
+                    <label class="settings-toggle-row">
+                      <span>Auto-find lyrics</span>
+                      <input type="checkbox" checked={autoFindLyricsEnabled} onchange={handleAutoFindLyricsSettingChange} />
+                      <small>Look for lyrics when a track plays.</small>
+                    </label>
+                    {#if platformCapabilities?.linuxNotifications !== false}
+                      <label class="settings-toggle-row">
+                        <span>Track change notifications</span>
+                        <input
+                          type="checkbox"
+                          checked={trackNotificationsEnabled}
+                          onchange={handleTrackNotificationsSettingChange}
+                        />
+                        <small>Show a desktop notification when the track changes.</small>
+                      </label>
                     {/if}
                   </div>
-                  {#if appImageMenuMessage}
-                    <p class="form-message" class:error={appImageMenuIsError} role={appImageMenuIsError ? "alert" : "status"}>
-                      {appImageMenuMessage}
+
+                  {#if platformCapabilities?.linuxNotifications !== false && trackNotificationsEnabled}
+                    <div class="settings-actions">
+                      <button type="button" onclick={handleTestTrackNotification}>
+                        Test Notification
+                      </button>
+                    </div>
+                    {#if trackNotificationStatus}
+                      <p class="form-message" class:error={trackNotificationStatusIsError} role="status">{trackNotificationStatus}</p>
+                    {/if}
+                  {/if}
+
+                  <div class="settings-actions">
+                    <button type="button" disabled={playbackQueue.length === 0} onclick={handleSettingsClearQueue}>
+                      Clear Queue
+                    </button>
+                  </div>
+                </section>
+
+                <section class="settings-section stats-transfer-panel" aria-labelledby="history-transfer-title">
+                  <div class="settings-section-header">
+                    <h3 id="history-transfer-title" tabindex="-1">Listening history</h3>
+                  </div>
+                  <label class="listen-threshold">
+                    <span>Show listening activity as</span>
+                    <select value={listeningTimeEnabled ? "1" : "0"} onchange={(event) => {
+                      listeningTimeEnabled = event.currentTarget.value === "1";
+                      writePreference("cassette:listening-time", listeningTimeEnabled ? "1" : "0");
+                    }}>
+                      <option value="0">Play count</option>
+                      <option value="1">Listening time</option>
+                    </select>
+                  </label>
+                  <label class="listen-threshold">
+                    <span>Count a listen after</span>
+                    <select value={listenPercentage} onchange={(event) => {
+                      listenPercentage = Number(selectValue(event));
+                      writePreference("cassette:listen-percentage", String(listenPercentage));
+                    }}>
+                      {#each listenPercentages as percentage}
+                        <option value={percentage}>{percentage}% of the track</option>
+                      {/each}
+                    </select>
+                  </label>
+                  <details class="ignored-tracks">
+                    <summary>Ignored tracks ({ignoredTrackIds.size})</summary>
+                    {#if ignoredTrackIds.size === 0}
+                      <p>Right-click a song to ignore it. On an album, choose Select tracks to ignore several together.</p>
+                    {:else}
+                      <ul class="folder-scan-list">
+                        {#each [...ignoredTrackIds].sort() as id (id)}
+                          {@const track = libraryTracksById.get(id)}
+                          <li>
+                            <div><strong>{track?.title ?? id}</strong>{#if track?.album}<small>{track.album}</small>{/if}</div>
+                            <button type="button" disabled={savingIgnoredTracks} onclick={() => void updateIgnoredTracks([id], false)}>Stop ignoring</button>
+                          </li>
+                        {/each}
+                      </ul>
+                    {/if}
+                  </details>
+                  <div class="settings-subsection">
+                    <h4>History backup</h4>
+                    <p>Back up your play history and review matches before importing. Listening time is stored on this device.</p>
+                    <div class="stats-transfer-actions">
+                      <button type="button" disabled={historyBusy} onclick={() => void handleExportListeningHistory()}>Export listening history</button>
+                      <button type="button" disabled={historyBusy} onclick={() => void handlePreviewListeningHistory()}>Import listening history…</button>
+                    </div>
+                    {#if historyBusy}<p role="status" class="stats-status">Preparing listening history… Verifying audio identities can take a while for a large library.</p>{/if}
+                    {#if historyError}<p role="alert" class="stats-status">{historyError}</p>{/if}
+                    {#if historyMessage}<p role="status" class="stats-status">{historyMessage}</p>{/if}
+                    {#if historyImportPreview}
+                      <div class="stats-import-preview">
+                        <h5>Import preview</h5>
+                        <p>{historyImportPreview.matchedTracks} matched · {historyImportPreview.unmatchedTracks} unmatched · {historyImportPreview.ambiguousTracks} ambiguous tracks</p>
+                        <p>{historyImportPreview.newEvents} new · {historyImportPreview.duplicateEvents} duplicate dated events · {historyImportPreview.undatedPlays} source undated plays</p>
+                        {#if historyImportPreview.conflicts.length > 0}
+                          <ul>{#each historyImportPreview.conflicts as conflict}<li>{conflict}</li>{/each}</ul>
+                        {/if}
+                        <div class="stats-import-tracks">
+                          {#each historyImportPreview.tracks.slice(0, historyPreviewLimit) as item (item.referenceId)}
+                            <div class="stats-import-track">
+                              <strong>{item.title}</strong><span>{item.artist ?? "Unknown Artist"} · {item.status} · {item.newEvents} new / {item.duplicateEvents} duplicate events</span>
+                              {#if item.conflict}<small>{item.conflict}</small>{/if}
+                              {#if item.status === "ambiguous" && item.candidates.length > 0}
+                                <label for={`associate-${item.referenceId}`}>Associate audio-identical track</label>
+                                <select id={`associate-${item.referenceId}`} value={historyAssociationTargets[item.pendingTrackId] ?? ""} onchange={(event) => { historyAssociationTargets[item.pendingTrackId] = event.currentTarget.value; }}>
+                                  <option value="">Choose a track</option>
+                                  {#each item.candidates as candidate}<option value={candidate}>{tracks.find((track) => track.id === candidate)?.title ?? candidate}</option>{/each}
+                                </select>
+                                <button type="button" disabled={historyBusy || !item.retained || !historyAssociationTargets[item.pendingTrackId]} onclick={() => void handleAssociateListeningHistory(item.pendingTrackId)}>Associate retained history</button>
+                                {#if !item.retained}<small>Import first to retain this history, then choose an audio-identical track.</small>{/if}
+                              {/if}
+                            </div>
+                          {/each}
+                        </div>
+                        {#if historyPreviewLimit < historyImportPreview.tracks.length}
+                          <button type="button" onclick={() => { historyPreviewLimit = nextStatsLimit(historyPreviewLimit, historyImportPreview?.tracks.length ?? 0); }}>Show 50 more track references</button>
+                        {/if}
+                        <p>Showing {Math.min(historyPreviewLimit, historyImportPreview.tracks.length)} of {historyImportPreview.tracks.length} track references. All references are included when importing.</p>
+                        <button type="button" disabled={historyBusy || historyImportPreview.conflicts.length > 0} onclick={() => void handleApplyListeningHistory()}>Import new history</button>
+                        <button type="button" disabled={historyBusy} onclick={() => { historyImportPreview = null; historyImportPath = null; }}>Cancel preview</button>
+                      </div>
+                    {/if}
+                  </div>
+                </section>
+
+                <section class="settings-section" aria-labelledby="settings-interface-title">
+                  <div class="settings-section-header">
+                    <h3 id="settings-interface-title" tabindex="-1">Appearance</h3>
+                  </div>
+
+                  <div class="theme-preset-grid" aria-label="Theme presets">
+                    {#each themePresets as theme}
+                      <button
+                        class:selected={selectedTheme === theme.id}
+                        type="button"
+                        aria-pressed={selectedTheme === theme.id}
+                        onclick={() => handleThemeSelect(theme.id)}
+                      >
+                        <span class="theme-swatch-row" aria-hidden="true">
+                          {#each theme.swatches as swatch}
+                            <span style={`--swatch-color: ${swatch}`}></span>
+                          {/each}
+                        </span>
+                        <strong>{theme.name}</strong>
+                        <small>{theme.description}</small>
+                      </button>
+                    {/each}
+                  </div>
+
+                  <div class="settings-control-list">
+                    <label class="settings-toggle-row">
+                      <span>Songs list numbers</span>
+                      <input type="checkbox" checked={showSongListNumbers} onchange={handleSongListNumbersSettingChange} />
+                      <small>Show each song’s position in the current sort order.</small>
+                    </label>
+                    <label class="settings-toggle-row">
+                      <span>Album listening totals</span>
+                      <input type="checkbox" checked={showAlbumPlayCounts} onchange={(event) => updatePlayCountVisibility(event, "albums")} />
+                      <small>Sum of the play counts for tracks on each album.</small>
+                    </label>
+                    <label class="settings-toggle-row">
+                      <span>Artist listening totals</span>
+                      <input type="checkbox" checked={showArtistPlayCounts} onchange={(event) => updatePlayCountVisibility(event, "artists")} />
+                      <small>Sum of play counts for tracks credited to each artist.</small>
+                    </label>
+                    <label class="settings-toggle-row">
+                      <span>Genre listening totals</span>
+                      <input type="checkbox" checked={showGenrePlayCounts} onchange={(event) => updatePlayCountVisibility(event, "genres")} />
+                      <small>Each track contributes its plays to every assigned genre.</small>
+                    </label>
+                    <label class="settings-toggle-row">
+                      <span>Album track listening totals</span>
+                      <input type="checkbox" checked={showAlbumTrackPlayCounts} onchange={(event) => updatePlayCountVisibility(event, "albumTracks")} />
+                      <small>Show individual all-time counts in album detail.</small>
+                    </label>
+                  </div>
+                </section>
+
+                <section class="settings-section" aria-labelledby="settings-tools-title">
+                  <div class="settings-section-header">
+                    <h3 id="settings-tools-title" tabindex="-1">Tools</h3>
+                  </div>
+
+                  <div class="settings-tool-grid">
+                    <button type="button" onclick={handleLibraryHealthSelect}>
+                      <span class="health-mark" aria-hidden="true">H</span>
+                      <span class="settings-tool-copy">
+                        <strong>Library Health</strong>
+                        <small>{libraryHealthIssueCount} {libraryHealthIssueCount === 1 ? "issue" : "issues"} found</small>
+                      </span>
+                    </button>
+                    <button type="button" onclick={openShortcutHelp}>
+                      <span class="shortcut-mark" aria-hidden="true">?</span>
+                      <strong>Keyboard Shortcuts</strong>
+                    </button>
+                    <button type="button" onclick={handleMixBuilderSelect}>
+                      <span class="mix-tool-mark" aria-hidden="true">M</span>
+                      <span class="settings-tool-copy">
+                        <strong>Mix Builder</strong>
+                        <small>Build a queue from your library</small>
+                      </span>
+                    </button>
+                  </div>
+                </section>
+
+                <section class="settings-section updates-section" aria-labelledby="settings-updates-title">
+                  <div class="settings-section-header">
+                    <h3 id="settings-updates-title" tabindex="-1">Updates</h3>
+                    <span class="settings-pill">{isWindows ? "Windows prerelease" : "Linux beta channel"}</span>
+                  </div>
+
+                  <div class="settings-control-list">
+                    <label class="settings-toggle-row">
+                      <span>Automatic update checks</span>
+                      <input
+                        type="checkbox"
+                        checked={automaticUpdateChecksEnabled}
+                        onchange={handleAutomaticUpdateSettingChange}
+                      />
+                      <small>At most once every 24 hours. Available updates are never installed automatically.</small>
+                    </label>
+                    <div>
+                      <span>Installation type</span>
+                      <strong>{updatePackageLabel}</strong>
+                      <small>
+                        {updateRuntime?.canSelfInstall
+                          ? "Cassette installs verified updates after you confirm."
+                          : "You can download a new installer from GitHub Releases."}
+                      </small>
+                    </div>
+                  </div>
+
+                  <div class="settings-actions">
+                    <button type="button" disabled={!updateRuntime || updateIsBusy} onclick={handleManualUpdateCheck}>
+                      {updateCheckState === "checking" ? "Checking..." : "Check for updates"}
+                    </button>
+                    <button type="button" onclick={handleViewUpdateDownload}>GitHub Releases</button>
+                  </div>
+
+                  {#if updateRuntime?.packageKind === "appimage" && !updateRuntime.development}
+                    <div class="settings-control-list">
+                      <div>
+                        <span>Applications menu</span>
+                        <strong>
+                          {appImageMenuStatus?.needsRefresh
+                            ? "Launcher needs refresh"
+                            : appImageMenuStatus?.installed
+                              ? "Cassette AppImage launcher added"
+                              : "Launcher not added"}
+                        </strong>
+                        <small>
+                          The launcher points to this AppImage's current location. If you move or delete the AppImage,
+                          launch it from the new location and add or refresh the launcher again.
+                        </small>
+                        {#if appImageMenuStatus}
+                          <small>Current AppImage: {appImageMenuStatus.imagePath}</small>
+                        {/if}
+                      </div>
+                    </div>
+                    <div class="settings-actions">
+                      <button type="button" disabled={appImageMenuBusy || updateIsBusy} onclick={handleAddAppImageToMenu}>
+                        {appImageMenuBusy ? "Working..." : appImageMenuStatus?.installed ? "Refresh applications-menu launcher" : "Add to applications menu"}
+                      </button>
+                      {#if appImageMenuStatus?.installed}
+                        <button class="danger" type="button" disabled={appImageMenuBusy || updateIsBusy} onclick={handleRemoveAppImageFromMenu}>
+                          Remove AppImage launcher
+                        </button>
+                      {/if}
+                    </div>
+                    {#if appImageMenuMessage}
+                      <p class="form-message" class:error={appImageMenuIsError} role={appImageMenuIsError ? "alert" : "status"}>
+                        {appImageMenuMessage}
+                      </p>
+                    {/if}
+                  {/if}
+
+                  {#if unavailableUpdateMessage(updateRuntime)}
+                    <p class="settings-note">{unavailableUpdateMessage(updateRuntime)}</p>
+                  {/if}
+
+                  {#if lastSuccessfulUpdateCheck !== null}
+                    <p class="settings-note">Last successful check: {formatDateTime(lastSuccessfulUpdateCheck / 1000)}</p>
+                  {/if}
+
+                  {#if availableUpdateVersion}
+                    <article class="update-available-card">
+                      <div>
+                        <p class="eyebrow">Update available</p>
+                        <h5>Cassette {availableUpdateVersion}</h5>
+                      </div>
+                      <div class="update-release-notes">
+                        <strong>Release notes</strong>
+                        <p>{availableUpdateNotes}</p>
+                      </div>
+
+                      {#if updateCheckState === "downloading" || updateCheckState === "installing"}
+                        <div class="update-progress" aria-live="polite">
+                          {#if updateDownloadProgress?.percent !== null && updateDownloadProgress?.percent !== undefined}
+                            <progress max="100" value={updateDownloadProgress.percent}></progress>
+                          {:else}
+                            <progress></progress>
+                          {/if}
+                          <strong>{updateProgressLabel}</strong>
+                        </div>
+                      {:else}
+                        <div class="settings-actions">
+                          {#if updateRuntime?.canSelfInstall}
+                            <button class="primary" type="button" disabled={updateIsBusy || updateWaitsForLibrary} onclick={handleInstallCassetteUpdate}>
+                              Update and restart
+                            </button>
+                          {:else}
+                            <button class="primary" type="button" onclick={handleViewUpdateDownload}>
+                              View download
+                            </button>
+                          {/if}
+                          <button type="button" onclick={handleUpdateLater}>Later</button>
+                        </div>
+                        {#if updateWaitsForLibrary}
+                          <p class="settings-note">Finish the library operation before installing the update.</p>
+                        {/if}
+                      {/if}
+                    </article>
+                  {/if}
+
+                  {#if updateStatusMessage}
+                    <p class="form-message" class:error={updateStatusIsError} role={updateStatusIsError ? "alert" : "status"}>
+                      {updateStatusMessage}
                     </p>
                   {/if}
-                {/if}
 
-                {#if unavailableUpdateMessage(updateRuntime)}
-                  <p class="settings-note">{unavailableUpdateMessage(updateRuntime)}</p>
-                {/if}
+                </section>
 
-                {#if lastSuccessfulUpdateCheck !== null}
-                  <p class="settings-note">Last successful check: {formatDateTime(lastSuccessfulUpdateCheck / 1000)}</p>
-                {/if}
+                <section class="settings-section about-section" aria-labelledby="settings-about-title">
+                  <div class="settings-section-header">
+                    <h3 id="settings-about-title" tabindex="-1">About</h3>
+                  </div>
 
-                {#if availableUpdateVersion}
-                  <article class="update-available-card">
+                  <div class="about-grid">
                     <div>
-                      <p class="eyebrow">Update available</p>
-                      <h5>Cassette {availableUpdateVersion}</h5>
+                      <span>Cassette</span>
+                      <strong>{appVersion}</strong>
                     </div>
-                    <div class="update-release-notes">
-                      <strong>Release notes</strong>
-                      <p>{availableUpdateNotes}</p>
+                    <div>
+                      <span>Platform</span>
+                      <strong>{isWindows ? "Windows" : "Linux"}</strong>
                     </div>
-
-                    {#if updateCheckState === "downloading" || updateCheckState === "installing"}
-                      <div class="update-progress" aria-live="polite">
-                        {#if updateDownloadProgress?.percent !== null && updateDownloadProgress?.percent !== undefined}
-                          <progress max="100" value={updateDownloadProgress.percent}></progress>
-                        {:else}
-                          <progress></progress>
-                        {/if}
-                        <strong>{updateProgressLabel}</strong>
-                      </div>
-                    {:else}
-                      <div class="settings-actions">
-                        {#if updateRuntime?.canSelfInstall}
-                          <button class="primary" type="button" disabled={updateIsBusy || updateWaitsForLibrary} onclick={handleInstallCassetteUpdate}>
-                            Update and restart
-                          </button>
-                        {:else}
-                          <button class="primary" type="button" onclick={handleViewUpdateDownload}>
-                            View download
-                          </button>
-                        {/if}
-                        <button type="button" onclick={handleUpdateLater}>Later</button>
-                      </div>
-                      {#if updateWaitsForLibrary}
-                        <p class="settings-note">Finish the library operation before installing the update.</p>
-                      {/if}
-                    {/if}
-                  </article>
-                {/if}
-
-              {#if updateStatusMessage}
-                <p class="form-message" class:error={updateStatusIsError} role={updateStatusIsError ? "alert" : "status"}>
-                  {updateStatusMessage}
-                </p>
-              {/if}
-
-              {#if !isWindows}
-                <p class="settings-note">
-                  AppImage updates require a valid Tauri signature and explicit confirmation. DEB, RPM, and unknown
-                  installations remain under your package manager's control. Updating does not replace Cassette's user data.
-                </p>
-              {/if}
-            </section>
-
-            <section class="settings-section about-section" aria-labelledby="settings-about-title">
-              <div class="settings-section-header">
-                <div>
-                  <p class="eyebrow">About</p>
-                  <h4 id="settings-about-title">Cassette</h4>
-                </div>
-                <span class="settings-pill">Version {appVersion}</span>
+                  </div>
+                </section>
               </div>
-
-              <div class="about-grid">
-                <div>
-                  <span>Description</span>
-                  <strong>Local-first music player</strong>
-                </div>
-                <div>
-                  <span>Platform</span>
-                  <strong>{isWindows ? "Windows" : "Linux-first"}</strong>
-                </div>
-                <div>
-                  <span>Tech stack</span>
-                  <strong>Tauri, Svelte, Rust, GStreamer</strong>
-                </div>
-              </div>
-              <p class="settings-note">Cassette does not modify your audio files unless future tag editing is explicitly used.</p>
-            </section>
+            </div>
           </section>
         {/if}
       {/if}
@@ -10580,77 +10690,61 @@
   {/if}
 
   {#if isQueueOpen}
-    <button class="queue-backdrop" type="button" aria-label="Close Up Next" onclick={() => isQueueOpen = false}></button>
+    {@const current = queuePanelEntries.find((entry) => entry.queueIndex === currentQueueIndex)}
+    {@const upcoming = queuePanelEntries.filter((entry) => entry.queueIndex !== currentQueueIndex)}
+    {#snippet queueRow(entry: QueuePanelEntry, nowPlaying: boolean)}
+      <div class="queue-row" class:active={nowPlaying} role="group" aria-label={`Queue track ${entry.track.title}`}
+        oncontextmenu={(event) => {
+          event.preventDefault();
+          openTrackContextMenu(entry.track, playbackQueue, event.clientX, event.clientY);
+        }}>
+        <button class="queue-row-main" type="button" title={entry.track.title}
+          onclick={() => nowPlaying ? handleTogglePlayback() : playQueuedTrackAtIndex(entry.queueIndex)}>
+          {#if !nowPlaying}<span class="queue-row-position">{queuePositionLabel(entry.offset)}</span>{/if}
+          <span class="queue-row-art" aria-hidden="true">
+            <span>{entry.track.title.slice(0, 1)}</span>
+            {#if trackCoverPath(entry.track)}
+              <img src={localImageSource(trackCoverPath(entry.track)) ?? ""} alt="" loading="lazy" onload={showLoadedImage} onerror={hideBrokenImage} />
+            {/if}
+          </span>
+          <span class="queue-row-copy">
+            {#if nowPlaying}<small class="queue-current-label">Now playing</small>{/if}
+            <strong>{entry.track.title}</strong>
+            <small>{entry.track.artist ?? "Unknown Artist"}{entry.track.album ? ` · ${entry.track.album}` : ""}</small>
+          </span>
+        </button>
+        <span class="queue-row-duration">{formatPlaybackTime(entry.track.durationSeconds)}</span>
+        {#if !nowPlaying}
+          <button class="queue-remove" type="button" title="Remove from queue" aria-label={`Remove ${entry.track.title} from queue`}
+            onclick={(event) => handleRemoveQueueTrack(event, entry.queueIndex)}>×</button>
+        {/if}
+      </div>
+    {/snippet}
+
+    <button class="queue-backdrop" type="button" aria-label="Dismiss queue" onclick={() => isQueueOpen = false}></button>
     <aside class="queue-panel" aria-label="Up Next">
       <header class="queue-panel-header">
         <div class="queue-panel-title">
-          <p class="eyebrow">Playback</p>
-          <div>
-            <h3>Up Next</h3>
-            <span>{queueLengthLabel}</span>
-          </div>
+          <h3>Up Next</h3>
+          <span>{upcoming.length} upcoming</span>
         </div>
         <div class="queue-panel-actions">
-          <button class="secondary" type="button" disabled={playbackQueue.length === 0} onclick={() => handleClearQueue(true)}>
-            Clear
-          </button>
-          <button class="icon" type="button" aria-label="Close Up Next" onclick={() => isQueueOpen = false}>
-            X
-          </button>
+          <button type="button" disabled={upcoming.length === 0} onclick={() => handleClearQueue(true)}>Clear</button>
+          <button class="icon" type="button" aria-label="Close Up Next" onclick={() => isQueueOpen = false}>×</button>
         </div>
       </header>
 
-      {#if queuePanelEntries.length === 0}
-        <div class="queue-empty-state">
-          <h3>Queue is empty</h3>
-          <p>Play an album, shuffle your library, or add tracks to queue.</p>
+      {#if current}{@render queueRow(current, true)}{/if}
+      {#if upcoming.length}
+        <div class="queue-list" aria-label="Upcoming tracks">
+          {#each upcoming as entry (`${entry.track.id}-${entry.queueIndex}`)}
+            {@render queueRow(entry, false)}
+          {/each}
         </div>
       {:else}
-        <div class="queue-list">
-          {#each queuePanelEntries as entry (`${entry.track.id}-${entry.queueIndex}`)}
-            <div
-              class:active={entry.queueIndex === currentQueueIndex}
-              class="queue-row"
-              title={entry.track.filePath}
-              role="group"
-              aria-label={`Queue track ${entry.track.title}`}
-              oncontextmenu={(event) => {
-                event.preventDefault();
-                openTrackContextMenu(entry.track, playbackQueue, event.clientX, event.clientY);
-              }}
-            >
-              <button class="queue-row-main" type="button" onclick={() => playQueuedTrackAtIndex(entry.queueIndex)}>
-                <span class="queue-row-position">{queuePositionLabel(entry.offset)}</span>
-                <span class="queue-row-art" aria-hidden="true">
-                  {#if trackCoverPath(entry.track)}
-                    <img src={localImageSource(trackCoverPath(entry.track)) ?? ""} alt="" loading="lazy" onload={showLoadedImage} onerror={hideBrokenImage} />
-                  {:else}
-                    <span>{entry.track.title.slice(0, 1)}</span>
-                  {/if}
-                </span>
-                <span class="queue-row-copy">
-                  <strong>{entry.track.title}</strong>
-                  <small>{entry.track.artist ?? "Unknown Artist"}</small>
-                  {#if entry.track.album}
-                    <small class="queue-row-album">{entry.track.album}</small>
-                  {/if}
-                </span>
-              </button>
-              <span class="queue-row-side">
-                <span class="queue-row-duration">{formatPlaybackTime(entry.track.durationSeconds)}</span>
-                {#if entry.queueIndex !== currentQueueIndex}
-                  <span class="queue-row-actions">
-                    <button type="button" onclick={() => playQueuedTrackAtIndex(entry.queueIndex)}>Play</button>
-                    <button type="button" aria-label={`Remove ${entry.track.title} from queue`} onclick={(event) => handleRemoveQueueTrack(event, entry.queueIndex)}>
-                      Remove
-                    </button>
-                  </span>
-                {:else}
-                  <span class="queue-current-label">Now Playing</span>
-                {/if}
-              </span>
-            </div>
-          {/each}
+        <div class="queue-empty-state">
+          <strong>{current ? "No upcoming tracks" : "Queue is empty"}</strong>
+          <p>Add tracks from a song, album, or playlist menu.</p>
         </div>
       {/if}
     </aside>
@@ -11071,7 +11165,6 @@
       >
         <header class="shortcuts-header">
           <div>
-            <p class="eyebrow">Keyboard</p>
             <h3 id="shortcuts-title">Keyboard Shortcuts</h3>
           </div>
           <button type="button" aria-label="Close keyboard shortcuts" onclick={closeShortcutHelp}>Close</button>
@@ -11122,7 +11215,7 @@
       {volume}
       {canPlayPrevious}
       {canPlayNext}
-      queueCount={playbackQueue.length}
+      queueCount={playableQueueOrder.length}
       {isQueueOpen}
       {isShuffleEnabled}
       {repeatMode}
@@ -11791,8 +11884,7 @@
   .album-card,
   .artist-card > div:last-child,
   .genre-card > div:last-child,
-  .playlist-card-copy,
-  .mix-tool-card > div:last-child {
+  .playlist-card-copy {
     min-width: 0;
   }
 
@@ -12157,11 +12249,17 @@
   .playlists-page,
   .playlist-detail-page {
     display: grid;
-    gap: 20px;
+    grid-template-columns: minmax(0, 1fr);
+    width: min(100%, 1320px);
+    margin-inline: auto;
+    gap: 22px;
+    container: playlists / inline-size;
   }
 
-  .playlists-page {
-    gap: 16px;
+  .playlist-feature-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 14px;
   }
 
   .playlists-page :global(.library-section) {
@@ -12175,7 +12273,6 @@
 
   .playlists-page :global(.section-header) {
     align-items: center;
-    justify-content: flex-start;
   }
 
   .home.playlists-view > .scan-error,
@@ -12194,38 +12291,27 @@
   .playlist-card-grid {
     display: grid;
     width: 100%;
-    grid-template-columns: repeat(auto-fill, minmax(min(100%, 260px), 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 280px), 1fr));
     align-items: stretch;
     justify-items: stretch;
-    gap: 16px;
-  }
-
-  .playlist-card-grid.smart,
-  .playlist-card-grid.tools {
-    grid-template-columns: repeat(auto-fill, minmax(min(100%, 260px), 1fr));
+    gap: 12px;
   }
 
   .playlist-library-card {
     display: grid;
     min-width: 0;
     gap: 12px;
-    border: 1px solid color-mix(in srgb, var(--border) 88%, transparent);
-    border-radius: 8px;
-    background:
-      linear-gradient(180deg, color-mix(in srgb, var(--panel-strong) 72%, transparent), color-mix(in srgb, var(--panel) 90%, transparent)),
-      var(--panel-soft);
-    padding: 12px;
-    transition:
-      border-color 150ms ease,
-      background 150ms ease,
-      box-shadow 150ms ease;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--panel-soft);
+    padding: 14px;
+    transition: border-color 150ms ease, background 150ms ease;
   }
 
   .playlist-library-card:hover,
   .playlist-library-card:focus-within {
     border-color: var(--accent-strong);
     background: color-mix(in srgb, var(--panel-hover) 88%, transparent);
-    box-shadow: 0 18px 44px rgba(0, 0, 0, 0.16);
   }
 
   .playlist-library-card.smart {
@@ -12241,7 +12327,7 @@
     border: 0;
     background: transparent;
     color: inherit;
-    cursor: default;
+    cursor: pointer;
     font: inherit;
     padding: 0;
     text-align: left;
@@ -12302,6 +12388,19 @@
     font-weight: 950;
   }
 
+  :is(.playlist-card-art, .playlist-hero-art).mosaic span:only-child {
+    grid-area: 1 / 1 / -1 / -1;
+  }
+
+  :is(.playlist-card-art, .playlist-hero-art).mosaic span:first-child:nth-last-child(2),
+  :is(.playlist-card-art, .playlist-hero-art).mosaic span:nth-child(2):last-child {
+    grid-row: 1 / -1;
+  }
+
+  :is(.playlist-card-art, .playlist-hero-art).mosaic span:nth-child(3):last-child {
+    grid-column: 1 / -1;
+  }
+
   .playlist-card-art.mosaic img,
   .playlist-hero-art.mosaic img {
     width: 100%;
@@ -12314,21 +12413,17 @@
     gap: 4px;
   }
 
-  .playlist-card-copy h3,
-  .playlist-card-copy p:not(.eyebrow),
-  .mix-tool-card h3,
-  .mix-tool-card p:not(.eyebrow) {
+  .playlist-card-copy h3 {
+    margin: 0;
+    font-size: 1.06rem;
+    line-height: 1.2;
     overflow: hidden;
     text-overflow: ellipsis;
-  }
-
-  .playlist-card-copy h3,
-  .mix-tool-card h3 {
     white-space: nowrap;
   }
 
-  .playlist-card-copy p:not(.eyebrow),
-  .mix-tool-card p:not(.eyebrow) {
+  .playlist-card-copy p,
+  .mix-tool-copy small {
     margin: 0;
     color: var(--text-soft);
     font-size: 0.86rem;
@@ -12355,14 +12450,13 @@
 
   .playlist-card-actions button,
   .playlist-hero-actions button,
-  .playlist-create-actions button,
-  .playlist-empty-state button {
+  .playlist-create-actions button {
     min-height: 32px;
     border: 1px solid var(--border-strong);
-    border-radius: 999px;
+    border-radius: 8px;
     background: color-mix(in srgb, var(--panel-strong) 82%, transparent);
     color: var(--text);
-    cursor: default;
+    cursor: pointer;
     font: inherit;
     font-size: 0.78rem;
     font-weight: 850;
@@ -12371,8 +12465,7 @@
 
   .playlist-card-actions button:first-child,
   .playlist-hero-actions button:first-child,
-  .playlist-create-actions button:first-child,
-  .playlist-empty-state button {
+  .playlist-create-actions button:first-child {
     border-color: var(--accent-strong);
     background: var(--accent-soft);
     color: var(--accent-text);
@@ -12383,9 +12476,7 @@
   .playlist-hero-actions button:hover:not(:disabled),
   .playlist-hero-actions button:focus-visible:not(:disabled),
   .playlist-create-actions button:hover:not(:disabled),
-  .playlist-create-actions button:focus-visible:not(:disabled),
-  .playlist-empty-state button:hover,
-  .playlist-empty-state button:focus-visible {
+  .playlist-create-actions button:focus-visible:not(:disabled) {
     border-color: var(--accent);
     background: color-mix(in srgb, var(--accent-soft) 84%, var(--panel-hover));
     color: var(--accent-text);
@@ -12406,8 +12497,15 @@
     color: var(--accent-text);
   }
 
-  .playlist-hero-actions button.more {
-    min-width: 54px;
+  .playlist-hero-actions button.more,
+  .playlist-card-actions button.playlist-card-menu {
+    min-width: 32px;
+    font-size: 1.12rem;
+    line-height: 1;
+  }
+
+  .playlist-card-actions button.playlist-card-menu {
+    margin-inline-start: auto;
   }
 
   .playlist-card-actions button:disabled,
@@ -12420,19 +12518,19 @@
 
   .mix-tool-card {
     display: grid;
-    grid-template-columns: 58px minmax(0, 1fr);
+    grid-template-columns: auto minmax(0, 1fr) auto;
     align-items: center;
     gap: 14px;
     width: 100%;
     min-width: 0;
-    min-height: 106px;
+    min-height: 112px;
     border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--border));
-    border-radius: 8px;
+    border-radius: 10px;
     background:
       linear-gradient(135deg, color-mix(in srgb, var(--accent-soft) 46%, transparent), transparent 58%),
       var(--panel-soft);
     color: inherit;
-    cursor: default;
+    cursor: pointer;
     font: inherit;
     padding: 16px;
     text-align: left;
@@ -12447,20 +12545,38 @@
     outline: none;
   }
 
-  .playlist-create-panel {
+  .mix-tool-copy {
     display: grid;
-    grid-template-columns: minmax(160px, 0.8fr) minmax(220px, 1fr) auto;
-    gap: 10px;
-    align-items: center;
-    justify-self: start;
-    width: min(100%, 820px);
-    border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--border));
-    border-radius: 8px;
-    background: color-mix(in srgb, var(--panel-soft) 84%, transparent);
-    padding: 12px;
+    min-width: 0;
+    gap: 5px;
   }
 
-  .playlist-create-panel input {
+  .mix-tool-copy strong {
+    font-size: 1.06rem;
+  }
+
+  .mix-tool-arrow {
+    color: var(--text-soft);
+    font-size: 1.5rem;
+  }
+
+  .playlist-create-panel {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    gap: 10px;
+    align-items: center;
+    border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--border));
+    border-radius: 10px;
+    background: color-mix(in srgb, var(--panel-soft) 84%, transparent);
+    padding: 14px;
+  }
+
+  .playlist-create-panel label {
+    font-weight: 700;
+  }
+
+  .playlist-create-panel input,
+  .playlist-search input {
     width: 100%;
     min-width: 0;
     min-height: 38px;
@@ -12475,18 +12591,33 @@
     padding: 0 11px;
   }
 
-  .playlist-create-panel input:focus {
+  .playlist-create-panel input:focus,
+  .playlist-search input:focus {
     border-color: var(--accent);
     box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 22%, transparent);
   }
 
   .playlist-create-panel .form-message {
-    grid-column: 2 / -1;
-    margin-top: -2px;
+    grid-column: 1 / -1;
   }
 
-  .playlist-empty-state {
+  .playlist-search {
+    width: min(100%, 480px);
+  }
+
+  .playlists-page .playlist-empty-state {
     gap: 8px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--panel-soft);
+    padding: clamp(16px, 4cqw, 28px);
+  }
+
+  @container playlists (max-width: 560px) {
+    .playlist-feature-grid,
+    .playlist-create-panel {
+      grid-template-columns: minmax(0, 1fr);
+    }
   }
 
   .playlist-status-pill {
@@ -13368,18 +13499,13 @@
     position: relative;
     isolation: isolate;
     display: grid;
-    grid-template-columns: minmax(132px, 178px) minmax(0, 1fr);
+    grid-template-columns: clamp(90px, 16cqw, 156px) minmax(0, 1fr);
     gap: clamp(18px, 2.4vw, 28px);
     align-items: center;
     overflow: hidden;
-    border: 1px solid rgba(50, 61, 75, 0.72);
-    border-radius: 8px;
-    background:
-      linear-gradient(115deg, rgba(22, 27, 35, 0.96), rgba(12, 15, 20, 0.96) 60%, rgba(16, 22, 28, 0.98)),
-      var(--panel);
-    box-shadow:
-      0 22px 58px rgba(0, 0, 0, 0.18),
-      inset 0 1px 0 rgba(255, 255, 255, 0.04);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--panel-soft);
     padding: clamp(18px, 2.6vw, 28px);
   }
 
@@ -13417,14 +13543,13 @@
     min-width: 0;
   }
 
-  .playlist-hero-copy h3 {
-    max-width: 980px;
+  .playlist-hero-copy h2 {
     margin: 0;
-    overflow: hidden;
+    overflow-wrap: anywhere;
     color: var(--text);
-    font-size: clamp(2rem, 4.8vw, 4rem);
-    line-height: 1.03;
-    text-overflow: ellipsis;
+    font-size: clamp(1.55rem, 4.4cqw, 3.25rem);
+    line-height: 1.05;
+    letter-spacing: -0.03em;
   }
 
   .playlist-hero-meta {
@@ -13435,14 +13560,25 @@
 
   .playlist-hero-meta span {
     min-height: 28px;
-    border: 1px solid rgba(61, 74, 91, 0.72);
+    border: 1px solid var(--border);
     border-radius: 999px;
-    background: rgba(12, 15, 20, 0.44);
+    background: var(--panel);
     color: var(--text-muted);
     font-size: 0.78rem;
     font-weight: 800;
     line-height: 1;
     padding: 7px 10px;
+  }
+
+  @container playlists (max-width: 425px) {
+    .playlist-hero {
+      grid-template-columns: minmax(0, 1fr);
+      padding: 16px;
+    }
+
+    .playlist-hero-art {
+      width: min(38%, 120px);
+    }
   }
 
   .artist-detail-header,
@@ -15472,10 +15608,88 @@
     }
   }
 
+  .organizer-header {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: end;
+    justify-content: space-between;
+    gap: 14px 24px;
+  }
+
+  .organizer-header h2 {
+    margin: 0;
+    font-size: clamp(2.25rem, 4.8vw, 3.65rem);
+    line-height: 1.05;
+    letter-spacing: -0.04em;
+    overflow-wrap: anywhere;
+  }
+
   .settings-panel {
     display: grid;
-    max-width: 1040px;
+    grid-template-columns: minmax(0, 1fr);
+    width: min(100%, 1320px);
+    margin-inline: auto;
+    gap: 24px;
+    container: settings / inline-size;
+  }
+
+  .settings-layout {
+    display: grid;
+    grid-template-columns: minmax(150px, 182px) minmax(0, 1fr);
+    align-items: start;
+    gap: 20px;
+  }
+
+  .settings-index {
+    position: sticky;
+    top: 12px;
+    display: grid;
+    gap: 4px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--panel-soft);
+    padding: 8px;
+  }
+
+  .settings-index button {
+    min-width: 0;
+    min-height: 34px;
+    border: 1px solid transparent;
+    border-radius: 7px;
+    background: transparent;
+    color: var(--text-muted);
+    cursor: pointer;
+    font: inherit;
+    font-size: 0.88rem;
+    font-weight: 700;
+    padding: 6px 9px;
+    text-align: left;
+  }
+
+  .settings-index button:hover,
+  .settings-index button:focus-visible {
+    border-color: var(--accent-strong);
+    background: var(--panel-hover);
+    color: var(--text);
+  }
+
+  .settings-sections {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
     gap: 16px;
+  }
+
+  @container settings (max-width: 740px) {
+    .settings-layout {
+      grid-template-columns: minmax(0, 1fr);
+      gap: 14px;
+    }
+
+    .settings-index {
+      position: static;
+      display: flex;
+      flex-wrap: wrap;
+    }
   }
 
   .cd-ripper-page {
@@ -15525,17 +15739,6 @@
     .cd-overview > div { padding-inline: 8px; }
   }
 
-  .settings-intro {
-    max-width: 760px;
-  }
-
-  .settings-intro h3 {
-    margin: 0 0 8px;
-    color: var(--text);
-    font-size: 1.55rem;
-  }
-
-  .settings-intro p:not(.eyebrow),
   .settings-note {
     margin: 0;
     color: var(--text-soft);
@@ -15545,11 +15748,26 @@
 
   .settings-section {
     display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    min-width: 0;
     gap: 14px;
     border: 1px solid var(--border);
-    border-radius: 8px;
+    border-radius: 10px;
     background: var(--panel-soft);
-    padding: 18px;
+    padding: clamp(14px, 2.3cqw, 24px);
+    scroll-margin-top: 12px;
+  }
+
+  .settings-subsection {
+    display: grid;
+    gap: 10px;
+    border-top: 1px solid var(--border);
+    padding-top: 14px;
+  }
+
+  .settings-subsection h4 {
+    margin: 0;
+    font-size: 0.96rem;
   }
 
   .cd-status-card,
@@ -15571,11 +15789,15 @@
     gap: 16px;
   }
 
-  .settings-section-header h4 {
+  .settings-section-header :is(h3, h4) {
     margin: 0;
     color: var(--text);
     font-size: 1.08rem;
     line-height: 1.2;
+  }
+
+  .settings-section-header h3 {
+    font-size: 1.15rem;
   }
 
   .settings-pill {
@@ -15610,7 +15832,6 @@
 
   .library-folder-card span,
   .cd-output-folder span,
-  .settings-stat-tile span,
   .settings-status-list span,
   .settings-control-list span,
   .about-grid span {
@@ -15622,14 +15843,20 @@
     text-transform: uppercase;
   }
 
-  .library-folder-card strong {
+  .library-folder-card strong,
+  .library-folder-card small {
     display: block;
-    overflow: hidden;
-    color: var(--text);
+    overflow-wrap: anywhere;
+  }
+
+  .library-folder-card strong {
     font-size: 0.95rem;
     font-weight: 760;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+  }
+
+  .library-folder-card small {
+    margin-top: 6px;
+    color: var(--text-soft);
   }
 
   .cd-output-folder strong {
@@ -15641,61 +15868,80 @@
   }
 
   .settings-stat-grid,
-  .settings-status-list,
-  .settings-control-list,
-  .about-grid {
+  .settings-status-list {
     display: grid;
     grid-template-columns: repeat(4, minmax(0, 1fr));
+    margin: 0;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+  }
+
+  .settings-stat-grid > div,
+  .settings-status-list > div {
+    min-width: 0;
+    padding: clamp(9px, 1.65cqw, 16px);
+    overflow-wrap: anywhere;
+  }
+
+  .settings-stat-grid > div + div,
+  .settings-status-list > div + div {
+    border-left: 1px solid var(--border);
+  }
+
+  .settings-stat-grid dt {
+    color: var(--text-soft);
+    font-size: 0.8rem;
+  }
+
+  .settings-stat-grid dd {
+    margin: 5px 0 0;
+    font-size: clamp(1rem, 2.4cqw, 1.5rem);
+    font-weight: 750;
+  }
+
+  .about-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 10px;
   }
 
   .settings-control-list,
-  .about-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .settings-stat-tile,
-  .settings-status-list > div,
-  .settings-control-list > div,
-  .settings-control-list > label,
   .about-grid > div {
     min-width: 0;
     border: 1px solid var(--border);
     border-radius: 8px;
     background: var(--panel);
-    padding: 14px;
   }
 
-  .settings-stat-tile.wide {
-    grid-column: span 2;
+  .about-grid > div,
+  .settings-control-list > div,
+  .settings-control-list > label {
+    padding: 12px 14px;
   }
 
-  .settings-stat-tile strong,
+  .settings-control-list > * + * {
+    border-top: 1px solid var(--border);
+  }
+
   .settings-status-list strong,
   .settings-control-list strong,
   .about-grid strong {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    overflow: hidden;
+    display: block;
+    overflow-wrap: anywhere;
     color: var(--text);
     font-size: 0.98rem;
     font-weight: 820;
     line-height: 1.25;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .settings-stat-tile strong {
-    font-size: 1.35rem;
   }
 
   .settings-control-list small {
     display: block;
-    margin-top: 6px;
+    margin-top: 4px;
     color: var(--text-soft);
     font-size: 0.8rem;
-    font-weight: 760;
+    line-height: 1.35;
+    overflow-wrap: anywhere;
   }
 
   .folder-scan-list { display: grid; gap: 8px; list-style: none; margin: 0; padding: 0; }
@@ -15707,18 +15953,21 @@
   .ignored-tracks summary { cursor: pointer; font-weight: 700; padding: 8px 0; }
   .album-track-row.bulk-selected { outline: 1px solid var(--accent); outline-offset: -1px; background: color-mix(in srgb, var(--accent) 13%, transparent); }
   .album-selection-button { padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); color: inherit; font: inherit; }
+  .album-selection-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 
   .listen-threshold {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
+    justify-content: space-between;
     gap: 12px;
+    font-weight: 700;
   }
 
   .listen-threshold select {
     font: inherit;
-    color: CanvasText;
-    background: Canvas;
+    color: var(--text);
+    background: var(--panel);
     padding: 7px 10px;
     border: 1px solid var(--border);
     border-radius: 8px;
@@ -15726,25 +15975,68 @@
 
   .settings-toggle-row {
     display: grid;
-    grid-template-columns: 1fr auto auto;
+    grid-template-columns: minmax(0, 1fr) auto;
     align-items: center;
-    gap: 12px;
+    gap: 3px 12px;
+    cursor: pointer;
+  }
+
+  .settings-control-list .settings-toggle-row span {
+    margin: 0;
+    color: var(--text);
+    font-size: 0.93rem;
+    font-weight: 700;
+    text-transform: none;
   }
 
   .settings-toggle-row input {
-    width: 18px;
-    height: 18px;
-    accent-color: var(--accent);
+    appearance: none;
+    grid-area: 1 / 2 / span 2;
+    width: 34px;
+    height: 20px;
+    margin: 0;
+    border: 1px solid var(--border-strong);
+    border-radius: 999px;
+    background: radial-gradient(circle at 9px center, var(--text-soft) 5px, transparent 5.5px), var(--panel-strong);
+    cursor: pointer;
+  }
+
+  .settings-toggle-row input:checked {
+    border-color: var(--accent-strong);
+    background: radial-gradient(circle at calc(100% - 9px) center, var(--accent-text) 5px, transparent 5.5px), var(--accent-soft);
+  }
+
+  .settings-toggle-row input:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 3px;
+  }
+
+  @media (forced-colors: active) {
+    .settings-toggle-row input {
+      appearance: auto;
+      width: 18px;
+      height: 18px;
+    }
   }
 
   .settings-toggle-row small {
-    grid-column: 1 / -1;
+    grid-column: 1;
     margin-top: 0;
   }
 
-  .updates-section .settings-toggle-row small {
-    grid-column: 1 / -1;
-    margin-top: 0;
+  @container settings (max-width: 470px) {
+    .settings-stat-grid,
+    .settings-status-list {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    :is(.settings-stat-grid, .settings-status-list) > div:nth-child(3) {
+      border-left: 0;
+    }
+
+    :is(.settings-stat-grid, .settings-status-list) > div:nth-child(n+3) {
+      border-top: 1px solid var(--border);
+    }
   }
 
   .update-available-card {
@@ -15866,7 +16158,7 @@
 
   .theme-preset-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(164px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 140px), 1fr));
     gap: 10px;
   }
 
@@ -15879,7 +16171,7 @@
     border-radius: 8px;
     background: var(--panel);
     color: inherit;
-    cursor: default;
+    cursor: pointer;
     font: inherit;
     padding: 14px;
     text-align: left;
@@ -15994,43 +16286,42 @@
     color: var(--text-dim);
   }
 
-  .settings-actions button span {
-    margin-left: 8px;
-    color: var(--text-soft);
-    font-size: 0.76rem;
-    font-weight: 850;
-  }
-
   .settings-tool-grid {
     display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 190px), 1fr));
     gap: 10px;
   }
 
   .settings-tool-grid button {
     display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
     min-width: 0;
-    min-height: 138px;
-    gap: 8px;
-    justify-items: start;
-    padding: 14px;
+    min-height: 66px;
+    gap: 2px 12px;
+    align-items: center;
+    padding: 11px;
+    cursor: pointer;
     text-align: left;
   }
 
   .settings-tool-grid .health-mark,
   .settings-tool-grid .shortcut-mark,
   .mix-tool-mark {
-    width: 48px;
-    height: 48px;
-    font-size: 1.18rem;
+    width: 36px;
+    height: 36px;
+    font-size: 1rem;
+  }
+
+  .settings-tool-copy {
+    display: grid;
+    min-width: 0;
+    gap: 4px;
   }
 
   .settings-tool-grid strong,
   .settings-tool-grid small {
-    overflow: hidden;
-    max-width: 100%;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    min-width: 0;
+    overflow-wrap: anywhere;
   }
 
   .settings-tool-grid strong {
@@ -17155,242 +17446,168 @@
     right: 22px;
     bottom: 104px;
     z-index: 4;
-    display: grid;
-    grid-template-rows: auto minmax(0, 1fr);
-    gap: 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
     width: min(480px, calc(100vw - 32px));
-    max-height: min(620px, calc(100dvh - 136px));
-    overflow: hidden;
-    border: 1px solid color-mix(in srgb, var(--border-strong) 86%, transparent);
-    border-radius: 8px;
-    background:
-      linear-gradient(180deg, color-mix(in srgb, var(--panel-strong) 78%, transparent), color-mix(in srgb, var(--panel) 96%, transparent)),
-      var(--panel);
-    box-shadow:
-      0 28px 76px rgba(0, 0, 0, 0.42),
-      inset 0 1px 0 rgba(255, 255, 255, 0.04);
+    max-height: min(650px, calc(100dvh - 136px));
+    border: 1px solid var(--border-strong);
+    border-radius: 14px;
+    background: var(--panel-soft);
+    box-shadow: 0 22px 60px rgba(0, 0, 0, 0.28);
     padding: 16px;
   }
 
-  .queue-panel-header {
+  .queue-panel-header,
+  .queue-panel-actions {
     display: flex;
-    align-items: flex-start;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .queue-panel-header {
     justify-content: space-between;
-    gap: 14px;
-    padding-bottom: 4px;
   }
 
   .queue-panel-title {
-    display: grid;
-    gap: 6px;
     min-width: 0;
   }
 
-  .queue-panel-title > div {
-    display: flex;
-    align-items: baseline;
-    gap: 9px;
-    min-width: 0;
-  }
-
-  .queue-panel-header h3 {
-    font-size: 1.2rem;
+  .queue-panel-title h3 {
+    margin: 0 0 3px;
+    font-size: 1.35rem;
+    line-height: 1.1;
   }
 
   .queue-panel-title span,
   .queue-current-label {
-    color: var(--text-muted);
-    font-size: 0.8rem;
-    font-weight: 800;
-    white-space: nowrap;
-  }
-
-  .queue-panel-actions,
-  .queue-row-actions {
-    display: flex;
-    align-items: center;
-    gap: 7px;
+    color: var(--text-soft);
+    font-size: 0.78rem;
+    font-weight: 700;
   }
 
   .queue-panel-actions button,
-  .queue-row-actions button {
+  .queue-remove {
     min-height: 32px;
     border: 1px solid var(--border-strong);
-    border-radius: 999px;
-    background: color-mix(in srgb, var(--panel-strong) 82%, transparent);
+    border-radius: 8px;
+    background: var(--panel);
     color: var(--text);
-    cursor: default;
     font: inherit;
-    font-size: 0.78rem;
-    font-weight: 850;
+    font-size: 0.8rem;
+    font-weight: 750;
     padding: 0 10px;
+    cursor: pointer;
   }
 
-  .queue-panel-actions button.icon {
+  .queue-panel-actions button.icon,
+  .queue-remove {
     width: 32px;
     padding: 0;
+    font-size: 1.15rem;
+    line-height: 1;
   }
 
   .queue-panel-actions button:hover:not(:disabled),
-  .queue-panel-actions button:focus-visible:not(:disabled),
-  .queue-row-actions button:hover,
-  .queue-row-actions button:focus-visible {
-    border-color: var(--accent);
-    background: color-mix(in srgb, var(--accent-soft) 84%, var(--panel-hover));
-    color: var(--accent-text);
-    outline: none;
-  }
-
-  .queue-panel-actions button.secondary {
-    color: var(--text-muted);
+  .queue-remove:hover {
+    border-color: var(--accent-strong);
+    background: var(--panel-hover);
   }
 
   .queue-panel-actions button:disabled {
-    border-color: var(--border);
-    background: var(--panel-soft);
     color: var(--text-dim);
+    cursor: default;
   }
 
   .queue-list {
     display: grid;
     align-content: start;
-    gap: 8px;
+    gap: 3px;
     min-height: 0;
-    overflow-y: auto;
+    overflow: auto;
     overscroll-behavior: contain;
-    padding: 1px 3px 1px 1px;
-    scrollbar-color: transparent transparent;
-    scrollbar-gutter: stable;
+    scrollbar-color: var(--border-strong) transparent;
     scrollbar-width: thin;
   }
 
-  .queue-list::-webkit-scrollbar {
-    width: 6px;
-  }
-
-  .queue-list::-webkit-scrollbar-track {
-    background: transparent;
-  }
-
-  .queue-list::-webkit-scrollbar-thumb {
-    border: 2px solid transparent;
-    border-radius: 999px;
-    background-clip: content-box;
-    background-color: transparent;
-  }
-
-  .queue-list:hover,
-  .queue-list:focus-within {
-    scrollbar-color: color-mix(in srgb, var(--text-muted) 18%, transparent) transparent;
-  }
-
-  .queue-list:hover::-webkit-scrollbar-thumb,
-  .queue-list:focus-within::-webkit-scrollbar-thumb {
-    background-color: color-mix(in srgb, var(--text-muted) 18%, transparent);
-  }
-
   .queue-empty-state {
-    display: grid;
-    align-content: center;
-    min-height: 210px;
-    border: 1px dashed var(--border-strong);
-    border-radius: 8px;
-    background:
-      radial-gradient(circle at 50% 0%, color-mix(in srgb, var(--accent) 10%, transparent), transparent 54%),
-      color-mix(in srgb, var(--panel-soft) 86%, transparent);
-    padding: 24px;
+    border: 1px dashed var(--border);
+    border-radius: 10px;
+    padding: 24px 14px;
     text-align: center;
   }
 
-  .queue-empty-state h3,
   .queue-empty-state p {
-    margin: 0;
-  }
-
-  .queue-empty-state p {
-    margin-top: 7px;
+    margin: 5px 0 0;
     color: var(--text-soft);
-    font-size: 0.9rem;
-    font-weight: 650;
-    line-height: 1.4;
+    font-size: 0.84rem;
+    line-height: 1.45;
   }
 
   .queue-row {
-    position: relative;
     display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-columns: minmax(0, 1fr) auto auto;
     align-items: center;
-    gap: 10px;
-    min-height: 70px;
-    overflow: hidden;
-    border: 1px solid color-mix(in srgb, var(--border) 86%, transparent);
-    border-radius: 8px;
-    background: color-mix(in srgb, var(--panel-soft) 88%, transparent);
-    transition:
-      border-color 150ms ease,
-      background 150ms ease;
+    gap: 8px;
+    min-width: 0;
+    border: 1px solid transparent;
+    border-radius: 9px;
+    padding: 4px;
   }
 
   .queue-row:hover,
-  .queue-row:focus-within,
-  .queue-row.active {
-    border-color: var(--accent-strong);
-    background: color-mix(in srgb, var(--panel-hover) 88%, transparent);
+  .queue-row:focus-within {
+    background: var(--panel-hover);
   }
 
   .queue-row.active {
-    box-shadow: inset 3px 0 0 var(--accent);
+    grid-template-columns: minmax(0, 1fr) auto;
+    border-color: var(--accent-strong);
+    background: var(--accent-soft);
+    padding: 6px 9px 6px 6px;
   }
 
   .queue-row-main {
     display: grid;
-    grid-template-columns: 42px 46px minmax(0, 1fr);
+    grid-template-columns: 25px 38px minmax(0, 1fr);
     align-items: center;
-    gap: 10px;
+    gap: 8px;
     min-width: 0;
-    min-height: 68px;
     border: 0;
+    border-radius: 7px;
     background: transparent;
     color: inherit;
-    cursor: default;
+    cursor: pointer;
     font: inherit;
-    padding: 9px 0 9px 10px;
+    padding: 3px;
     text-align: left;
   }
 
-  .queue-row-main:focus-visible {
-    outline: none;
+  .queue-row.active .queue-row-main {
+    grid-template-columns: 46px minmax(0, 1fr);
   }
 
   .queue-row-position {
-    display: grid;
-    min-height: 30px;
-    place-items: center;
-    border-radius: 7px;
-    background: var(--panel-hover);
     color: var(--text-soft);
-    font-size: 0.76rem;
-    font-weight: 950;
-  }
-
-  .queue-row.active .queue-row-position {
-    background: var(--accent-soft);
-    color: var(--accent-text);
+    font-size: 0.75rem;
+    font-weight: 700;
+    text-align: center;
   }
 
   .queue-row-art {
     display: grid;
-    width: 46px;
-    height: 46px;
-    overflow: hidden;
+    width: 100%;
+    aspect-ratio: 1;
     place-items: center;
-    border-radius: 8px;
-    background:
-      radial-gradient(circle at 30% 18%, rgba(255, 255, 255, 0.22), transparent 32%),
-      linear-gradient(145deg, color-mix(in srgb, var(--accent) 42%, var(--panel)), var(--panel-strong));
-    color: var(--accent-text);
-    font-size: 1rem;
-    font-weight: 950;
+    overflow: hidden;
+    border-radius: 7px;
+    background: color-mix(in srgb, var(--accent) 22%, var(--panel-strong));
+    color: var(--text);
+    font-weight: 800;
+  }
+
+  .queue-row-art > * {
+    grid-area: 1 / 1;
   }
 
   .queue-row-art img {
@@ -17401,92 +17618,40 @@
 
   .queue-row-copy {
     display: grid;
-    gap: 2px;
     min-width: 0;
-  }
-
-  .queue-row-copy strong,
-  .queue-row-copy small,
-  .queue-row-duration,
-  .queue-current-label {
-    overflow: hidden;
-    text-overflow: ellipsis;
+    gap: 3px;
   }
 
   .queue-row-copy strong,
   .queue-row-copy small {
+    overflow: hidden;
+    text-overflow: ellipsis;
     white-space: nowrap;
   }
 
   .queue-row-copy strong {
-    color: var(--text);
-    font-size: 0.94rem;
-    font-weight: 850;
+    font-size: 0.9rem;
     line-height: 1.2;
   }
 
-  .queue-row-copy small {
+  .queue-row-copy small,
+  .queue-row-duration {
     color: var(--text-soft);
-    font-size: 0.8rem;
-    font-weight: 680;
-    line-height: 1.25;
-  }
-
-  .queue-row-copy .queue-row-album {
-    color: var(--text-muted);
     font-size: 0.76rem;
   }
 
-  .queue-row-side {
-    display: grid;
-    justify-items: end;
-    gap: 7px;
-    min-width: 88px;
-    padding: 9px 10px 9px 0;
+  .queue-current-label {
+    color: var(--accent-text);
   }
 
   .queue-row-duration {
-    max-width: 84px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .queue-remove {
+    border-color: transparent;
+    background: transparent;
     color: var(--text-muted);
-    font-size: 0.78rem;
-    font-weight: 800;
-    white-space: nowrap;
-  }
-
-  .queue-row-actions {
-    opacity: 0;
-    pointer-events: none;
-    transform: translateY(2px);
-    transition:
-      opacity 140ms ease,
-      transform 140ms ease;
-  }
-
-  .queue-row:hover .queue-row-actions,
-  .queue-row:focus-within .queue-row-actions {
-    opacity: 1;
-    pointer-events: auto;
-    transform: translateY(0);
-  }
-
-  .queue-row-actions button {
-    min-height: 28px;
-    font-size: 0.74rem;
-    padding: 0 9px;
-  }
-
-  @media (hover: none) {
-    .queue-row-actions {
-      opacity: 1;
-      pointer-events: auto;
-      transform: none;
-    }
-  }
-
-  @media (min-width: 900px) {
-    .playlist-card-grid.tools .mix-tool-card {
-      grid-column: span 2;
-    }
   }
 
   @media (max-width: 1020px) {
@@ -17494,10 +17659,6 @@
     .genre-grid,
     .video-grid {
       grid-template-columns: repeat(2, minmax(0, 1fr));
-    }
-
-    .playlist-card-grid {
-      grid-template-columns: repeat(auto-fill, minmax(min(100%, 260px), 1fr));
     }
 
     .videos-toolbar,
@@ -17536,10 +17697,7 @@
       grid-template-columns: repeat(2, minmax(0, 1fr));
     }
 
-    .settings-stat-grid,
-    .cd-metadata-form,
-    .settings-status-list,
-    .settings-tool-grid {
+    .cd-metadata-form {
       grid-template-columns: repeat(2, minmax(0, 1fr));
     }
 
@@ -17732,20 +17890,6 @@
       flex-direction: column;
     }
 
-    .playlist-hero {
-      grid-template-columns: 132px minmax(0, 1fr);
-      padding: 18px;
-    }
-
-    .playlist-create-panel {
-      grid-template-columns: 1fr;
-      align-items: stretch;
-    }
-
-    .playlist-create-panel .form-message {
-      grid-column: auto;
-    }
-
     .album-detail-header {
       grid-template-columns: 1fr;
       align-items: start;
@@ -17798,7 +17942,6 @@
       display: grid;
     }
 
-    .settings-control-list,
     .about-grid {
       grid-template-columns: 1fr;
     }
@@ -17813,22 +17956,6 @@
       bottom: 150px;
       width: auto;
       max-height: calc(100dvh - 178px);
-    }
-
-    .queue-row {
-      grid-template-columns: minmax(0, 1fr);
-    }
-
-    .queue-row-side {
-      grid-template-columns: auto 1fr;
-      justify-items: start;
-      padding: 0 10px 10px 108px;
-    }
-
-    .queue-row-actions {
-      opacity: 1;
-      pointer-events: auto;
-      transform: none;
     }
 
     .tag-editor-backdrop,
@@ -17875,21 +18002,17 @@
     .album-grid,
     .artist-grid,
     .genre-grid,
-    .playlist-card-grid,
     .video-grid,
     .mix-option-grid,
     .health-summary-grid,
     .diagnostic-album-list,
-    .settings-stat-grid,
     .video-stat-grid,
     .video-meta-grid,
     .video-codec-grid,
     .video-edit-form,
     .dvd-status-grid,
     .dvd-import-form,
-    .cd-metadata-form,
-    .settings-status-list,
-    .settings-tool-grid {
+    .cd-metadata-form {
       grid-template-columns: minmax(0, 1fr);
     }
 
@@ -17926,16 +18049,6 @@
 
     .queue-backdrop {
       bottom: 146px;
-    }
-
-    .queue-row-main {
-      grid-template-columns: 38px 44px minmax(0, 1fr);
-      gap: 8px;
-      padding-right: 10px;
-    }
-
-    .queue-row-side {
-      padding-left: 100px;
     }
 
     .home.albums-landing-view .home-header-actions {
@@ -17992,25 +18105,11 @@
       width: min(100%, 180px);
     }
 
-    .settings-stat-tile.wide {
-      grid-column: auto;
-    }
-
     .album-detail-header {
       padding: 16px;
     }
 
-    .playlist-hero {
-      grid-template-columns: 1fr;
-      padding: 16px;
-    }
-
-    .playlist-hero-art {
-      width: min(100%, 180px);
-    }
-
-    .playlist-card-main,
-    .mix-tool-card {
+    .playlist-card-main {
       grid-template-columns: 58px minmax(0, 1fr);
     }
 

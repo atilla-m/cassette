@@ -2,7 +2,7 @@ import type { Album, Artist, Genre, Track } from "$lib/types/library";
 
 const palette = ["#2f8f83", "#b95f3d", "#8b6bd6", "#c59b40", "#4d84c4", "#b24f72"];
 
-export function buildAlbums(tracks: Track[]): Album[] {
+export function buildAlbums(tracks: Track[], activity = (track: Track) => track.playCount): Album[] {
   const albumsByKey = new Map<string, Album>();
 
   for (const track of tracks) {
@@ -13,7 +13,7 @@ export function buildAlbums(tracks: Track[]): Album[] {
 
     if (existing) {
       existing.trackCount += 1;
-      existing.playCount += track.playCount;
+      existing.playCount += activity(track);
       existing.year ??= track.year;
       existing.coverArtPath ??= track.coverArtPath;
       continue;
@@ -25,7 +25,7 @@ export function buildAlbums(tracks: Track[]): Album[] {
       artist,
       year: track.year,
       trackCount: 1,
-      playCount: track.playCount,
+      playCount: activity(track),
       color: colorFor(key),
       coverArtPath: track.coverArtPath,
     });
@@ -36,14 +36,14 @@ export function buildAlbums(tracks: Track[]): Album[] {
   );
 }
 
-export function buildArtists(tracks: Track[]): Artist[] {
+export function buildArtists(tracks: Track[], activity = (track: Track) => track.playCount): Artist[] {
   const statsByArtist = new Map<string, { trackCount: number; playCount: number }>();
 
   for (const track of tracks) {
     const artist = track.artist ?? track.albumArtist ?? "Unknown Artist";
     const stats = statsByArtist.get(artist) ?? { trackCount: 0, playCount: 0 };
     stats.trackCount += 1;
-    stats.playCount += track.playCount;
+    stats.playCount += activity(track);
     statsByArtist.set(artist, stats);
   }
 
@@ -57,7 +57,7 @@ export function buildArtists(tracks: Track[]): Artist[] {
     .sort((left, right) => left.name.localeCompare(right.name));
 }
 
-export function buildGenres(tracks: Track[]): Genre[] {
+export function buildGenres(tracks: Track[], activity = (track: Track) => track.playCount): Genre[] {
   const genresByName = new Map<string, {
     name: string;
     songCount: number;
@@ -80,7 +80,7 @@ export function buildGenres(tracks: Track[]): Genre[] {
       const albumArtist = track.albumArtist ?? track.artist ?? "Unknown Artist";
 
       existing.songCount += 1;
-      existing.playCount += track.playCount;
+      existing.playCount += activity(track);
       existing.artists.add(artist);
       existing.albums.add(`${albumArtist.toLowerCase()}\u0000${album.toLowerCase()}`);
       genresByName.set(genreName, existing);

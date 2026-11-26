@@ -36,11 +36,11 @@ export function sortGenresByPlayCount(genres: Genre[], order: PlayCountOrder) {
   );
 }
 
-export function rankMostPlayedTracks(tracks: Track[]) {
+export function rankMostPlayedTracks(tracks: Track[], activity = (track: Track) => track.playCount) {
   return [...tracks]
-    .filter((track) => track.playCount > 0)
+    .filter((track) => activity(track) > 0)
     .sort((left, right) =>
-      right.playCount - left.playCount
+      activity(right) - activity(left)
       || (right.lastPlayedAt ?? 0) - (left.lastPlayedAt ?? 0)
       || compareText(left.title, right.title)
       || compareText(left.id, right.id),

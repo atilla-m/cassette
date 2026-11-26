@@ -7,6 +7,7 @@
     isScanning: boolean;
     variant?: "default" | "library";
     showOrder?: boolean;
+    activityLabel?: (track: Track) => string;
     selectedTrackId?: string | null;
     unavailableTrackIds?: Set<string>;
     onTrackSelect?: (track: Track, queue: Track[]) => void;
@@ -26,6 +27,7 @@
     isScanning,
     variant = "default",
     showOrder = false,
+    activityLabel = playCountLabel,
     selectedTrackId = null,
     unavailableTrackIds = new Set<string>(),
     onTrackSelect,
@@ -118,7 +120,7 @@
   }
 
   function playCountLabel(track: Track) {
-    return `${track.playCount} ${track.playCount === 1 ? "play" : "plays"}`;
+    return track.playCount > 0 ? `${track.playCount} ${track.playCount === 1 ? "play" : "plays"}` : "";
   }
 
   function formatDuration(seconds: number | null | undefined) {
@@ -189,8 +191,8 @@
         {#if isLibraryVariant}
           <span class="track-duration">{formatDuration(track.durationSeconds)}</span>
         {/if}
-        {#if track.playCount > 0}
-          <span class="play-count">{track.ignored ? "" : playCountLabel(track)}</span>
+        {#if !track.ignored && activityLabel(track)}
+          <span class="play-count">{activityLabel(track)}</span>
         {:else}
           <span class="play-count empty" aria-hidden="true"></span>
         {/if}

@@ -40,6 +40,7 @@ mod gapless;
 mod ignored_tracks;
 mod library_scan;
 mod listening_stats;
+mod listening_time;
 mod lyrics_edits;
 #[cfg(not(target_os = "windows"))]
 mod mpris;
@@ -61,7 +62,7 @@ const MAX_FOLDER_COVER_BYTES: u64 = 25 * 1024 * 1024;
 const MAX_LYRICS_BYTES: u64 = 1024 * 1024;
 const GENRE_SCOPE_ALBUM: &str = "album";
 const GENRE_SCOPE_ARTIST: &str = "artist";
-const MUSICBRAINZ_USER_AGENT: &str = "Cassette/0.1.0-beta.9 (local music player; contact: none)";
+const MUSICBRAINZ_USER_AGENT: &str = "Cassette/0.1.0-beta.10 (local music player; contact: none)";
 const SUPPORTED_TAG_FORMATS_LABEL: &str = "FLAC, MP3, Ogg/Vorbis, Opus, WAV, and M4A/AAC";
 
 #[derive(Debug, Clone, Serialize)]
@@ -956,7 +957,11 @@ async fn set_album_cover(
         let mut library = library
             .lock()
             .map_err(|_| "Library cache is unavailable.")?;
-        library.set_album_cover(&album_id, &directory, image)
+        let covers = library.set_album_cover(&album_id, &directory, image)?;
+        drop(library);
+        #[cfg(target_os = "windows")]
+        refresh_current_media_track(&app, move |track| album_key_for_track(track) == album_id);
+        Ok(covers)
     })
     .await
     .map_err(|error| format!("Could not save album artwork: {error}"))?
@@ -1127,7 +1132,7 @@ fn send_linux_playback_notification(
     {
         let _ = (title, body, notifications);
         Err(
-            "Desktop notifications are available only on Linux in Cassette 0.1.0-beta.9."
+            "Desktop notifications are available only on Linux in Cassette 0.1.0-beta.10."
                 .to_owned(),
         )
     }
@@ -1427,7 +1432,10 @@ async fn detect_dvd() -> Result<DvdDetectResult, String> {
     }
 
     #[cfg(not(target_os = "linux"))]
-    Err("DVD detection and import are available only on Linux in Cassette 0.1.0-beta.9.".to_owned())
+    Err(
+        "DVD detection and import are available only on Linux in Cassette 0.1.0-beta.10."
+            .to_owned(),
+    )
 }
 
 #[tauri::command]
@@ -1443,7 +1451,7 @@ async fn scan_dvd_titles(source: String) -> Result<DvdTitleScanResult, String> {
     {
         let _ = source;
         Err(
-            "DVD detection and import are available only on Linux in Cassette 0.1.0-beta.9."
+            "DVD detection and import are available only on Linux in Cassette 0.1.0-beta.10."
                 .to_owned(),
         )
     }
@@ -1482,7 +1490,7 @@ async fn import_dvd_title(
     {
         let _ = (source, title_number, output_folder, metadata, app, library);
         Err(
-            "DVD detection and import are available only on Linux in Cassette 0.1.0-beta.9."
+            "DVD detection and import are available only on Linux in Cassette 0.1.0-beta.10."
                 .to_owned(),
         )
     }
@@ -1833,29 +1841,35 @@ fn update_track_tags_blocking(
 }
 
 fn refresh_media_control_tags(app: &AppHandle, updated_tracks: &[Track]) {
-    let playback = app.state::<Mutex<PlaybackState>>();
-    let Ok(playback) = playback.lock() else {
-        return;
-    };
-    let Some(track) = updated_tracks
+    let edited_paths: HashSet<_> = updated_tracks
         .iter()
-        .find(|track| playback.current_path.as_deref() == Some(track.file_path.as_str()))
-    else {
-        return;
-    };
-    let track_path = track.file_path.clone();
-    let media_track = MediaTrack::from(track);
-    drop(playback);
+        .map(|track| track.file_path.clone())
+        .collect();
+    refresh_current_media_track(app, move |track| edited_paths.contains(&track.file_path));
+}
+
+fn refresh_current_media_track(
+    app: &AppHandle,
+    matches: impl FnOnce(&Track) -> bool + Send + 'static,
+) {
     let app_for_update = app.clone();
     let _ = app.run_on_main_thread(move || {
         let playback = app_for_update.state::<Mutex<PlaybackState>>();
         let Ok(playback) = playback.try_lock() else {
             return;
         };
-        if playback.current_path.as_deref() == Some(track_path.as_str()) {
+        let Some(path) = playback.current_path.as_deref() else {
+            return;
+        };
+        let library = app_for_update.state::<Mutex<LibraryDatabase>>();
+        let updated = library.lock().ok().and_then(|library| {
+            let track = library.track_by_id(path).ok().flatten()?;
+            matches(&track).then(|| MediaTrack::for_library_track(&track, &library))
+        });
+        if let Some(track) = updated {
             app_for_update
                 .state::<MediaControls>()
-                .update_track(Some(media_track), playback.is_playing);
+                .update_track(Some(track), playback.is_playing);
         }
     });
 }
@@ -1870,6 +1884,52 @@ fn toggle_track_favorite(
         .map_err(|_| "Library cache is unavailable.".to_owned())?;
 
     library.toggle_favorite(&id)
+}
+
+#[tauri::command]
+fn set_tracks_favorite(
+    track_ids: Vec<String>,
+    favorite: bool,
+    library: State<'_, Mutex<LibraryDatabase>>,
+) -> Result<(), String> {
+    let mut library = library
+        .lock()
+        .map_err(|_| "Library cache is unavailable.")?;
+    let transaction = library
+        .connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+    for id in track_ids {
+        write_track_favorite(&transaction, &id, favorite)?;
+    }
+    transaction
+        .commit()
+        .map_err(|error| format!("Could not save favorites: {error}"))
+}
+
+fn write_track_favorite(
+    transaction: &rusqlite::Transaction<'_>,
+    id: &str,
+    favorite: bool,
+) -> Result<(), String> {
+    let changed = transaction
+        .execute(
+            "UPDATE tracks SET is_favorite = ?2 WHERE id = ?1",
+            params![id, favorite],
+        )
+        .map_err(|error| format!("Could not update favorite state: {error}"))?;
+    if changed == 0 {
+        return Err("Track is not in the library cache.".to_owned());
+    }
+    let save = if favorite {
+        "INSERT OR IGNORE INTO track_favorites (track_id) VALUES (?1)"
+    } else {
+        "DELETE FROM track_favorites WHERE track_id = ?1"
+    };
+    transaction
+        .execute(save, [id])
+        .map_err(|error| format!("Could not save favorite state: {error}"))?;
+    Ok(())
 }
 
 #[tauri::command(async)]
@@ -1963,6 +2023,19 @@ fn add_track_to_playlist(
         .map_err(|_| "Library cache is unavailable.".to_owned())?;
 
     library.add_track_to_playlist(&playlist_id, &track_id)
+}
+
+#[tauri::command]
+fn add_tracks_to_playlist(
+    playlist_id: Option<String>,
+    new_name: Option<String>,
+    track_ids: Vec<String>,
+    library: State<'_, Mutex<LibraryDatabase>>,
+) -> Result<Playlist, String> {
+    let library = library
+        .lock()
+        .map_err(|_| "Library cache is unavailable.")?;
+    library.add_selected_tracks_to_playlist(playlist_id.as_deref(), new_name.as_deref(), &track_ids)
 }
 
 #[tauri::command]
@@ -4138,6 +4211,7 @@ impl LibraryDatabase {
         }
 
         self.migrate_detailed_play_history()?;
+        self.migrate_listening_time()?;
         self.migrate_portable_history()?;
 
         Ok(())
@@ -5088,20 +5162,7 @@ impl LibraryDatabase {
             .ok_or_else(|| "Track is not in the library cache.".to_owned())?;
         let next = !current;
 
-        transaction
-            .execute(
-                "UPDATE tracks SET is_favorite = ?2 WHERE id = ?1",
-                params![id, next],
-            )
-            .map_err(|error| format!("Could not update favorite state: {error}"))?;
-        let save = if next {
-            "INSERT OR IGNORE INTO track_favorites (track_id) VALUES (?1)"
-        } else {
-            "DELETE FROM track_favorites WHERE track_id = ?1"
-        };
-        transaction
-            .execute(save, [id])
-            .map_err(|error| format!("Could not save favorite state: {error}"))?;
+        write_track_favorite(&transaction, id, next)?;
         transaction
             .commit()
             .map_err(|error| format!("Could not save favorite state: {error}"))?;
@@ -5237,7 +5298,15 @@ impl LibraryDatabase {
         played_at: i64,
     ) -> Result<Track, String> {
         validate_play_event_id(event_id)?;
-        if self.is_track_ignored(id)? {
+        let removed = self
+            .connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM removed_listening_sessions WHERE session_id = ?1)",
+                [event_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(|error| error.to_string())?;
+        if removed || self.is_track_ignored(id)? {
             return self
                 .track_by_id(id)?
                 .ok_or_else(|| "Track is no longer in the library.".into());
@@ -5509,10 +5578,27 @@ impl LibraryDatabase {
         if playlist.track_ids.iter().any(|id| id == track_id) {
             return Err("Track is already in this playlist.".to_owned());
         }
+        self.add_selected_tracks_to_playlist(Some(playlist_id), None, &[track_id.to_owned()])
+    }
 
-        let now = unix_timestamp();
-        let next_position = self
+    fn add_selected_tracks_to_playlist(
+        &self,
+        playlist_id: Option<&str>,
+        new_name: Option<&str>,
+        tracks: &[String],
+    ) -> Result<Playlist, String> {
+        let transaction = self
             .connection
+            .unchecked_transaction()
+            .map_err(|error| error.to_string())?;
+        let playlist = match (playlist_id, new_name) {
+            (Some(id), None) => self.playlist_by_id(id)?,
+            (None, Some(name)) => self.create_playlist(name)?,
+            _ => return Err("Choose a playlist.".into()),
+        };
+        let playlist_id = &playlist.id;
+        let now = unix_timestamp();
+        let mut position = transaction
             .query_row(
                 "
                 SELECT COALESCE(MAX(position), -1) + 1
@@ -5523,21 +5609,33 @@ impl LibraryDatabase {
                 |row| row.get::<_, i64>(0),
             )
             .map_err(|error| format!("Could not read playlist position: {error}"))?;
-        let changed = self
-            .connection
-            .execute(
-                "
-                INSERT OR IGNORE INTO playlist_tracks (playlist_id, track_id, position, added_at)
-                VALUES (?1, ?2, ?3, ?4)
-                ",
-                params![playlist_id, track_id, next_position, now],
-            )
-            .map_err(|error| format!("Could not add track to playlist: {error}"))?;
-
-        if changed > 0 {
+        let first_position = position;
+        for track_id in tracks {
+            let exists = transaction
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM tracks WHERE id = ?1)",
+                    [track_id],
+                    |row| row.get::<_, bool>(0),
+                )
+                .map_err(|error| error.to_string())?;
+            if !exists {
+                return Err("A selected track is no longer in the library.".into());
+            }
+            let inserted = transaction
+                .execute(
+                    "INSERT INTO playlist_tracks (playlist_id, track_id, position, added_at)
+                 VALUES (?1, ?2, ?3, ?4) ON CONFLICT(playlist_id, track_id) DO NOTHING",
+                    params![playlist_id, track_id, position, now],
+                )
+                .map_err(|error| format!("Could not add tracks to playlist: {error}"))?;
+            position += inserted as i64;
+        }
+        if position > first_position {
             self.touch_playlist(playlist_id, now)?;
         }
-
+        transaction
+            .commit()
+            .map_err(|error| format!("Could not save playlist: {error}"))?;
         self.playlist_by_id(playlist_id)
     }
 
@@ -5776,11 +5874,10 @@ fn publish_media_track(
     media_controls: &MediaControls,
     playing: bool,
 ) {
-    let track = library
-        .lock()
-        .ok()
-        .and_then(|library| library.track_by_id(file_path).ok().flatten())
-        .map(|track| MediaTrack::from(&track));
+    let track = library.lock().ok().and_then(|library| {
+        let track = library.track_by_id(file_path).ok().flatten()?;
+        Some(MediaTrack::for_library_track(&track, &library))
+    });
     #[cfg(target_os = "windows")]
     let track = Some(track.unwrap_or_else(|| {
         MediaTrack {
@@ -6875,7 +6972,7 @@ impl VideoPlaybackState {
         _start_position_seconds: Option<f64>,
     ) -> Result<VideoPlaybackStatus, String> {
         Err(
-            "Cassette-controlled video playback is available only on Linux in Cassette 0.1.0-beta.9."
+            "Cassette-controlled video playback is available only on Linux in Cassette 0.1.0-beta.10."
                 .to_owned(),
         )
     }
@@ -6908,14 +7005,14 @@ impl VideoPlaybackState {
 
     fn bring_to_front(&mut self) -> Result<VideoPlaybackStatus, String> {
         Err(
-            "Cassette-controlled video playback is available only on Linux in Cassette 0.1.0-beta.9."
+            "Cassette-controlled video playback is available only on Linux in Cassette 0.1.0-beta.10."
                 .to_owned(),
         )
     }
 
     fn toggle_fullscreen(&mut self) -> Result<VideoPlaybackStatus, String> {
         Err(
-            "Cassette-controlled video playback is available only on Linux in Cassette 0.1.0-beta.9."
+            "Cassette-controlled video playback is available only on Linux in Cassette 0.1.0-beta.10."
                 .to_owned(),
         )
     }
@@ -6964,7 +7061,7 @@ impl VideoPlaybackState {
             is_fullscreen: self.is_fullscreen,
             backend: "unavailable".to_owned(),
             error: Some(
-                "Cassette-controlled video playback is available only on Linux in Cassette 0.1.0-beta.9."
+                "Cassette-controlled video playback is available only on Linux in Cassette 0.1.0-beta.10."
                     .to_owned(),
             ),
         }
@@ -7378,7 +7475,7 @@ fn ffprobe_video_codec_info(_path: &Path) -> VideoCodecInfo {
         resolution: None,
         duration_seconds: None,
         error: Some(
-            "Video inspection is available only on Linux in Cassette 0.1.0-beta.9.".to_owned(),
+            "Video inspection is available only on Linux in Cassette 0.1.0-beta.10.".to_owned(),
         ),
     }
 }
@@ -7442,20 +7539,33 @@ struct MediaTrack {
     album: Option<String>,
     #[cfg(target_os = "linux")]
     duration_seconds: Option<u64>,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     art_path: Option<String>,
+    #[cfg(target_os = "windows")]
+    custom_art_path: Option<String>,
 }
 
-impl From<&Track> for MediaTrack {
-    fn from(track: &Track) -> Self {
+impl MediaTrack {
+    fn for_library_track(track: &Track, _library: &LibraryDatabase) -> Self {
         Self {
             title: track.title.clone(),
             artist: track.artist.clone().or_else(|| track.album_artist.clone()),
             album: track.album.clone(),
             #[cfg(target_os = "linux")]
             duration_seconds: track.duration_seconds.map(u64::from),
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
             art_path: track.cover_art_path.clone(),
+            #[cfg(target_os = "windows")]
+            custom_art_path: _library
+                .connection
+                .query_row(
+                    "SELECT cover_path FROM album_covers WHERE album_id = ?1",
+                    [album_key_for_track(track)],
+                    |row| row.get(0),
+                )
+                .optional()
+                .ok()
+                .flatten(),
         }
     }
 }
@@ -10458,7 +10568,7 @@ fn lyrics_metadata_path(lyrics_path: &Path) -> Option<PathBuf> {
 async fn search_lrclib_lyrics_results(track: &Track) -> Result<Vec<LrclibLyricsResult>, String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(12))
-        .user_agent("Cassette/0.1.0-beta.9 local lyrics lookup")
+        .user_agent("Cassette/0.1.0-beta.10 local lyrics lookup")
         .build()
         .map_err(|error| format!("Could not prepare lyrics lookup: {error}"))?;
     let query = lrclib_query(track);
@@ -11210,6 +11320,37 @@ mod play_history_tests {
                 tracks[0].id.clone()
             ]
         );
+    }
+
+    #[test]
+    fn selected_tracks_append_in_order_and_failed_creation_rolls_back() {
+        let fixture = TestLibrary::new("playlist-bulk");
+        let mut database = fixture.open();
+        let mut tracks = [
+            test_track("/synthetic-music/one.flac"),
+            test_track("/synthetic-music/two.flac"),
+            test_track("/synthetic-music/three.flac"),
+        ];
+        seed_tracks(&mut database, &mut tracks);
+        let ids = tracks
+            .iter()
+            .map(|track| track.id.clone())
+            .collect::<Vec<_>>();
+        let playlist = database
+            .add_selected_tracks_to_playlist(None, Some("Selection"), &ids[..1])
+            .unwrap();
+        let same = database
+            .add_selected_tracks_to_playlist(Some(&playlist.id), None, &ids)
+            .unwrap();
+        assert_eq!(same.track_ids, ids);
+        assert!(database
+            .add_selected_tracks_to_playlist(
+                None,
+                Some("Rollback"),
+                &[ids[0].clone(), "missing".into()],
+            )
+            .is_err());
+        assert!(!database.playlist_name_exists("Rollback").unwrap());
     }
 
     #[test]
@@ -13928,10 +14069,13 @@ pub fn run() {
             update_track_tags,
             update_album_tags,
             toggle_track_favorite,
+            set_tracks_favorite,
             record_track_play,
             ignored_tracks::set_ignored_tracks,
             listening_stats::get_listening_stats,
             listening_stats::remove_listening_event,
+            listening_time::get_listening_time_by_track,
+            listening_time::save_listening_minutes,
             portable_history::export_listening_history,
             portable_history::preview_listening_history_import,
             portable_history::import_listening_history,
@@ -13943,6 +14087,7 @@ pub fn run() {
             rename_playlist,
             delete_playlist,
             add_track_to_playlist,
+            add_tracks_to_playlist,
             remove_track_from_playlist,
             move_playlist_track,
             read_track_lyrics,

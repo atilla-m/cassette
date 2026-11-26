@@ -1,8 +1,23 @@
-export type RecentListen = { eventId: string; trackId: string; playedAtUtc: number };
+export type RecentListen = { eventId: string; trackId: string; playedAtUtc: number; listenedMs?: number };
+
+export type ListeningMinute = {
+  sessionId: string;
+  trackId: string;
+  minuteUtc: number;
+  listenedMs: number;
+  lastSampleUtcMs: number;
+};
 
 export type ListeningStats = {
   trackCounts: Array<{ trackId: string; plays: number; lastPlayedAt: number | null }>;
   recentListens: RecentListen[];
+  listeningTime?: {
+    trackTimes: Record<string, number>;
+    dailyListenedMs: number[];
+    totalListenedMs: number;
+    recentSessions: RecentListen[];
+    sessionCount: number;
+  };
   dailyPlays: number[];
   totalPlays: number;
   datedPlays: number;

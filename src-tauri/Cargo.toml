@@ -1,6 +1,6 @@
 [package]
 name = "cassette"
-version = "0.1.0-beta.9"
+version = "0.1.0-beta.10"
 description = "A private, local-first desktop music library and player"
 authors = ["Cassette contributors"]
 edition = "2021"
@@ -55,7 +55,7 @@ minisign-verify = "=0.2.5"
 semver = "1"
 tauri-plugin-updater = "2"
 sha1 = "0.10"
-windows = { version = "0.61", features = ["Media", "Win32_System_WinRT"] }
+windows = { version = "0.61", features = ["Media", "Storage_Streams", "Win32_System_Com", "Win32_System_WinRT", "Win32_UI_Shell"] }
 windows-sys = { version = "0.61", features = ["Win32_Devices_Cdrom", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_WindowsProgramming"] }
 
 [dev-dependencies]

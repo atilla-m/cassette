@@ -1,6 +1,6 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
-import type { ListeningHistoryExport, ListeningImportPreview, ListeningImportResult, ListeningStats } from "$lib/types/listening";
+import type { ListeningHistoryExport, ListeningImportPreview, ListeningImportResult, ListeningMinute, ListeningStats } from "$lib/types/listening";
 import type {
   AutoLyricsResult,
   AlbumTagEditorData,
@@ -182,8 +182,16 @@ export async function getListeningStats(
   return invoke<ListeningStats>("get_listening_stats", { startUtc, endUtc, dayBoundariesUtc, recentLimit });
 }
 
-export async function removeListeningEvent(eventId: string): Promise<Track | null> {
-  return invoke<Track | null>("remove_listening_event", { eventId });
+export async function removeListeningEvent(eventId: string): Promise<{ track: Track | null; trackId: string; listenedMs: number } | null> {
+  return invoke("remove_listening_event", { eventId });
+}
+
+export async function getListeningTimeByTrack(): Promise<Record<string, number>> {
+  return invoke("get_listening_time_by_track");
+}
+
+export async function saveListeningMinutes(minutes: ListeningMinute[]): Promise<Record<string, number>> {
+  return invoke("save_listening_minutes", { minutes });
 }
 export async function chooseHistoryExportPath(): Promise<string | null> {
   const selected = await save({
@@ -258,6 +266,14 @@ export async function deletePlaylist(playlistId: string): Promise<void> {
 
 export async function addTrackToPlaylist(playlistId: string, trackId: string): Promise<Playlist> {
   return invoke<Playlist>("add_track_to_playlist", { playlistId, trackId });
+}
+
+export async function addTracksToPlaylist(playlistId: string | null, newName: string | null, trackIds: string[]): Promise<Playlist> {
+  return invoke<Playlist>("add_tracks_to_playlist", { playlistId, newName, trackIds });
+}
+
+export async function setTracksFavorite(trackIds: string[], favorite: boolean): Promise<void> {
+  return invoke<void>("set_tracks_favorite", { trackIds, favorite });
 }
 
 export async function removeTrackFromPlaylist(playlistId: string, trackId: string): Promise<Playlist> {

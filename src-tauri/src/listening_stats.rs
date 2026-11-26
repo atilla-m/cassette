@@ -1,3 +1,4 @@
+use super::listening_time::ListeningTimeStats;
 use super::portable_history::CoverageSource;
 use super::portable_history::PortableRef;
 use super::{LibraryDatabase, Track};
@@ -19,6 +20,7 @@ pub(crate) struct TrackPeriodCount {
 pub(crate) struct ListeningStats {
     track_counts: Vec<TrackPeriodCount>,
     recent_listens: Vec<RecentListen>,
+    listening_time: ListeningTimeStats,
     daily_plays: Vec<i64>,
     total_plays: i64,
     dated_plays: i64,
@@ -246,6 +248,12 @@ impl LibraryDatabase {
         Ok(ListeningStats {
             track_counts,
             recent_listens,
+            listening_time: self.listening_time_stats(
+                start_utc,
+                end_utc,
+                day_boundaries_utc,
+                recent_limit,
+            )?,
             daily_plays,
             total_plays,
             dated_plays,
@@ -256,12 +264,12 @@ impl LibraryDatabase {
         })
     }
 
-    fn remove_listening_event(&mut self, event_id: &str) -> Result<Option<Track>, String> {
+    fn remove_listening_event(&mut self, event_id: &str) -> Result<Option<RemovedListen>, String> {
         let transaction = self
             .connection
             .transaction()
             .map_err(|error| error.to_string())?;
-        let track_id: Option<String> = transaction
+        let qualified_track: Option<String> = transaction
             .query_row(
                 "DELETE FROM track_play_events WHERE event_id = ?1 RETURNING track_id",
                 [event_id],
@@ -269,20 +277,54 @@ impl LibraryDatabase {
             )
             .optional()
             .map_err(|error| format!("Could not remove the listen: {error}"))?;
-        let Some(track_id) = track_id else {
+        let timed_track: Option<String> = transaction
+            .query_row(
+                "SELECT track_id FROM track_listening_minutes WHERE session_id = ?1 LIMIT 1",
+                [event_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| format!("Could not find listening time: {error}"))?;
+        let Some(track_id) = qualified_track.as_ref().or(timed_track.as_ref()) else {
             return Ok(None);
         };
-        transaction.execute(
-            "UPDATE tracks SET play_count = MAX(0, play_count - 1), \
-             last_played_at = (SELECT MAX(played_at_utc) FROM track_play_events WHERE track_id = ?1) \
-             WHERE id = ?1",
-            [&track_id],
-        ).map_err(|error| format!("Could not update playback totals: {error}"))?;
+        if qualified_track.is_some() {
+            transaction.execute(
+                "UPDATE tracks SET play_count = MAX(0, play_count - 1), \
+                 last_played_at = (SELECT MAX(played_at_utc) FROM track_play_events WHERE track_id = ?1) \
+                 WHERE id = ?1",
+                [track_id],
+            ).map_err(|error| format!("Could not update playback totals: {error}"))?;
+        }
+        transaction
+            .execute(
+                "DELETE FROM track_listening_minutes WHERE session_id = ?1",
+                [event_id],
+            )
+            .map_err(|error| format!("Could not remove listening time: {error}"))?;
+        transaction
+            .execute(
+                "INSERT OR IGNORE INTO removed_listening_sessions VALUES (?1)",
+                [event_id],
+            )
+            .map_err(|error| format!("Could not keep the listen removed: {error}"))?;
         transaction
             .commit()
             .map_err(|error| format!("Could not save listening history: {error}"))?;
-        self.track_by_id(&track_id)
+        Ok(Some(RemovedListen {
+            track: self.track_by_id(track_id)?,
+            listened_ms: self.listening_time_for_track(track_id)?,
+            track_id: track_id.clone(),
+        }))
     }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RemovedListen {
+    track: Option<Track>,
+    track_id: String,
+    listened_ms: i64,
 }
 
 #[tauri::command(async)]
@@ -303,7 +345,7 @@ pub(crate) fn get_listening_stats(
 pub(crate) fn remove_listening_event(
     event_id: String,
     library: State<'_, Mutex<LibraryDatabase>>,
-) -> Result<Option<Track>, String> {
+) -> Result<Option<RemovedListen>, String> {
     let mut library = library
         .lock()
         .map_err(|_| "Library cache is unavailable.".to_owned())?;
@@ -403,6 +445,8 @@ mod tests {
         let updated = database
             .remove_listening_event("event-before-end")
             .unwrap()
+            .unwrap()
+            .track
             .unwrap();
         assert_eq!(updated.play_count, 9);
         assert_eq!(updated.last_played_at, Some(199));
@@ -420,12 +464,19 @@ mod tests {
         assert_eq!(latest.recent_listens[0].event_id, duplicate);
         assert_eq!(latest.recent_listens[0].played_at_utc, 199);
 
-        let updated = database.remove_listening_event(duplicate).unwrap().unwrap();
+        let updated = database
+            .remove_listening_event(duplicate)
+            .unwrap()
+            .unwrap()
+            .track
+            .unwrap();
         assert_eq!(updated.play_count, 8);
         assert_eq!(updated.last_played_at, Some(100));
         let updated = database
             .remove_listening_event("event-at-start")
             .unwrap()
+            .unwrap()
+            .track
             .unwrap();
         assert_eq!(updated.play_count, 7);
         assert_eq!(updated.last_played_at, None);
@@ -434,6 +485,51 @@ mod tests {
         assert_eq!(all.undated_legacy_plays, 9);
         assert_eq!(all.dated_plays, 1);
         assert_eq!(all.recent_listens[0].event_id, "event-at-end");
+    }
+
+    #[test]
+    fn listening_time_keeps_partial_plays_and_counts_each_minute_once() {
+        use crate::listening_time::ListeningMinute;
+        let mut database = database();
+        let session = "time-fixture-a";
+        let sample = |minute, listened| ListeningMinute {
+            session_id: session.into(),
+            track_id: "a".into(),
+            minute_utc: minute,
+            listened_ms: listened,
+            last_sample_utc_ms: minute * 1000 + listened,
+        };
+        database
+            .record_listening_minutes(vec![sample(60, 1200), sample(120, 900)])
+            .unwrap();
+        let totals = database
+            .record_listening_minutes(vec![sample(60, 800), sample(120, 1500)])
+            .unwrap();
+        assert_eq!(totals["a"], 2700);
+        let selected = database
+            .listening_stats(Some(120), Some(180), &[120, 180], 10)
+            .unwrap();
+        assert_eq!(selected.listening_time.track_times["a"], 1500);
+        assert_eq!(selected.total_plays, 0);
+        assert_eq!(
+            database
+                .remove_listening_event(session)
+                .unwrap()
+                .unwrap()
+                .listened_ms,
+            0
+        );
+        let totals = database
+            .record_listening_minutes(vec![sample(120, 2000)])
+            .unwrap();
+        assert_eq!(totals["a"], 0);
+        assert_eq!(
+            database
+                .record_play_at("a", session, 180)
+                .unwrap()
+                .play_count,
+            9
+        );
     }
 
     #[test]

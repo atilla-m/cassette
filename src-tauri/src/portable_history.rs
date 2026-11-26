@@ -190,11 +190,15 @@ impl LibraryDatabase {
         new_tracks: &[Track],
     ) -> Result<Vec<(String, PathBuf)>, String> {
         let retained: HashSet<&str> = new_tracks.iter().map(|track| track.id.as_str()).collect();
+        let listening_time = self.listening_time_by_track(None, None)?;
         let mut paths: Vec<_> = self
             .load_cache()?
             .tracks
             .into_iter()
-            .filter(|track| track.play_count > 0 && !retained.contains(track.id.as_str()))
+            .filter(|track| {
+                (track.play_count > 0 || listening_time.contains_key(&track.id))
+                    && !retained.contains(track.id.as_str())
+            })
             .map(|track| (track.id, PathBuf::from(track.file_path)))
             .collect();
         let mut query = self
@@ -224,10 +228,13 @@ impl LibraryDatabase {
         fingerprints: &HashMap<String, String>,
     ) -> Result<Vec<(String, String)>, String> {
         let retained: HashSet<&str> = new_tracks.iter().map(|track| track.id.as_str()).collect();
+        let listening_time = self.listening_time_by_track(None, None)?;
         let source = self.source_id()?;
         let mut removed = Vec::new();
         for track in self.load_cache()?.tracks {
-            if track.play_count == 0 || retained.contains(track.id.as_str()) {
+            if (track.play_count == 0 && !listening_time.contains_key(&track.id))
+                || retained.contains(track.id.as_str())
+            {
                 continue;
             }
             let cached = cached_history_reference(&self.connection, &track.id)?;
@@ -300,7 +307,9 @@ impl LibraryDatabase {
             [],
         )?;
         let orphan_ids = {
-            let mut statement = transaction.prepare("SELECT DISTINCT track_id FROM track_play_events WHERE track_id NOT IN (SELECT id FROM tracks) AND track_id NOT IN (SELECT track_id FROM history_pending_tracks)")?;
+            let mut statement = transaction.prepare("SELECT track_id FROM (
+                SELECT track_id FROM track_play_events UNION SELECT track_id FROM track_listening_minutes
+            ) WHERE track_id NOT IN (SELECT id FROM tracks) AND track_id NOT IN (SELECT track_id FROM history_pending_tracks)")?;
             let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
@@ -330,6 +339,10 @@ impl LibraryDatabase {
             )?;
             transaction.execute(
                 "UPDATE track_play_events SET track_id = ?2 WHERE track_id = ?1",
+                params![orphan, pending],
+            )?;
+            transaction.execute(
+                "UPDATE track_listening_minutes SET track_id = ?2 WHERE track_id = ?1",
                 params![orphan, pending],
             )?;
             transaction.execute(
@@ -604,6 +617,12 @@ pub(super) fn archive_removed_history(
         transaction
             .execute(
                 "UPDATE track_play_events SET track_id = ?2 WHERE track_id = ?1",
+                params![old_id, pending],
+            )
+            .map_err(|error| error.to_string())?;
+        transaction
+            .execute(
+                "UPDATE track_listening_minutes SET track_id = ?2 WHERE track_id = ?1",
                 params![old_id, pending],
             )
             .map_err(|error| error.to_string())?;
@@ -1398,7 +1417,14 @@ fn promote_pending(
         "SELECT COALESCE(SUM(undated_plays), 0) FROM history_legacy_baselines WHERE track_id = ?1",
         [pending], |row| row.get(0),
     ).map_err(|error| format!("Could not inspect pending totals: {error}"))?;
-    if pending_events + pending_baselines == 0 {
+    let has_listening_time: bool = transaction
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM track_listening_minutes WHERE track_id = ?1)",
+            [pending],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    if pending_events + pending_baselines == 0 && !has_listening_time {
         return Ok(());
     }
     if pending_events + pending_baselines > 0 {
@@ -1423,6 +1449,12 @@ fn promote_pending(
             params![pending, target],
         )
         .map_err(|error| format!("Could not associate pending events: {error}"))?;
+    transaction
+        .execute(
+            "UPDATE track_listening_minutes SET track_id = ?2 WHERE track_id = ?1",
+            params![pending, target],
+        )
+        .map_err(|error| format!("Could not associate listening time: {error}"))?;
     transaction
         .execute(
             "UPDATE history_legacy_baselines SET track_id = ?2 WHERE track_id = ?1",

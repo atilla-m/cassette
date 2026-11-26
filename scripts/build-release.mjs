@@ -9,7 +9,7 @@ const UNIT_SEPARATOR = "\u001f";
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const workspace = realpathSync(resolve(scriptDirectory, ".."));
 const packageInfo = JSON.parse(readFileSync(join(workspace, "package.json"), "utf8"));
-const expectedVersion = process.platform === "win32" ? packageInfo.version : "0.1.0-beta.9";
+const expectedVersion = process.platform === "win32" ? packageInfo.version : "0.1.0-beta.10";
 
 if (packageInfo.version !== expectedVersion) {
   throw new Error(

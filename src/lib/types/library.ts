@@ -22,6 +22,7 @@ export type Track = {
   lyricsKind: "synced" | "plain" | null;
   isFavorite: boolean;
   playCount: number;
+  listenedMs?: number;
   lastPlayedAt: number | null;
 };
 
