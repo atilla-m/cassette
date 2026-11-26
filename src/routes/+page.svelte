@@ -12965,11 +12965,14 @@
   .synced-lyrics,
   .plain-lyrics {
     display: grid;
+    grid-template-columns: minmax(0, 1fr);
     justify-items: center;
     max-height: min(66vh, 650px);
+    overflow-x: hidden;
     overflow-y: auto;
     overscroll-behavior: contain;
     scrollbar-color: transparent transparent;
+    scrollbar-gutter: stable both-edges;
     scrollbar-width: thin;
     transition: scrollbar-color 180ms ease;
   }
@@ -13026,6 +13029,7 @@
   .synced-lyrics button,
   .plain-lyrics p {
     width: auto;
+    min-width: 0;
     max-width: min(100%, 940px);
     margin: 0;
     font: inherit;
@@ -13043,12 +13047,11 @@
     background: transparent;
     color: var(--text-dim);
     cursor: default;
-    font-weight: 620;
+    font-weight: 680;
     transition:
       background 150ms ease,
       color 150ms ease,
-      text-shadow 150ms ease,
-      transform 150ms ease;
+      text-shadow 150ms ease;
   }
 
   .synced-lyrics button:hover,
@@ -13061,12 +13064,10 @@
   .synced-lyrics button.active {
     background: transparent;
     color: var(--text);
-    font-weight: 900;
     text-shadow:
       0 0 14px rgba(236, 255, 251, 0.2),
       0 0 28px rgba(158, 227, 217, 0.18),
       0 0 52px color-mix(in srgb, var(--accent) 14%, transparent);
-    transform: scale(1.025);
   }
 
   .synced-lyrics button.lyrics-break-cue {
@@ -13100,7 +13101,6 @@
   .synced-lyrics button.lyrics-break-cue.active {
     color: var(--text);
     text-shadow: 0 0 18px color-mix(in srgb, var(--accent) 26%, transparent);
-    transform: none;
     opacity: 1;
   }
 
