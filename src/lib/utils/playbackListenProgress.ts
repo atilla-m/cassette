@@ -3,6 +3,7 @@ import type { ListeningMinute } from "$lib/types/listening";
 // The media clock supplies listening time. The monotonic clock only rejects
 // implausible jumps between samples, such as a seek that is still settling.
 const POSITION_JUMP_TOLERANCE_SECONDS = 0.25;
+const MINIMUM_LISTEN_SECONDS = 5;
 
 export class PlaybackListenProgress {
   private sample: { position: number; at: number } | null = null;
@@ -37,7 +38,7 @@ export class PlaybackListenProgress {
   }
 
   qualifies(duration: number | null, percentage: number, naturalEnd: boolean) {
-    if (this.listenedSeconds <= 0) return false;
+    if (this.listenedSeconds < MINIMUM_LISTEN_SECONDS) return false;
     if (duration === null || !Number.isFinite(duration) || duration <= 0) return naturalEnd;
 
     const tolerance = naturalEnd && percentage === 100 ? POSITION_JUMP_TOLERANCE_SECONDS : 0;

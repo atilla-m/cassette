@@ -5,6 +5,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use tauri::State;
 
+const MINIMUM_LISTENING_MS: i64 = 5000;
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ListeningMinute {
@@ -19,10 +21,10 @@ pub(crate) struct ListeningMinute {
 #[serde(rename_all = "camelCase")]
 pub(super) struct ListeningTimeStats {
     pub(super) track_times: HashMap<String, i64>,
-    daily_listened_ms: Vec<i64>,
+    pub(super) daily_listened_ms: Vec<i64>,
     total_listened_ms: i64,
     recent_sessions: Vec<ListeningSession>,
-    session_count: i64,
+    pub(super) session_count: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -35,8 +37,9 @@ struct ListeningSession {
 }
 
 impl LibraryDatabase {
-    pub(super) fn migrate_listening_time(&self) -> rusqlite::Result<()> {
-        self.connection.execute_batch(
+    pub(super) fn migrate_listening_time(&mut self) -> rusqlite::Result<()> {
+        let transaction = self.connection.transaction()?;
+        transaction.execute_batch(
             "CREATE TABLE IF NOT EXISTS track_listening_minutes (
                 session_id TEXT NOT NULL,
                 track_id TEXT NOT NULL,
@@ -47,8 +50,27 @@ impl LibraryDatabase {
             );
             CREATE INDEX IF NOT EXISTS listening_minutes_track ON track_listening_minutes (track_id);
             CREATE INDEX IF NOT EXISTS listening_minutes_date ON track_listening_minutes (minute_utc);
-            CREATE TABLE IF NOT EXISTS removed_listening_sessions (session_id TEXT PRIMARY KEY NOT NULL);",
-        )
+            CREATE TABLE IF NOT EXISTS removed_listening_sessions (session_id TEXT PRIMARY KEY NOT NULL);
+            CREATE TABLE IF NOT EXISTS counted_listening_sessions (session_id TEXT PRIMARY KEY NOT NULL);
+            CREATE VIEW IF NOT EXISTS counted_listening_minutes AS
+                SELECT minutes.* FROM track_listening_minutes AS minutes
+                JOIN counted_listening_sessions USING (session_id);",
+        )?;
+        transaction.execute(
+            "INSERT OR IGNORE INTO counted_listening_sessions (session_id)
+             SELECT session_id FROM track_listening_minutes
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM library_meta WHERE key = 'counted_listening_sessions_backfilled'
+             )
+             GROUP BY session_id HAVING SUM(listened_ms) >= ?1",
+            [MINIMUM_LISTENING_MS],
+        )?;
+        transaction.execute(
+            "INSERT OR IGNORE INTO library_meta (key, value)
+             VALUES ('counted_listening_sessions_backfilled', '1')",
+            [],
+        )?;
+        transaction.commit()
     }
 
     pub(super) fn record_listening_minutes(
@@ -105,6 +127,20 @@ impl LibraryDatabase {
                     .map_err(|error| format!("Could not save listening time: {error}"))?;
             }
         }
+        {
+            let sessions: HashSet<_> = minutes.iter().map(|minute| &minute.session_id).collect();
+            let mut qualify = transaction.prepare(
+                "INSERT OR IGNORE INTO counted_listening_sessions (session_id)
+                 SELECT ?1
+                 WHERE NOT EXISTS (SELECT 1 FROM counted_listening_sessions WHERE session_id = ?1)
+                   AND (SELECT SUM(listened_ms) FROM track_listening_minutes WHERE session_id = ?1) >= ?2",
+            ).map_err(|error| error.to_string())?;
+            for session in sessions {
+                qualify
+                    .execute(params![session, MINIMUM_LISTENING_MS])
+                    .map_err(|error| format!("Could not count the listening session: {error}"))?;
+            }
+        }
         transaction.commit().map_err(|error| error.to_string())?;
         ids.into_iter()
             .map(|id| {
@@ -116,7 +152,7 @@ impl LibraryDatabase {
 
     pub(super) fn listening_time_for_track(&self, id: &str) -> Result<i64, String> {
         self.connection.query_row(
-            "SELECT COALESCE(SUM(listened_ms), 0) FROM track_listening_minutes WHERE track_id = ?1",
+            "SELECT COALESCE(SUM(listened_ms), 0) FROM counted_listening_minutes WHERE track_id = ?1",
             [id], |row| row.get(0),
         ).map_err(|error| format!("Could not read listening time: {error}"))
     }
@@ -129,7 +165,7 @@ impl LibraryDatabase {
         let mut statement = self
             .connection
             .prepare(
-                "SELECT track_id, SUM(listened_ms) FROM track_listening_minutes
+                "SELECT track_id, SUM(listened_ms) FROM counted_listening_minutes
              WHERE minute_utc >= ?1 AND minute_utc < ?2
              GROUP BY track_id",
             )
@@ -161,7 +197,7 @@ impl LibraryDatabase {
             let mut statement = self
                 .connection
                 .prepare(
-                    "SELECT minute_utc, SUM(listened_ms) FROM track_listening_minutes
+                    "SELECT minute_utc, SUM(listened_ms) FROM counted_listening_minutes
                  WHERE minute_utc >= ?1 AND minute_utc < ?2
                    AND track_id NOT IN (SELECT track_id FROM ignored_tracks)
                  GROUP BY minute_utc",
@@ -184,7 +220,7 @@ impl LibraryDatabase {
         let session_count = self
             .connection
             .query_row(
-                "SELECT COUNT(DISTINCT session_id) FROM track_listening_minutes
+                "SELECT COUNT(DISTINCT session_id) FROM counted_listening_minutes
              WHERE minute_utc >= ?1 AND minute_utc < ?2
                AND track_id NOT IN (SELECT track_id FROM ignored_tracks)",
                 params![start, end],
@@ -193,7 +229,7 @@ impl LibraryDatabase {
             .map_err(|error| error.to_string())?;
         let mut statement = self.connection.prepare(
             "SELECT session_id, track_id, MAX(last_sample_utc_ms) / 1000, SUM(listened_ms)
-             FROM track_listening_minutes
+             FROM counted_listening_minutes
              WHERE minute_utc >= ?1 AND minute_utc < ?2
                AND track_id NOT IN (SELECT track_id FROM ignored_tracks)
              GROUP BY session_id, track_id ORDER BY MAX(last_sample_utc_ms) DESC, session_id DESC LIMIT ?3",

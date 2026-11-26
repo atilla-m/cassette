@@ -308,7 +308,7 @@ impl LibraryDatabase {
         )?;
         let orphan_ids = {
             let mut statement = transaction.prepare("SELECT track_id FROM (
-                SELECT track_id FROM track_play_events UNION SELECT track_id FROM track_listening_minutes
+                SELECT track_id FROM track_play_events UNION SELECT track_id FROM counted_listening_minutes
             ) WHERE track_id NOT IN (SELECT id FROM tracks) AND track_id NOT IN (SELECT track_id FROM history_pending_tracks)")?;
             let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
             rows.collect::<rusqlite::Result<Vec<_>>>()?

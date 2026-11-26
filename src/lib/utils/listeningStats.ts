@@ -6,7 +6,7 @@ export function listeningDurationLabel(ms: number) {
   const hours = Math.floor(seconds / 3600);
   const minutes = Math.floor(seconds / 60) % 60;
   const remainder = seconds % 60;
-  return hours ? `${hours}h ${minutes}m` : minutes ? `${minutes}m ${remainder}s` : `${seconds}s`;
+  return hours ? `${hours}h ${minutes}m ${remainder}s` : minutes ? `${minutes}m ${remainder}s` : `${seconds}s`;
 }
 
 export function statsDayValueLabel(day: string | null, chartDates: string[], dailyPlays: number[], label = (count: number) => `${count} ${count === 1 ? "play" : "plays"}`) {

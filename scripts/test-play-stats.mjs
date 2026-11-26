@@ -6,9 +6,9 @@ import {
   nextStatsLimit,
   rankMostPlayedTracks,
   rankRecentlyPlayedTracks,
-  sortAlbumsByPlayCount,
-  sortArtistsByPlayCount,
-  sortGenresByPlayCount,
+  sortAlbumsByActivity,
+  sortArtistsByActivity,
+  sortGenresByActivity,
   visibleStatsItems,
 } from "../src/lib/utils/playStats.ts";
 
@@ -56,7 +56,19 @@ test("an end after seeking to the tail does not qualify, and a new track starts 
   progress.observe(2, 3300, true);
   assert.equal(progress.qualifies(10, 25, false), false);
   assert.equal(progress.qualifies(null, 50, false), false);
+  assert.equal(progress.qualifies(null, 50, true), false);
+  progress.observe(5, 6300, true);
   assert.equal(progress.qualifies(null, 50, true), true);
+});
+
+test("a play needs five seconds of actual audio as well as the configured threshold", () => {
+  const progress = new PlaybackListenProgress();
+  progress.reset(0);
+  progress.observe(4.999, 4999, true);
+  assert.equal(progress.qualifies(6, 50, false), false);
+  progress.observe(5, 5000, true);
+  assert.equal(progress.qualifies(6, 50, false), true);
+  assert.equal(progress.qualifies(12, 50, false), false);
 });
 
 test("measured audio is split across a minute boundary and in-flight samples retain later updates", () => {
@@ -150,10 +162,29 @@ test("most and least played browse sorting includes zeroes and breaks ties deter
     track({ id: "genre-a", genres: ["Alpha"], playCount: 3 }),
   ]);
 
-  assert.deepEqual(sortAlbumsByPlayCount(albums, "mostPlayed").map((album) => album.title), ["Alpha", "Beta", "Zulu"]);
-  assert.deepEqual(sortAlbumsByPlayCount(albums, "leastPlayed").map((album) => album.title), ["Zulu", "Alpha", "Beta"]);
-  assert.deepEqual(sortArtistsByPlayCount(artists, "mostPlayed").map((artist) => artist.name), ["Alpha", "Beta", "Zulu"]);
-  assert.deepEqual(sortGenresByPlayCount(genres, "leastPlayed").map((genre) => genre.name), ["Zulu", "Alpha", "Beta"]);
+  assert.deepEqual(sortAlbumsByActivity(albums, "mostPlayed").map((album) => album.title), ["Alpha", "Beta", "Zulu"]);
+  assert.deepEqual(sortAlbumsByActivity(albums, "leastPlayed").map((album) => album.title), ["Zulu", "Alpha", "Beta"]);
+  assert.deepEqual(sortArtistsByActivity(artists, "mostPlayed").map((artist) => artist.name), ["Alpha", "Beta", "Zulu"]);
+  assert.deepEqual(sortGenresByActivity(genres, "leastPlayed").map((genre) => genre.name), ["Zulu", "Alpha", "Beta"]);
+});
+
+test("library activity sorts keep play counts and listening time independent", () => {
+  const tracks = [
+    track({ album: "Alpha", artist: "Alpha", albumArtist: "Alpha", genres: ["Alpha"], playCount: 9 }),
+    track({ album: "Beta", artist: "Beta", albumArtist: "Beta", genres: ["Beta"], playCount: 1, listenedMs: 6000 }),
+    track({ album: "Beta", artist: "Beta", albumArtist: "Beta", genres: ["Beta"], playCount: 0, listenedMs: 5000 }),
+  ];
+
+  for (const [build, sort] of [
+    [buildAlbums, sortAlbumsByActivity],
+    [buildArtists, sortArtistsByActivity],
+    [buildGenres, sortGenresByActivity],
+  ]) {
+    const items = build(tracks);
+    assert.deepEqual(sort(items, "mostPlayed").map(({ playCount, listenedMs }) => [playCount, listenedMs]), [[9, 0], [1, 11000]]);
+    assert.deepEqual(sort(items, "mostListened").map(({ playCount }) => playCount), [1, 9]);
+    assert.deepEqual(sort(items, "leastListened").map(({ playCount }) => playCount), [9, 1]);
+  }
 });
 
 test("stats ranking preserves unique-track recently played semantics", () => {

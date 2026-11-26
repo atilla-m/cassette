@@ -1,6 +1,7 @@
 import type { Track } from "$lib/types/library";
+import { compareListeningActivity, isActivitySortOrder, type ActivitySortOrder } from "./playStats.ts";
 
-export type AlbumTrackSortKey = "trackNumber" | "title" | "album" | "artist" | "duration" | "mostPlayed" | "leastPlayed";
+export type AlbumTrackSortKey = "trackNumber" | "title" | "album" | "artist" | "duration" | ActivitySortOrder;
 export type AlbumTrackSortDirection = "asc" | "desc";
 
 function compareText(left: string, right: string) {
@@ -27,11 +28,10 @@ function directedOptionalNumber(left: number | null, right: number | null, direc
 
 // Pure display ordering: never mutates the input or writes tags. Album-level
 // playback actions keep using their original track-number order.
-export function sortAlbumDisplayTracks(tracks: Track[], key: AlbumTrackSortKey, direction: AlbumTrackSortDirection, activity = (track: Track) => track.playCount) {
+export function sortAlbumDisplayTracks(tracks: Track[], key: AlbumTrackSortKey, direction: AlbumTrackSortDirection) {
   return [...tracks].sort((left, right) => {
-    if (key === "mostPlayed" || key === "leastPlayed") {
-      return (key === "mostPlayed" ? activity(right) - activity(left) : activity(left) - activity(right))
-        || trackOrder(left, right);
+    if (isActivitySortOrder(key)) {
+      return compareListeningActivity(left, right, key) || trackOrder(left, right);
     }
 
     let comparison = 0;
@@ -54,6 +54,6 @@ export function sortAlbumDisplayTracks(tracks: Track[], key: AlbumTrackSortKey, 
   });
 }
 
-export function topPlayedTracks(tracks: Track[], limit = 10, activity = (track: Track) => track.playCount) {
-  return sortAlbumDisplayTracks(tracks, "mostPlayed", "asc", activity).slice(0, Math.max(0, limit));
+export function topPlayedTracks(tracks: Track[], limit = 10, order: "mostPlayed" | "mostListened" = "mostPlayed") {
+  return sortAlbumDisplayTracks(tracks, order, "asc").slice(0, Math.max(0, limit));
 }

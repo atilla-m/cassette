@@ -9,7 +9,7 @@ const track = (id, discNumber, trackNumber, title, artist, playCount, durationSe
 
 test("album sorting is display-only, deterministic, and includes zero plays", () => {
   const original = [
-    track("b", 1, 2, "Beta", "Two", 0, 12),
+    { ...track("b", 1, 2, "Beta", "Two", 0, 12), listenedMs: 15000 },
     track("c", 2, 1, "Gamma", "One", 4, 9),
     track("a", 1, 1, "Alpha", "One", 4, 15),
   ];
@@ -19,6 +19,8 @@ test("album sorting is display-only, deterministic, and includes zero plays", ()
   assert.deepEqual(ids("trackNumber", "desc"), ["c", "b", "a"]);
   assert.deepEqual(ids("mostPlayed"), ["a", "c", "b"]);
   assert.deepEqual(ids("leastPlayed"), ["b", "a", "c"]);
+  assert.deepEqual(ids("mostListened"), ["b", "a", "c"]);
+  assert.deepEqual(ids("leastListened"), ["a", "c", "b"]);
   assert.deepEqual(ids("title", "desc"), ["c", "b", "a"]);
   assert.deepEqual(ids("artist"), ["a", "c", "b"]);
   const acrossAlbums = [

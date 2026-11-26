@@ -304,6 +304,12 @@ impl LibraryDatabase {
             .map_err(|error| format!("Could not remove listening time: {error}"))?;
         transaction
             .execute(
+                "DELETE FROM counted_listening_sessions WHERE session_id = ?1",
+                [event_id],
+            )
+            .map_err(|error| format!("Could not remove the listening session: {error}"))?;
+        transaction
+            .execute(
                 "INSERT OR IGNORE INTO removed_listening_sessions VALUES (?1)",
                 [event_id],
             )
@@ -500,16 +506,22 @@ mod tests {
             last_sample_utc_ms: minute * 1000 + listened,
         };
         database
-            .record_listening_minutes(vec![sample(60, 1200), sample(120, 900)])
+            .record_listening_minutes(vec![sample(60, 2400), sample(120, 2499)])
             .unwrap();
+        let before = database
+            .listening_stats(None, None, &[0, 120, 180], 10)
+            .unwrap();
+        assert!(before.listening_time.track_times.is_empty());
+        assert_eq!(before.listening_time.session_count, 0);
+        assert_eq!(before.listening_time.daily_listened_ms, [0, 0]);
         let totals = database
-            .record_listening_minutes(vec![sample(60, 800), sample(120, 1500)])
+            .record_listening_minutes(vec![sample(60, 800), sample(120, 2600)])
             .unwrap();
-        assert_eq!(totals["a"], 2700);
+        assert_eq!(totals["a"], 5000);
         let selected = database
             .listening_stats(Some(120), Some(180), &[120, 180], 10)
             .unwrap();
-        assert_eq!(selected.listening_time.track_times["a"], 1500);
+        assert_eq!(selected.listening_time.track_times["a"], 2600);
         assert_eq!(selected.total_plays, 0);
         assert_eq!(
             database
@@ -529,6 +541,34 @@ mod tests {
                 .unwrap()
                 .play_count,
             9
+        );
+    }
+
+    #[test]
+    fn upgrading_filters_existing_short_sessions_without_erasing_samples() {
+        let mut database = database();
+        database
+            .connection
+            .execute_batch(
+                "DELETE FROM library_meta WHERE key = 'counted_listening_sessions_backfilled';
+             INSERT INTO track_listening_minutes VALUES
+                ('old-short-a', 'a', 60, 3000, 63000),
+                ('old-short-b', 'a', 60, 3000, 66000),
+                ('old-long', 'b', 60, 2000, 120000),
+                ('old-long', 'b', 120, 3000, 123000);",
+            )
+            .unwrap();
+        database.migrate_listening_time().unwrap();
+        assert_eq!(database.listening_time_for_track("a").unwrap(), 0);
+        assert_eq!(database.listening_time_for_track("b").unwrap(), 5000);
+        assert_eq!(
+            database
+                .connection
+                .query_row("SELECT COUNT(*) FROM track_listening_minutes", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            4
         );
     }
 

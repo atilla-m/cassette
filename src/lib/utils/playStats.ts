@@ -1,6 +1,18 @@
 import type { Album, Artist, Genre, Track } from "$lib/types/library";
 
-export type PlayCountOrder = "mostPlayed" | "leastPlayed";
+export type ActivitySortOrder = "mostPlayed" | "leastPlayed" | "mostListened" | "leastListened";
+export type ListeningActivity = Pick<Track, "playCount" | "listenedMs">;
+
+export const activitySortOptions: { value: ActivitySortOrder; label: string }[] = [
+  { value: "mostPlayed", label: "Most played" },
+  { value: "leastPlayed", label: "Least played" },
+  { value: "mostListened", label: "Most listening time" },
+  { value: "leastListened", label: "Least listening time" },
+];
+
+export function isActivitySortOrder(key: string): key is ActivitySortOrder {
+  return activitySortOptions.some((option) => option.value === key);
+}
 
 export const STATS_PAGE_SIZE = 50;
 
@@ -9,29 +21,31 @@ function compareText(left: string, right: string) {
     || left.localeCompare(right);
 }
 
-function comparePlayCounts(left: number, right: number, order: PlayCountOrder) {
-  return order === "mostPlayed" ? right - left : left - right;
+export function compareListeningActivity(left: ListeningActivity, right: ListeningActivity, order: ActivitySortOrder) {
+  const byTime = order === "mostListened" || order === "leastListened";
+  const difference = byTime ? (left.listenedMs ?? 0) - (right.listenedMs ?? 0) : left.playCount - right.playCount;
+  return order === "mostPlayed" || order === "mostListened" ? -difference : difference;
 }
 
-export function sortAlbumsByPlayCount(albums: Album[], order: PlayCountOrder) {
+export function sortAlbumsByActivity(albums: Album[], order: ActivitySortOrder) {
   return [...albums].sort((left, right) =>
-    comparePlayCounts(left.playCount, right.playCount, order)
+    compareListeningActivity(left, right, order)
     || compareText(left.title, right.title)
     || compareText(left.artist, right.artist)
     || compareText(left.id, right.id),
   );
 }
 
-export function sortArtistsByPlayCount(artists: Artist[], order: PlayCountOrder) {
+export function sortArtistsByActivity(artists: Artist[], order: ActivitySortOrder) {
   return [...artists].sort((left, right) =>
-    comparePlayCounts(left.playCount, right.playCount, order)
+    compareListeningActivity(left, right, order)
     || compareText(left.name, right.name),
   );
 }
 
-export function sortGenresByPlayCount(genres: Genre[], order: PlayCountOrder) {
+export function sortGenresByActivity(genres: Genre[], order: ActivitySortOrder) {
   return [...genres].sort((left, right) =>
-    comparePlayCounts(left.playCount, right.playCount, order)
+    compareListeningActivity(left, right, order)
     || compareText(left.name, right.name),
   );
 }

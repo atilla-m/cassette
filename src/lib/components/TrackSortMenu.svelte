@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { AlbumTrackSortDirection, AlbumTrackSortKey } from "$lib/utils/albumTrackSort";
+  import { isActivitySortOrder } from "$lib/utils/playStats";
   import { tick } from "svelte";
 
   type Option = { value: AlbumTrackSortKey; label: string };
@@ -16,7 +17,7 @@
   let rootElement: HTMLDivElement | undefined = $state();
   let triggerElement: HTMLButtonElement | undefined = $state();
   let panelElement: HTMLDivElement | undefined = $state();
-  let directionEnabled = $derived(value !== "mostPlayed" && value !== "leastPlayed");
+  let directionEnabled = $derived(!isActivitySortOrder(value));
 
   function closeMenu(restoreFocus = false) {
     isOpen = false;

@@ -2,7 +2,7 @@ import type { Album, Artist, Genre, Track } from "$lib/types/library";
 
 const palette = ["#2f8f83", "#b95f3d", "#8b6bd6", "#c59b40", "#4d84c4", "#b24f72"];
 
-export function buildAlbums(tracks: Track[], activity = (track: Track) => track.playCount): Album[] {
+export function buildAlbums(tracks: Track[]): Album[] {
   const albumsByKey = new Map<string, Album>();
 
   for (const track of tracks) {
@@ -13,7 +13,8 @@ export function buildAlbums(tracks: Track[], activity = (track: Track) => track.
 
     if (existing) {
       existing.trackCount += 1;
-      existing.playCount += activity(track);
+      existing.playCount += track.playCount;
+      existing.listenedMs = (existing.listenedMs ?? 0) + (track.listenedMs ?? 0);
       existing.year ??= track.year;
       existing.coverArtPath ??= track.coverArtPath;
       continue;
@@ -25,7 +26,8 @@ export function buildAlbums(tracks: Track[], activity = (track: Track) => track.
       artist,
       year: track.year,
       trackCount: 1,
-      playCount: activity(track),
+      playCount: track.playCount,
+      listenedMs: track.listenedMs ?? 0,
       color: colorFor(key),
       coverArtPath: track.coverArtPath,
     });
@@ -36,14 +38,15 @@ export function buildAlbums(tracks: Track[], activity = (track: Track) => track.
   );
 }
 
-export function buildArtists(tracks: Track[], activity = (track: Track) => track.playCount): Artist[] {
-  const statsByArtist = new Map<string, { trackCount: number; playCount: number }>();
+export function buildArtists(tracks: Track[]): Artist[] {
+  const statsByArtist = new Map<string, { trackCount: number; playCount: number; listenedMs: number }>();
 
   for (const track of tracks) {
     const artist = track.artist ?? track.albumArtist ?? "Unknown Artist";
-    const stats = statsByArtist.get(artist) ?? { trackCount: 0, playCount: 0 };
+    const stats = statsByArtist.get(artist) ?? { trackCount: 0, playCount: 0, listenedMs: 0 };
     stats.trackCount += 1;
-    stats.playCount += activity(track);
+    stats.playCount += track.playCount;
+    stats.listenedMs += track.listenedMs ?? 0;
     statsByArtist.set(artist, stats);
   }
 
@@ -52,18 +55,20 @@ export function buildArtists(tracks: Track[], activity = (track: Track) => track
       name,
       detail: `${stats.trackCount} ${stats.trackCount === 1 ? "song" : "songs"}`,
       playCount: stats.playCount,
+      listenedMs: stats.listenedMs,
       color: colorFor(name),
     }))
     .sort((left, right) => left.name.localeCompare(right.name));
 }
 
-export function buildGenres(tracks: Track[], activity = (track: Track) => track.playCount): Genre[] {
+export function buildGenres(tracks: Track[]): Genre[] {
   const genresByName = new Map<string, {
     name: string;
     songCount: number;
     artists: Set<string>;
     albums: Set<string>;
     playCount: number;
+    listenedMs: number;
   }>();
 
   for (const track of tracks) {
@@ -74,13 +79,15 @@ export function buildGenres(tracks: Track[], activity = (track: Track) => track.
         artists: new Set<string>(),
         albums: new Set<string>(),
         playCount: 0,
+        listenedMs: 0,
       };
       const artist = track.artist ?? track.albumArtist ?? "Unknown Artist";
       const album = track.album ?? "Unknown Album";
       const albumArtist = track.albumArtist ?? track.artist ?? "Unknown Artist";
 
       existing.songCount += 1;
-      existing.playCount += activity(track);
+      existing.playCount += track.playCount;
+      existing.listenedMs += track.listenedMs ?? 0;
       existing.artists.add(artist);
       existing.albums.add(`${albumArtist.toLowerCase()}\u0000${album.toLowerCase()}`);
       genresByName.set(genreName, existing);
@@ -94,6 +101,7 @@ export function buildGenres(tracks: Track[], activity = (track: Track) => track.
       artistCount: genre.artists.size,
       albumCount: genre.albums.size,
       playCount: genre.playCount,
+      listenedMs: genre.listenedMs,
       detail: `${genre.songCount} ${genre.songCount === 1 ? "song" : "songs"}`,
       color: colorFor(genre.name),
     }))

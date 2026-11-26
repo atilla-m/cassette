@@ -171,12 +171,17 @@
   import { stepView, visitView, type ViewHistory } from "$lib/utils/viewHistory";
   import {
     STATS_PAGE_SIZE,
+    activitySortOptions,
+    compareListeningActivity,
+    isActivitySortOrder,
+    type ActivitySortOrder,
+    type ListeningActivity,
     nextStatsLimit,
     rankMostPlayedTracks,
     rankRecentlyPlayedTracks,
-    sortAlbumsByPlayCount,
-    sortArtistsByPlayCount,
-    sortGenresByPlayCount,
+    sortAlbumsByActivity,
+    sortArtistsByActivity,
+    sortGenresByActivity,
     visibleStatsItems,
   } from "$lib/utils/playStats";
   import { listen } from "@tauri-apps/api/event";
@@ -186,10 +191,10 @@
   import { onMount, untrack } from "svelte";
   import packageInfo from "../../package.json";
 
-  type SongSortKey = "title" | "artist" | "album" | "duration" | "recentlyAdded" | "recentlyPlayed" | "playCount";
-  type AlbumSortKey = "title" | "artist" | "year" | "trackCount" | "mostPlayed" | "leastPlayed";
-  type ArtistSortKey = "name" | "songCount" | "albumCount" | "mostPlayed" | "leastPlayed";
-  type GenreSortKey = "name" | "songCount" | "artistCount" | "albumCount" | "mostPlayed" | "leastPlayed";
+  type SongSortKey = "title" | "artist" | "album" | "duration" | "recentlyAdded" | "recentlyPlayed" | ActivitySortOrder;
+  type AlbumSortKey = "title" | "artist" | "year" | "trackCount" | ActivitySortOrder;
+  type ArtistSortKey = "name" | "songCount" | "albumCount" | ActivitySortOrder;
+  type GenreSortKey = "name" | "songCount" | "artistCount" | "albumCount" | ActivitySortOrder;
   type VideoSortKey = "title" | "artist" | "year" | "recentlyPlayed" | "duration";
   type VideoTypeFilter = "all" | "music_video" | "live" | "interview_documentary" | "behind_the_scenes" | "other";
   type SortDirection = "asc" | "desc";
@@ -269,19 +274,23 @@
   type TopArtistStat = {
     name: string;
     color: string;
-    totalPlays: number;
+    playCount: number;
+    listenedMs: number;
     songCount: number;
   };
   type TopAlbumStat = {
     album: Album;
-    totalPlays: number;
+    playCount: number;
+    listenedMs: number;
     songCount: number;
   };
   type TopGenreStat = {
     genre: Genre;
-    totalPlays: number;
+    playCount: number;
+    listenedMs: number;
     songCount: number;
   };
+  type ListeningActivityDisplay = "0" | "1" | "2";
   type StatsSectionId = "tracks" | "artists" | "albums" | "genres" | "recent";
   type ShortcutItem = {
     keys: string[];
@@ -413,15 +422,14 @@
     { value: "duration", label: "Duration" },
     { value: "recentlyAdded", label: "Recently added" },
     { value: "recentlyPlayed", label: "Recently played" },
-    { value: "playCount", label: "Most played" },
+    ...activitySortOptions,
   ];
   const albumTrackSortOptions: { value: AlbumTrackSortKey; label: string }[] = [
     { value: "trackNumber", label: "Track number" },
     { value: "title", label: "Title" },
     { value: "artist", label: "Artist" },
     { value: "duration", label: "Duration" },
-    { value: "mostPlayed", label: "Most played" },
-    { value: "leastPlayed", label: "Least played" },
+    ...activitySortOptions,
   ];
   const groupedTrackSortOptions: { value: AlbumTrackSortKey; label: string }[] = [
     { value: "title", label: "Title" },
@@ -429,8 +437,7 @@
     { value: "artist", label: "Artist" },
     { value: "trackNumber", label: "Track number" },
     { value: "duration", label: "Duration" },
-    { value: "mostPlayed", label: "Most played" },
-    { value: "leastPlayed", label: "Least played" },
+    ...activitySortOptions,
   ];
   const videoTypeOptions: Array<{ value: VideoType; label: string }> = [
     { value: "music_video", label: "Music Video / PV" },
@@ -468,8 +475,8 @@
     {
       title: "Album track selection",
       shortcuts: [
-        { keys: ["Ctrl or ⌘", "Click"], description: "Toggle a track in the selection" },
-        { keys: ["Shift", "Click"], description: "Select a range of tracks" },
+        { keys: ["Ctrl or ⌘", "Click"], description: "Start or extend a range of tracks" },
+        { keys: ["Click"], description: "Toggle one track while selecting" },
         { keys: ["Right-click"], description: "Choose Select tracks, or open actions for the selection" },
         { keys: ["Enter or Space"], description: "Toggle the focused track while selecting" },
         { keys: ["Escape"], description: "Clear the track selection" },
@@ -489,7 +496,11 @@
   let scanSummary = $state<string | null>(null);
   let unavailableTrackIds = $state(new Set<string>());
   let ignoredTrackIds = $state(new Set<string>());
-  let listeningTimeEnabled = $state(false);
+  let listeningActivityDisplay = $state<ListeningActivityDisplay>("0");
+  let showPlayCounts = $derived(listeningActivityDisplay !== "1");
+  let showListeningTime = $derived(listeningActivityDisplay !== "0");
+  let statsMetric = $state<"plays" | "time">("plays");
+  let statsUseListeningTime = $derived(!showPlayCounts || (showListeningTime && statsMetric === "time"));
   let listeningTimeByTrack = $state<Record<string, number>>({});
   let savingIgnoredTracks = $state(false);
   let ignoredTracksError = $state<string | null>(null);
@@ -783,9 +794,9 @@
   let tagEditorDiscardModalElement: HTMLElement | undefined = $state();
   let albumTagEditorModalElement: HTMLElement | undefined = $state();
   let lyricsPanelElement: HTMLElement | undefined = $state();
-  let displayAlbums = $derived(!hasLoadedCache ? mockAlbums : buildAlbums(tracks, trackActivity));
-  let displayArtists = $derived(!hasLoadedCache ? mockArtists : buildArtists(tracks, trackActivity));
-  let displayGenres = $derived(!hasLoadedCache ? mockGenres : buildGenres(tracks, trackActivity));
+  let displayAlbums = $derived(!hasLoadedCache ? mockAlbums : buildAlbums(tracks));
+  let displayArtists = $derived(!hasLoadedCache ? mockArtists : buildArtists(tracks));
+  let displayGenres = $derived(!hasLoadedCache ? mockGenres : buildGenres(tracks));
   let visibleNavItems = $derived(navItems.filter((item) =>
     item.label !== "Home"
       && (ENABLE_EXPERIMENTAL_VIDEOS || item.label !== "Videos")
@@ -799,8 +810,8 @@
   let sortedArtists = $derived(sortArtists(displayArtists, artistSort, artistSortDirection));
   let sortedGenres = $derived(sortGenres(displayGenres, genreSort, genreSortDirection));
   let statsRange = $derived(statsRangeForPeriod(statsPeriod, new Date(statsClock), statsCustomFrom, statsCustomTo, statsSelectedMonth, statsSelectedYear));
-  let statsDailyActivity = $derived((listeningTimeEnabled ? statsSnapshot?.listeningTime?.dailyListenedMs : statsSnapshot?.dailyPlays) ?? []);
-  let statsSelectedDayLabel = $derived(statsDayValueLabel(statsSelectedDay, statsRange?.chartDates ?? [], statsDailyActivity, activityLabel));
+  let statsDailyActivity = $derived((statsUseListeningTime ? statsSnapshot?.listeningTime?.dailyListenedMs : statsSnapshot?.dailyPlays) ?? []);
+  let statsSelectedDayLabel = $derived(statsDayValueLabel(statsSelectedDay, statsRange?.chartDates ?? [], statsDailyActivity, statsChartValueLabel));
   let statsTrackCounts = $derived(new Map(statsSnapshot?.trackCounts.map((item) => [item.trackId, item]) ?? []));
   let statsPendingTracks = $derived<Track[]>((statsSnapshot?.pendingTracks ?? []).map((item) => ({
     id: item.trackId, filePath: "", fileName: "Retained listening history (not in library)", extension: "history",
@@ -820,14 +831,14 @@
   }), ...statsPendingTracks]);
   let allStatsTopTracks = $derived(mostPlayed(periodTracks));
   let statsTracksById = $derived(new Map(periodTracks.map((track) => [track.id, track])));
-  let statsRecentListens = $derived((listeningTimeEnabled ? statsSnapshot?.listeningTime?.recentSessions : statsSnapshot?.recentListens) ?? []);
-  let statsRecentQueue = $derived(listeningTimeEnabled
+  let statsRecentListens = $derived((statsUseListeningTime ? statsSnapshot?.listeningTime?.recentSessions : statsSnapshot?.recentListens) ?? []);
+  let statsRecentQueue = $derived(statsUseListeningTime
     ? [...new Set(statsRecentListens.map((listen) => listen.trackId))].flatMap((id) => {
       const track = statsTracksById.get(id);
       return track ? [track] : [];
     })
     : recentlyPlayed(periodTracks));
-  let statsRecentCount = $derived((listeningTimeEnabled
+  let statsRecentCount = $derived((statsUseListeningTime
     ? statsSnapshot?.listeningTime?.sessionCount
     : statsPeriod === "all" ? statsSnapshot?.datedPlays : statsSnapshot?.totalPlays) ?? 0);
   let allStatsTopArtists = $derived(buildTopArtistStats(periodTracks, buildArtists(periodTracks)));
@@ -837,14 +848,23 @@
   let statsTopArtists = $derived(visibleStatsItems(allStatsTopArtists, statsSectionExpanded("artists"), statsVisibleLimits.artists, STATS_PREVIEW_LIMITS.artists));
   let statsTopAlbums = $derived(visibleStatsItems(allStatsTopAlbums, statsSectionExpanded("albums"), statsVisibleLimits.albums, STATS_PREVIEW_LIMITS.albums));
   let statsTopGenres = $derived(visibleStatsItems(allStatsTopGenres, statsSectionExpanded("genres"), statsVisibleLimits.genres, STATS_PREVIEW_LIMITS.genres));
-  let statsTotalActivity = $derived((listeningTimeEnabled ? statsSnapshot?.listeningTime?.totalListenedMs : statsSnapshot?.totalPlays)
-    ?? (statsPeriod === "all" ? tracks.reduce((total, track) => total + trackActivity(track), 0) : 0));
-  let statsDistinctTracks = $derived(periodTracks.filter((track) => trackActivity(track) > 0).length);
-  let statsDistinctArtists = $derived(new Set(periodTracks.filter((track) => trackActivity(track) > 0)
+  let statsTotalPlays = $derived(statsSnapshot?.totalPlays
+    ?? (statsPeriod === "all" ? tracks.reduce((total, track) => total + track.playCount, 0) : 0));
+  let statsTotalListenedMs = $derived(statsSnapshot?.listeningTime?.totalListenedMs
+    ?? (statsPeriod === "all" ? tracks.reduce((total, track) => total + (track.listenedMs ?? 0), 0) : 0));
+  let statsDistinctTracks = $derived(periodTracks.filter((track) => statsActivity(track) > 0).length);
+  let statsDistinctArtists = $derived(new Set(periodTracks.filter((track) => statsActivity(track) > 0)
     .map((track) => track.artist ?? track.albumArtist ?? "Unknown Artist")).size);
-  let statsChartUnit = $derived(listeningTimeEnabled ? 1000 : 1);
+  let statsChartUnit = $derived(statsUseListeningTime ? 1000 : 1);
   let statsChartStep = $derived(Math.max(1, Math.ceil(Math.max(0, ...statsDailyActivity) / (4 * statsChartUnit))) * statsChartUnit);
   let statsActiveDays = $derived(statsDailyActivity.filter((amount) => amount > 0).length);
+  let statsOverview = $derived([
+    ...(showPlayCounts ? [{ label: "Plays", value: statsTotalPlays }] : []),
+    ...(showListeningTime ? [{ label: "Listening time", value: listeningDurationLabel(statsTotalListenedMs) }] : []),
+    { label: "Songs played", value: statsDistinctTracks },
+    { label: "Artists played", value: statsDistinctArtists },
+    { label: "Active days", value: statsActiveDays },
+  ]);
   let statsChartDates = $derived(statsRange?.chartDates.slice(statsChartOffset, statsChartOffset + 90) ?? []);
   let statsChartDateLabel = $derived(statsChartDates.length
     ? statsRangeFormat.formatRange(new Date(statsChartDates[0]), new Date(statsChartDates[statsChartDates.length - 1]))
@@ -886,7 +906,7 @@
     selectedAlbum ? tracksForAlbum(selectedAlbum) : [],
   );
   let selectedAlbumSearchTracks = $derived(searchFilterAlbumTracks(selectedAlbumTracks, normalizedSearchQuery));
-  let selectedAlbumDisplayTracks = $derived(sortAlbumDisplayTracks(selectedAlbumSearchTracks, albumTrackSort, albumTrackSortDirection, trackActivity));
+  let selectedAlbumDisplayTracks = $derived(sortAlbumDisplayTracks(selectedAlbumSearchTracks, albumTrackSort, albumTrackSortDirection));
   let selectedAlbumDiscGroups = $derived(albumTrackSort === "trackNumber"
     ? albumDiscGroups(selectedAlbumDisplayTracks)
     : [{ discNumber: null, tracks: selectedAlbumDisplayTracks }]);
@@ -894,16 +914,16 @@
   let selectedAlbumDurationLabel = $derived(albumTotalDurationLabel(selectedAlbumTracks));
   let selectedAlbumFormatSummary = $derived(albumFormatSummary(selectedAlbumTracks));
   let selectedArtistTracks = $derived(selectedArtist ? tracksForArtist(selectedArtist) : []);
-  let selectedArtistDisplayTracks = $derived(sortAlbumDisplayTracks(selectedArtistTracks, artistTrackSort, artistTrackSortDirection, trackActivity));
-  let selectedArtistRankedTracks = $derived(topPlayedTracks(selectedArtistTracks, selectedArtistTracks.length, trackActivity));
+  let selectedArtistDisplayTracks = $derived(sortAlbumDisplayTracks(selectedArtistTracks, artistTrackSort, artistTrackSortDirection));
+  let selectedArtistRankedTracks = $derived(topPlayedTracks(selectedArtistTracks, selectedArtistTracks.length, showPlayCounts ? "mostPlayed" : "mostListened"));
   let selectedArtistTopTracks = $derived(selectedArtistRankedTracks.slice(0, 10));
   let selectedArtistAlbums = $derived(
     selectedArtist ? sortedAlbums.filter((album) => album.artist === selectedArtist.name) : [],
   );
   let selectedArtistSearchAlbums = $derived(searchFilterAlbums(selectedArtistAlbums, normalizedSearchQuery));
   let selectedGenreTracks = $derived(selectedGenre ? tracksForGenre(selectedGenre) : []);
-  let selectedGenreDisplayTracks = $derived(sortAlbumDisplayTracks(selectedGenreTracks, genreTrackSort, genreTrackSortDirection, trackActivity));
-  let selectedGenreRankedTracks = $derived(topPlayedTracks(selectedGenreTracks, selectedGenreTracks.length, trackActivity));
+  let selectedGenreDisplayTracks = $derived(sortAlbumDisplayTracks(selectedGenreTracks, genreTrackSort, genreTrackSortDirection));
+  let selectedGenreRankedTracks = $derived(topPlayedTracks(selectedGenreTracks, selectedGenreTracks.length, showPlayCounts ? "mostPlayed" : "mostListened"));
   let selectedGenreTopTracks = $derived(selectedGenreRankedTracks.slice(0, 10));
   let selectedGenreAlbums = $derived(selectedGenre ? albumsForTracks(selectedGenreTracks, sortedAlbums) : []);
   let selectedGenreArtists = $derived(selectedGenre ? buildArtists(selectedGenreTracks) : []);
@@ -1238,7 +1258,8 @@
     window.addEventListener("focus", refreshStatsCalendar);
     autoFindLyricsEnabled = readPreference(AUTO_LYRICS_SETTING_KEY) !== "off";
     const storedListenPercentage = Number(readPreference("cassette:listen-percentage"));
-    listeningTimeEnabled = readPreference("cassette:listening-time") === "1";
+    const activityDisplayPreference = readPreference("cassette:listening-time");
+    listeningActivityDisplay = activityDisplayPreference === "1" || activityDisplayPreference === "2" ? activityDisplayPreference : "0";
     if (listenPercentages.includes(storedListenPercentage)) listenPercentage = storedListenPercentage;
     trackNotificationsEnabled = readPreference(TRACK_NOTIFICATIONS_SETTING_KEY) === "on";
     gaplessEnabled = readPreference("cassette:gapless") !== "off";
@@ -1329,7 +1350,7 @@
       }
     }, 250);
 
-    const listeningTimeIntervalId = window.setInterval(() => void flushListeningTime(), 5000);
+    const listeningTimeIntervalId = window.setInterval(() => void flushListeningTime(), 1000);
     const flushBeforeHide = () => { void flushListeningTime(); };
     window.addEventListener("pagehide", flushBeforeHide);
 
@@ -1513,7 +1534,7 @@
         listeningTimeBuffer.saved(batch);
         listeningTimeRevision += 1;
         listeningTimeByTrack = { ...listeningTimeByTrack, ...totals };
-        if (activeView === "Stats" && listeningTimeEnabled) {
+        if (activeView === "Stats" && showListeningTime) {
           statsClock = Date.now();
           statsRevision += 1;
         }
@@ -4496,8 +4517,8 @@
     if (genre) handleGenreSelect(genre);
   }
 
-  function artistTotalPlays(artistName: string) {
-    return displayArtists.find((candidate) => candidate.name === artistName)?.playCount ?? 0;
+  function artistActivity(artistName: string): ListeningActivity {
+    return displayArtists.find((candidate) => candidate.name === artistName) ?? { playCount: 0 };
   }
 
   async function handleAlbumCardPlay(event: MouseEvent, album: Album, shouldShuffle = false) {
@@ -4654,17 +4675,23 @@
     ];
   }
 
-  function handleAlbumTrackSelect(track: Track, event: Pick<MouseEvent, "ctrlKey" | "metaKey" | "shiftKey">) {
-    if (!selectedAlbumId || !(isAlbumSelectingTracks || event.ctrlKey || event.metaKey || event.shiftKey)) {
+  function handleAlbumTrackSelect(track: Track, event: Pick<MouseEvent, "ctrlKey" | "metaKey">) {
+    const extendRange = event.ctrlKey || event.metaKey;
+    if (!selectedAlbumId || !(isAlbumSelectingTracks || extendRange)) {
       void handleTrackSelect(track, selectedAlbumTracks);
       return;
     }
+    selectAlbumTrack(track, extendRange);
+  }
+
+  function selectAlbumTrack(track: Track, extendRange = false) {
+    if (!selectedAlbumId) return;
     const selection = new Set(isAlbumSelectingTracks ? selectedTrackIds : []);
     trackSelectionAlbumId = selectedAlbumId;
     const displayed = selectedAlbumDiscGroups.flatMap((group) => group.tracks);
     const anchorIndex = displayed.findIndex((entry) => entry.id === selectionAnchor);
     const trackIndex = displayed.findIndex((entry) => entry.id === track.id);
-    if (event.shiftKey && anchorIndex >= 0 && trackIndex >= 0) {
+    if (extendRange && anchorIndex >= 0 && trackIndex >= 0) {
       for (const entry of displayed.slice(Math.min(anchorIndex, trackIndex), Math.max(anchorIndex, trackIndex) + 1)) {
         selection.add(entry.id);
       }
@@ -4684,7 +4711,7 @@
     }
     openTrackContextMenu(track, selectedAlbumTracks, event.clientX, event.clientY, [{
       label: isAlbumSelectingTracks ? "Add to selection" : "Select tracks",
-      action: () => handleAlbumTrackSelect(track, { ctrlKey: true, metaKey: false, shiftKey: false }),
+      action: () => selectAlbumTrack(track),
     }]);
   }
 
@@ -5995,7 +6022,7 @@
     }
 
     details.push(songCountLabel(albumTracks.length));
-    if (showAlbumPlayCounts) details.push(activityLabel(album.playCount));
+    if (showAlbumPlayCounts) details.push(activityLabel(album));
 
     if (selectedAlbumDurationLabel) {
       details.push(selectedAlbumDurationLabel);
@@ -6291,23 +6318,29 @@
     ].filter((label): label is string => Boolean(label));
   }
 
-  function trackActivity(track: Track) {
-    return listeningTimeEnabled ? track.listenedMs ?? 0 : track.playCount;
+  function statsActivity(activity: ListeningActivity) {
+    return statsUseListeningTime ? activity.listenedMs ?? 0 : activity.playCount;
   }
 
   function trackActivityLabel(track: Track) {
-    const amount = trackActivity(track);
-    return amount ? activityLabel(amount) : "";
+    const hasVisibleActivity = (showPlayCounts && track.playCount > 0)
+      || (showListeningTime && (track.listenedMs ?? 0) > 0);
+    return hasVisibleActivity ? activityLabel(track) : "";
   }
 
-  function activityLabel(amount: number) {
-    return listeningTimeEnabled ? listeningDurationLabel(amount) : `${amount} ${amount === 1 ? "play" : "plays"}`;
+  function playCountLabel(count: number) {
+    return `${count.toLocaleString()} ${count === 1 ? "play" : "plays"}`;
   }
 
-  function activitySortLabel(label: string) {
-    return listeningTimeEnabled
-      ? label.replace("Most played", "Most listening time").replace("Least played", "Least listening time")
-      : label;
+  function activityLabel({ playCount, listenedMs = 0 }: ListeningActivity) {
+    const labels = [];
+    if (showPlayCounts) labels.push(playCountLabel(playCount));
+    if (showListeningTime) labels.push(listeningDurationLabel(listenedMs));
+    return labels.join(" · ");
+  }
+
+  function statsChartValueLabel(amount: number) {
+    return statsUseListeningTime ? listeningDurationLabel(amount) : playCountLabel(amount);
   }
 
   function lastPlayedLabel(track: Track) {
@@ -6704,7 +6737,7 @@
 
     songSort = nextSort;
 
-    if ((nextSort === "recentlyAdded" || nextSort === "recentlyPlayed" || nextSort === "playCount") && songSortDirection === "asc") {
+    if ((nextSort === "recentlyAdded" || nextSort === "recentlyPlayed") && songSortDirection === "asc") {
       songSortDirection = "desc";
     }
   }
@@ -6856,11 +6889,10 @@
         return applySortDirection(result, direction);
       }
 
-      if (sortKey === "playCount") {
-        result = trackActivity(left) - trackActivity(right)
-          || (left.lastPlayedAt ?? 0) - (right.lastPlayedAt ?? 0)
+      if (isActivitySortOrder(sortKey)) {
+        return compareListeningActivity(left, right, sortKey)
+          || (right.lastPlayedAt ?? 0) - (left.lastPlayedAt ?? 0)
           || compareText(left.title, right.title);
-        return applySortDirection(result, direction);
       }
 
       result = compareText(left.title, right.title);
@@ -6981,7 +7013,7 @@
   }
 
   function mostPlayed(libraryTracks: Track[]) {
-    return rankMostPlayedTracks(libraryTracks, trackActivity);
+    return rankMostPlayedTracks(libraryTracks, statsActivity);
   }
 
   function statsSectionExpanded(section: StatsSectionId) {
@@ -7029,19 +7061,20 @@
       const current = statsByName.get(name) ?? {
         name,
         color: artist?.color ?? "#2f8f83",
-        totalPlays: 0,
+        playCount: 0,        listenedMs: 0,
         songCount: 0,
       };
 
-      current.totalPlays += trackActivity(track);
+      current.playCount += track.playCount;
+      current.listenedMs += track.listenedMs ?? 0;
       current.songCount += 1;
       statsByName.set(name, current);
     }
 
     return Array.from(statsByName.values())
-      .filter((stat) => stat.totalPlays > 0)
+      .filter((stat) => statsActivity(stat) > 0)
       .sort((left, right) =>
-        right.totalPlays - left.totalPlays
+        statsActivity(right) - statsActivity(left)
         || right.songCount - left.songCount
         || compareText(left.name, right.name),
       );
@@ -7061,19 +7094,20 @@
 
       const current = statsByAlbumId.get(albumId) ?? {
         album,
-        totalPlays: 0,
+        playCount: 0,        listenedMs: 0,
         songCount: 0,
       };
 
-      current.totalPlays += trackActivity(track);
+      current.playCount += track.playCount;
+      current.listenedMs += track.listenedMs ?? 0;
       current.songCount += 1;
       statsByAlbumId.set(albumId, current);
     }
 
     return Array.from(statsByAlbumId.values())
-      .filter((stat) => stat.totalPlays > 0)
+      .filter((stat) => statsActivity(stat) > 0)
       .sort((left, right) =>
-        right.totalPlays - left.totalPlays
+        statsActivity(right) - statsActivity(left)
         || right.songCount - left.songCount
         || compareText(left.album.title, right.album.title),
       );
@@ -7093,28 +7127,29 @@
 
         const current = statsByGenreName.get(genreName) ?? {
           genre,
-          totalPlays: 0,
+          playCount: 0,          listenedMs: 0,
           songCount: 0,
         };
 
-        current.totalPlays += trackActivity(track);
+        current.playCount += track.playCount;
+        current.listenedMs += track.listenedMs ?? 0;
         current.songCount += 1;
         statsByGenreName.set(genreName, current);
       }
     }
 
     return Array.from(statsByGenreName.values())
-      .filter((stat) => stat.totalPlays > 0)
+      .filter((stat) => statsActivity(stat) > 0)
       .sort((left, right) =>
-        right.totalPlays - left.totalPlays
+        statsActivity(right) - statsActivity(left)
         || right.songCount - left.songCount
         || compareText(left.genre.name, right.genre.name),
       );
   }
 
   function sortAlbums(albums: Album[], sortKey: AlbumSortKey, direction: SortDirection) {
-    if (sortKey === "mostPlayed" || sortKey === "leastPlayed") {
-      return sortAlbumsByPlayCount(albums, sortKey);
+    if (isActivitySortOrder(sortKey)) {
+      return sortAlbumsByActivity(albums, sortKey);
     }
 
     return [...albums].sort((left, right) => {
@@ -7142,8 +7177,8 @@
   }
 
   function sortArtists(artists: Artist[], sortKey: ArtistSortKey, direction: SortDirection) {
-    if (sortKey === "mostPlayed" || sortKey === "leastPlayed") {
-      return sortArtistsByPlayCount(artists, sortKey);
+    if (isActivitySortOrder(sortKey)) {
+      return sortArtistsByActivity(artists, sortKey);
     }
 
     return [...artists].sort((left, right) => {
@@ -7165,8 +7200,8 @@
   }
 
   function sortGenres(genres: Genre[], sortKey: GenreSortKey, direction: SortDirection) {
-    if (sortKey === "mostPlayed" || sortKey === "leastPlayed") {
-      return sortGenresByPlayCount(genres, sortKey);
+    if (isActivitySortOrder(sortKey)) {
+      return sortGenresByActivity(genres, sortKey);
     }
 
     return [...genres].sort((left, right) => {
@@ -7857,6 +7892,15 @@
               <option value="custom">Custom date range</option>
               </select>
             </div>
+            {#if listeningActivityDisplay === "2"}
+              <div class="stats-period-field">
+                <label for="stats-metric">Chart, rankings and history</label>
+                <select id="stats-metric" bind:value={statsMetric}>
+                  <option value="plays">Play count</option>
+                  <option value="time">Listening time</option>
+                </select>
+              </div>
+            {/if}
             {#if statsPeriod === "previousMonth"}
               <div class="stats-period-field">
                 <label for="stats-month">Month</label>
@@ -7890,37 +7934,33 @@
           {/if}
           {#if !statsDetailSection}
           <section class="stats-chart-panel" aria-labelledby="daily-plays-title">
-          <dl class="stats-overview-grid" aria-label="Selected listening period">
-            {#each [
-              { label: listeningTimeEnabled ? "Listening time" : "Plays", value: listeningTimeEnabled ? listeningDurationLabel(statsTotalActivity) : statsTotalActivity },
-              { label: "Songs played", value: statsDistinctTracks },
-              { label: "Artists played", value: statsDistinctArtists },
-              { label: "Active days", value: statsActiveDays },
-            ] as metric, index (metric.label)}
-              <div class="stats-overview-card" class:highlight={index === 0}>
+          <dl class="stats-overview-grid" class:both-activities={listeningActivityDisplay === "2"} aria-label="Selected listening period">
+            {#each statsOverview as metric (metric.label)}
+              {@const isActiveDays = metric.label === "Active days"}
+              <div class="stats-overview-card" class:highlight={metric.label === "Plays" || metric.label === "Listening time"}>
                 <dt>{metric.label}</dt>
-                <dd>{statsRange && !statsError && (statsSnapshot || (!statsLoading && statsPeriod === "all" && index < 3)) ? metric.value.toLocaleString() : "—"}</dd>
-                {#if index === 3 && statsPeriod === "all"}<span>Last 30 days</span>{/if}
+                <dd>{statsRange && !statsError && (statsSnapshot || (!statsLoading && statsPeriod === "all" && !isActiveDays)) ? metric.value.toLocaleString() : "—"}</dd>
+                {#if isActiveDays && statsPeriod === "all"}<span>Last 30 days</span>{/if}
               </div>
             {/each}
           </dl>
 
             <div class="stats-chart-heading">
-              <h2 id="daily-plays-title">{listeningTimeEnabled ? "Daily listening time" : "Daily plays"}</h2>
+              <h2 id="daily-plays-title">{statsUseListeningTime ? "Daily listening time" : "Daily plays"}</h2>
               <span>{statsChartDateLabel}</span>
             </div>
             {#if statsSnapshot && statsRange && statsActiveDays > 0}
               <div class="stats-chart">
                 <div class="stats-chart-scale" aria-hidden="true">
                   {#each [4, 3, 2, 1, 0] as tick}
-                    <span>{listeningTimeEnabled ? listeningDurationLabel(tick * statsChartStep) : (tick * statsChartStep).toLocaleString()}</span>
+                    <span>{statsUseListeningTime ? listeningDurationLabel(tick * statsChartStep) : (tick * statsChartStep).toLocaleString()}</span>
                   {/each}
                 </div>
                 <div class="stats-chart-scroll" role="region" aria-labelledby="daily-plays-title">
                 <div class="stats-chart-bars" style:--chart-days={statsChartDates.length} class:dense={statsChartDates.length > 35}>
                   {#each statsChartDates as day, index (day)}
                     {@const count = statsDailyActivity[index + statsChartOffset] ?? 0}
-                    {@const caption = `${day}: ${activityLabel(count)}`}
+                    {@const caption = `${day}: ${statsChartValueLabel(count)}`}
                     <button type="button" class="stats-chart-day" aria-pressed={statsSelectedDay === day} aria-label={caption} title={caption} onclick={() => {
                       statsSelectedDay = day;
                     }}>
@@ -7945,20 +7985,20 @@
                 </div>
               {/if}
             {:else if statsSnapshot}
-              <p class="stats-chart-empty">{listeningTimeEnabled ? "No listening time recorded in this period." : "No plays with dates in this period."}</p>
+              <p class="stats-chart-empty">{statsUseListeningTime ? "No listening time recorded in this period." : "No plays with dates in this period."}</p>
             {/if}
             {#if statsSnapshot}
               <details class="stats-coverage">
                 <summary>Tracking coverage</summary>
                 <p class="stats-coverage-note">
-                  {#if listeningTimeEnabled}
-                    Listening time is measured from new playback. {statsPeriod === "all" ? "The chart covers the last 30 days." : ""}
+                  {#if statsUseListeningTime}
+                    Listening time includes sessions with at least five seconds of playback. {statsPeriod === "all" ? "The chart covers the last 30 days." : ""}
                   {:else if statsPeriod === "all"}
                     All-time totals include {statsSnapshot.undatedLegacyPlays} plays without dates. The chart covers the last 30 days.
                   {:else}
                     This period includes plays with recorded dates.
                   {/if}
-                  {#if !listeningTimeEnabled && statsSnapshot.coverageSources.length > 0}
+                  {#if !statsUseListeningTime && statsSnapshot.coverageSources.length > 0}
                     Detailed tracking began on {statsSnapshot.coverageSources.map((source) => source.detailedTrackingStartedAtUtc !== null ? new Date(source.detailedTrackingStartedAtUtc * 1000).toLocaleDateString() : "an unknown date").join(", ")}.
                   {/if}
                   {#if statsSnapshot.pendingTracks.length > 0}
@@ -7979,7 +8019,7 @@
             onViewAll={!statsDetailSection && allStatsTopTracks.length > STATS_PREVIEW_LIMITS.tracks ? () => openStatsSection("tracks") : undefined}
           >
             {#if statsTopTracks.length === 0}
-              <p class="stats-empty">{listeningTimeEnabled ? "No listening time recorded for these tracks." : "No track plays in this period."}</p>
+              <p class="stats-empty">{statsUseListeningTime ? "No listening time recorded for these tracks." : "No track plays in this period."}</p>
             {:else if statsDetailSection === "tracks"}
               <TrackList
                 activityLabel={trackActivityLabel}
@@ -8017,7 +8057,7 @@
                         <strong title={track.title}>{track.title}</strong>
                         <small>{track.artist ?? track.albumArtist ?? "Unknown Artist"}</small>
                       </span>
-                      <span class="stats-rank-count">{activityLabel(trackActivity(track))}</span>
+                      <span class="stats-rank-count">{activityLabel(track)}</span>
                     </button>
                   </li>
                 {/each}
@@ -8033,7 +8073,7 @@
               onViewAll={!statsDetailSection && allStatsTopArtists.length > STATS_PREVIEW_LIMITS.artists ? () => openStatsSection("artists") : undefined}
             >
               {#if statsTopArtists.length === 0}
-                <p class="stats-empty">{listeningTimeEnabled ? "No listening time recorded for these artists." : "No artist plays in this period."}</p>
+                <p class="stats-empty">{statsUseListeningTime ? "No listening time recorded for these artists." : "No artist plays in this period."}</p>
               {:else}
                 <div class="stats-rank-list">
                   {#each statsTopArtists as stat, index}
@@ -8046,7 +8086,7 @@
                         <strong>{stat.name}</strong>
                         <small>{songCountLabel(stat.songCount)}</small>
                       </span>
-                      <span class="stats-rank-count">{activityLabel(stat.totalPlays)}</span>
+                      <span class="stats-rank-count">{activityLabel(stat)}</span>
                     </button>
                   {/each}
                 </div>
@@ -8069,7 +8109,7 @@
               onViewAll={!statsDetailSection && allStatsTopAlbums.length > STATS_PREVIEW_LIMITS.albums ? () => openStatsSection("albums") : undefined}
             >
               {#if statsTopAlbums.length === 0}
-                <p class="stats-empty">{listeningTimeEnabled ? "No listening time recorded for these albums." : "No album plays in this period."}</p>
+                <p class="stats-empty">{statsUseListeningTime ? "No listening time recorded for these albums." : "No album plays in this period."}</p>
               {:else}
                 <div class="stats-rank-list">
                   {#each statsTopAlbums as stat, index}
@@ -8091,7 +8131,7 @@
                         <strong>{stat.album.title}</strong>
                         <small>{stat.album.artist}</small>
                       </span>
-                      <span class="stats-rank-count">{activityLabel(stat.totalPlays)}</span>
+                      <span class="stats-rank-count">{activityLabel(stat)}</span>
                     </button>
                   {/each}
                 </div>
@@ -8114,7 +8154,7 @@
               onViewAll={!statsDetailSection && allStatsTopGenres.length > STATS_PREVIEW_LIMITS.genres ? () => openStatsSection("genres") : undefined}
             >
               {#if statsTopGenres.length === 0}
-                <p class="stats-empty">{listeningTimeEnabled ? "No listening time recorded for these genres." : "No genre plays in this period."}</p>
+                <p class="stats-empty">{statsUseListeningTime ? "No listening time recorded for these genres." : "No genre plays in this period."}</p>
               {:else}
                 <div class="stats-rank-list">
                   {#each statsTopGenres as stat, index}
@@ -8127,7 +8167,7 @@
                         <strong>{stat.genre.name}</strong>
                         <small>{songCountLabel(stat.songCount)}</small>
                       </span>
-                      <span class="stats-rank-count">{activityLabel(stat.totalPlays)}</span>
+                      <span class="stats-rank-count">{activityLabel(stat)}</span>
                     </button>
                   {/each}
                 </div>
@@ -8283,7 +8323,7 @@
                   {/if}
                   <span>{songCountLabel(selectedAlbumTracks.length)}</span>
                   {#if showAlbumPlayCounts}
-                    <span>{activityLabel(selectedAlbum.playCount)}</span>
+                    <span>{activityLabel(selectedAlbum)}</span>
                   {/if}
                   {#if selectedAlbumDurationLabel}
                     <span>{selectedAlbumDurationLabel}</span>
@@ -8369,7 +8409,7 @@
                 <TrackSortMenu
                   value={albumTrackSort}
                   direction={albumTrackSortDirection}
-                  options={albumTrackSortOptions.map((option) => ({ ...option, label: activitySortLabel(option.label) }))}
+                  options={albumTrackSortOptions}
                   onSortChange={(value) => albumTrackSort = value}
                   onDirectionChange={(direction) => albumTrackSortDirection = direction}
                 />
@@ -8417,7 +8457,7 @@
                           </button>
                         </div>
                         {#if showAlbumTrackPlayCounts}
-                          <span class="album-track-play-count">{track.ignored ? "" : activityLabel(trackActivity(track))}</span>
+                          <span class="album-track-play-count">{track.ignored ? "" : activityLabel(track)}</span>
                         {/if}
                         <span class="album-track-duration">{track.durationSeconds === null ? "" : formatTrackDuration(track.durationSeconds)}</span>
                         <button
@@ -8448,11 +8488,12 @@
                   <option value="artist">Artist</option>
                   <option value="year">Year</option>
                   <option value="trackCount">Song count</option>
-                  <option value="mostPlayed">{activitySortLabel("Most played")}</option>
-                  <option value="leastPlayed">{activitySortLabel("Least played")}</option>
+                  {#each activitySortOptions as option (option.value)}
+                    <option value={option.value}>{option.label}</option>
+                  {/each}
                 </select>
               </label>
-              {#if albumSort !== "mostPlayed" && albumSort !== "leastPlayed"}
+              {#if !isActivitySortOrder(albumSort)}
                 <button
                   class="direction-toggle"
                   type="button"
@@ -8504,7 +8545,7 @@
                       </div>
                       <button class="album-card-copy" type="button" onclick={() => handleAlbumSelect(album)}>
                         <strong>{album.title}</strong>
-                        <small>{albumDetail(album)}{showAlbumPlayCounts ? ` · ${activityLabel(album.playCount)}` : ""}</small>
+                        <small>{albumDetail(album)}{showAlbumPlayCounts ? ` · ${activityLabel(album)}` : ""}</small>
                       </button>
                     </div>
                   </article>
@@ -8531,10 +8572,10 @@
               <div class="detail-copy">
                 <p class="eyebrow">Artist</p>
                 <h3 id="artist-detail-title">{selectedArtist.name}</h3>
-                <div class="album-detail-meta" aria-label={`${selectedArtist.name} summary${showArtistPlayCounts ? `, ${activityLabel(selectedArtist.playCount)}` : ""}`}>
+                <div class="album-detail-meta" aria-label={`${selectedArtist.name} summary${showArtistPlayCounts ? `, ${activityLabel(selectedArtist)}` : ""}`}>
                   <span>{artistSongCount(selectedArtist)}</span>
                   <span>{selectedArtistAlbums.length} {selectedArtistAlbums.length === 1 ? "album" : "albums"}</span>
-                  {#if showArtistPlayCounts}<span>{activityLabel(selectedArtist.playCount)}</span>{/if}
+                  {#if showArtistPlayCounts}<span>{activityLabel(selectedArtist)}</span>{/if}
                 </div>
                 <div class="album-genre-chip-list" aria-label="Artist genres">
                   {#each selectedArtistGenres as genre}
@@ -8597,7 +8638,7 @@
                         </div>
                         <button class="album-card-copy" type="button" onclick={() => handleAlbumSelect(album)}>
                           <strong>{album.title}</strong>
-                          <small>{albumDetail(album)}{showAlbumPlayCounts ? ` · ${activityLabel(album.playCount)}` : ""}</small>
+                          <small>{albumDetail(album)}{showAlbumPlayCounts ? ` · ${activityLabel(album)}` : ""}</small>
                         </button>
                       </div>
                     </article>
@@ -8616,7 +8657,7 @@
                   <TrackSortMenu
                     value={artistTrackSort}
                     direction={artistTrackSortDirection}
-                    options={groupedTrackSortOptions.map((option) => ({ ...option, label: activitySortLabel(option.label) }))}
+                    options={groupedTrackSortOptions}
                     onSortChange={(value) => artistTrackSort = value}
                     onDirectionChange={(direction) => artistTrackSortDirection = direction}
                   />
@@ -8652,11 +8693,12 @@
                   <option value="name">Artist name</option>
                   <option value="songCount">Song count</option>
                   <option value="albumCount">Album count</option>
-                  <option value="mostPlayed">{activitySortLabel("Most played")}</option>
-                  <option value="leastPlayed">{activitySortLabel("Least played")}</option>
+                  {#each activitySortOptions as option (option.value)}
+                    <option value={option.value}>{option.label}</option>
+                  {/each}
                 </select>
               </label>
-              {#if artistSort !== "mostPlayed" && artistSort !== "leastPlayed"}
+              {#if !isActivitySortOrder(artistSort)}
                 <button
                   class="direction-toggle"
                   type="button"
@@ -8681,7 +8723,7 @@
                     </div>
                     <div>
                       <h3>{artist.name}</h3>
-                      <p>{artistSongCount(artist)}{showArtistPlayCounts ? ` · ${activityLabel(artist.playCount)}` : ""}</p>
+                      <p>{artistSongCount(artist)}{showArtistPlayCounts ? ` · ${activityLabel(artist)}` : ""}</p>
                     </div>
                   </button>
                 {/each}
@@ -8706,11 +8748,11 @@
               <div class="detail-copy">
                 <p class="eyebrow">Genre</p>
                 <h3 id="genre-detail-title">{selectedGenre.name}</h3>
-                <div class="album-detail-meta" aria-label={`${selectedGenre.name} summary${showGenrePlayCounts ? `, ${activityLabel(selectedGenre.playCount)}` : ""}`}>
+                <div class="album-detail-meta" aria-label={`${selectedGenre.name} summary${showGenrePlayCounts ? `, ${activityLabel(selectedGenre)}` : ""}`}>
                   <span>{songCountLabel(selectedGenreTracks.length)}</span>
                   <span>{selectedGenreArtists.length} {selectedGenreArtists.length === 1 ? "artist" : "artists"}</span>
                   <span>{selectedGenreAlbums.length} {selectedGenreAlbums.length === 1 ? "album" : "albums"}</span>
-                  {#if showGenrePlayCounts}<span>{activityLabel(selectedGenre.playCount)}</span>{/if}
+                  {#if showGenrePlayCounts}<span>{activityLabel(selectedGenre)}</span>{/if}
                 </div>
                 <div class="album-detail-actions genre-detail-actions">
                   <button type="button" disabled={selectedGenreTracks.length === 0} onclick={() => void handlePlaySelectedGenre()}>
@@ -8768,7 +8810,7 @@
                         </div>
                         <button class="album-card-copy" type="button" onclick={() => handleAlbumSelect(album)}>
                           <strong>{album.title}</strong>
-                          <small>{albumDetail(album)}{showAlbumPlayCounts ? ` · ${activityLabel(album.playCount)}` : ""}</small>
+                          <small>{albumDetail(album)}{showAlbumPlayCounts ? ` · ${activityLabel(album)}` : ""}</small>
                         </button>
                       </div>
                     </article>
@@ -8792,7 +8834,7 @@
                       </div>
                       <div>
                         <h3>{artist.name}</h3>
-                        <p>{artistSongCount(artist)}{showArtistPlayCounts ? ` · ${activityLabel(artistTotalPlays(artist.name))}` : ""}</p>
+                        <p>{artistSongCount(artist)}{showArtistPlayCounts ? ` · ${activityLabel(artistActivity(artist.name))}` : ""}</p>
                       </div>
                     </button>
                   {/each}
@@ -8810,7 +8852,7 @@
                   <TrackSortMenu
                     value={genreTrackSort}
                     direction={genreTrackSortDirection}
-                    options={groupedTrackSortOptions.map((option) => ({ ...option, label: activitySortLabel(option.label) }))}
+                    options={groupedTrackSortOptions}
                     onSortChange={(value) => genreTrackSort = value}
                     onDirectionChange={(direction) => genreTrackSortDirection = direction}
                   />
@@ -8848,11 +8890,12 @@
                   <option value="songCount">Song count</option>
                   <option value="artistCount">Artist count</option>
                   <option value="albumCount">Album count</option>
-                  <option value="mostPlayed">{activitySortLabel("Most played")}</option>
-                  <option value="leastPlayed">{activitySortLabel("Least played")}</option>
+                  {#each activitySortOptions as option (option.value)}
+                    <option value={option.value}>{option.label}</option>
+                  {/each}
                 </select>
               </label>
-              {#if genreSort !== "mostPlayed" && genreSort !== "leastPlayed"}
+              {#if !isActivitySortOrder(genreSort)}
                 <button
                   class="direction-toggle"
                   type="button"
@@ -8877,7 +8920,7 @@
                     </div>
                     <div>
                       <h3>{genre.name}</h3>
-                      <p>{genreDetail(genre)}{showGenrePlayCounts ? ` · ${activityLabel(genre.playCount)}` : ""}</p>
+                      <p>{genreDetail(genre)}{showGenrePlayCounts ? ` · ${activityLabel(genre)}` : ""}</p>
                     </div>
                   </button>
                 {/each}
@@ -8891,17 +8934,19 @@
             <CompactDropdown
               label="Sort"
               value={songSort}
-              options={songSortOptions.map((option) => ({ ...option, label: activitySortLabel(option.label) }))}
+              options={songSortOptions}
               onChange={handleSongSortChange}
             />
-            <button
-              class="direction-toggle"
-              type="button"
-              aria-label={`Song sort direction: ${sortDirectionLabel(songSortDirection)}`}
-              onclick={() => songSortDirection = nextSortDirection(songSortDirection)}
-            >
-              {sortDirectionLabel(songSortDirection)}
-            </button>
+            {#if !isActivitySortOrder(songSort)}
+              <button
+                class="direction-toggle"
+                type="button"
+                aria-label={`Song sort direction: ${sortDirectionLabel(songSortDirection)}`}
+                onclick={() => songSortDirection = nextSortDirection(songSortDirection)}
+              >
+                {sortDirectionLabel(songSortDirection)}
+              </button>
+            {/if}
             <CompactDropdown
               label="Format"
               value={songFormatFilter}
@@ -10366,12 +10411,14 @@
                   </div>
                   <label class="listen-threshold">
                     <span>Show listening activity as</span>
-                    <select value={listeningTimeEnabled ? "1" : "0"} onchange={(event) => {
-                      listeningTimeEnabled = event.currentTarget.value === "1";
-                      writePreference("cassette:listening-time", listeningTimeEnabled ? "1" : "0");
+                    <select value={listeningActivityDisplay} onchange={(event) => {
+                      const value = event.currentTarget.value as ListeningActivityDisplay;
+                      listeningActivityDisplay = value;
+                      writePreference("cassette:listening-time", value);
                     }}>
                       <option value="0">Play count</option>
                       <option value="1">Listening time</option>
+                      <option value="2">Both</option>
                     </select>
                   </label>
                   <label class="listen-threshold">
@@ -10385,6 +10432,7 @@
                       {/each}
                     </select>
                   </label>
+                  <p class="settings-note">A session counts after at least five seconds of playback.</p>
                   <details class="ignored-tracks">
                     <summary>Ignored tracks ({ignoredTrackIds.size})</summary>
                     {#if ignoredTrackIds.size === 0}
@@ -10480,22 +10528,22 @@
                     <label class="settings-toggle-row">
                       <span>Album listening totals</span>
                       <input type="checkbox" checked={showAlbumPlayCounts} onchange={(event) => updatePlayCountVisibility(event, "albums")} />
-                      <small>Sum of the play counts for tracks on each album.</small>
+                      <small>Show the selected measure for each album.</small>
                     </label>
                     <label class="settings-toggle-row">
                       <span>Artist listening totals</span>
                       <input type="checkbox" checked={showArtistPlayCounts} onchange={(event) => updatePlayCountVisibility(event, "artists")} />
-                      <small>Sum of play counts for tracks credited to each artist.</small>
+                      <small>Show the selected measure for each artist.</small>
                     </label>
                     <label class="settings-toggle-row">
                       <span>Genre listening totals</span>
                       <input type="checkbox" checked={showGenrePlayCounts} onchange={(event) => updatePlayCountVisibility(event, "genres")} />
-                      <small>Each track contributes its plays to every assigned genre.</small>
+                      <small>Each track contributes its listening activity to every assigned genre.</small>
                     </label>
                     <label class="settings-toggle-row">
                       <span>Album track listening totals</span>
                       <input type="checkbox" checked={showAlbumTrackPlayCounts} onchange={(event) => updatePlayCountVisibility(event, "albumTracks")} />
-                      <small>Show individual all-time counts in album detail.</small>
+                      <small>Show each song’s listening activity in album detail.</small>
                     </label>
                   </div>
                 </section>
@@ -15298,6 +15346,10 @@
     border-bottom: 1px solid var(--border);
   }
 
+  .stats-overview-grid.both-activities {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+  }
+
   .stats-overview-card {
     min-width: 0;
     padding: 4px clamp(10px, 2vw, 24px) 18px;
@@ -15320,15 +15372,13 @@
 
   .stats-overview-card dd {
     margin: 4px 0 0;
-    overflow: hidden;
     color: var(--text);
-    font-size: clamp(1.65rem, 3.3vw, 3.2rem);
+    font-size: clamp(1.4rem, 3vw, 2.85rem);
     font-weight: 800;
     font-variant-numeric: tabular-nums;
     letter-spacing: -0.05em;
     line-height: 1.1;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    overflow-wrap: anywhere;
   }
 
   .stats-overview-card.highlight dd {
@@ -15576,6 +15626,22 @@
     white-space: nowrap;
   }
 
+  @container stats (max-width: 870px) {
+    .stats-overview-grid.both-activities {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    .both-activities .stats-overview-card:nth-child(4) {
+      border-left: 0;
+      padding-left: 0;
+    }
+
+    .both-activities .stats-overview-card:nth-child(n+4) {
+      border-top: 1px solid var(--border);
+      padding-top: 12px;
+    }
+  }
+
   @container stats (max-width: 730px) {
     .stats-section-grid {
       grid-template-columns: minmax(0, 1fr);
@@ -15583,11 +15649,17 @@
   }
 
   @container stats (max-width: 520px) {
-    .stats-overview-grid {
+    .stats-overview-grid,
+    .stats-overview-grid.both-activities {
       grid-template-columns: repeat(2, minmax(0, 1fr));
     }
 
-    .stats-overview-card:nth-child(3) {
+    .both-activities .stats-overview-card:nth-child(4) {
+      border-left: 1px solid var(--border);
+      padding-left: clamp(10px, 2vw, 24px);
+    }
+
+    .stats-overview-card:nth-child(odd) {
       border-left: 0;
       padding-left: 0;
     }
