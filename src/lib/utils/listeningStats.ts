@@ -9,6 +9,10 @@ export function listeningDurationLabel(ms: number) {
   return hours ? `${hours}h ${minutes}m ${remainder}s` : minutes ? `${minutes}m ${remainder}s` : `${seconds}s`;
 }
 
+export function listeningTotalLabel(listenedMs: number, playCount: number) {
+  return listenedMs === 0 && playCount > 0 ? "Time unavailable" : listeningDurationLabel(listenedMs);
+}
+
 export function statsDayValueLabel(day: string | null, chartDates: string[], dailyPlays: number[], label = (count: number) => `${count} ${count === 1 ? "play" : "plays"}`) {
   if (!day) return null;
   const index = chartDates.indexOf(day);

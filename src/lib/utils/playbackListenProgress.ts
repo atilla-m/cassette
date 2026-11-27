@@ -5,36 +5,57 @@ import type { ListeningMinute } from "$lib/types/listening";
 const POSITION_JUMP_TOLERANCE_SECONDS = 0.25;
 const MINIMUM_LISTEN_SECONDS = 5;
 
+type PositionSample = { position: number; at: number };
+
 export class PlaybackListenProgress {
-  private sample: { position: number; at: number } | null = null;
+  private sample: PositionSample | null = null;
+  private possibleDiscontinuity: PositionSample | null = null;
   private listenedSeconds = 0;
 
   reset(now: number) {
     this.listenedSeconds = 0;
     this.sample = { position: 0, at: now };
+    this.possibleDiscontinuity = null;
   }
 
   forgetPosition() {
     this.sample = null;
+    this.possibleDiscontinuity = null;
   }
 
-  observe(position: number, now: number, wasPlaying: boolean) {
-    if (!Number.isFinite(position) || position < 0) {
-      this.forgetPosition();
+  observe(position: number, now: number, wasPlaying: boolean, requestedAt = now) {
+    if (!Number.isFinite(position) || position < 0) return 0;
+
+    const sample = { position, at: requestedAt };
+    if (!this.sample || !wasPlaying) {
+      this.sample = sample;
+      this.possibleDiscontinuity = null;
       return 0;
     }
 
-    const previous = this.sample;
-    this.sample = { position, at: now };
-    if (!previous || !wasPlaying) return 0;
-
-    const advance = position - previous.position;
-    const elapsed = Math.max(0, now - previous.at) / 1000;
-    if (advance > 0 && advance <= elapsed + POSITION_JUMP_TOLERANCE_SECONDS) {
-      this.listenedSeconds += advance;
-      return advance;
+    // A clock may report the same position several times or briefly report
+    // zero. Keep the last measured boundary until the position advances.
+    if (position <= this.sample.position) {
+      this.possibleDiscontinuity = null;
+      return 0;
     }
-    return 0;
+
+    const advanceFrom = (previous: PositionSample) => {
+      const advance = position - previous.position;
+      const elapsed = Math.max(0, now - previous.at) / 1000;
+      return advance > 0 && advance <= elapsed + POSITION_JUMP_TOLERANCE_SECONDS ? advance : 0;
+    };
+    const advance = advanceFrom(this.sample)
+      || (this.possibleDiscontinuity ? advanceFrom(this.possibleDiscontinuity) : 0);
+    if (!advance) {
+      if (position !== this.possibleDiscontinuity?.position) this.possibleDiscontinuity = sample;
+      return 0;
+    }
+
+    this.sample = sample;
+    this.possibleDiscontinuity = null;
+    this.listenedSeconds += advance;
+    return advance;
   }
 
   qualifies(duration: number | null, percentage: number, naturalEnd: boolean) {
@@ -74,8 +95,9 @@ export class ListeningTimeBuffer {
     }
   }
 
-  batch() {
-    return [...this.pending.values()].slice(0, 512);
+  batch(sessionId?: string) {
+    const pending = [...this.pending.values()];
+    return (sessionId ? pending.filter((sample) => sample.sessionId === sessionId) : pending).slice(0, 512);
   }
 
   saved(batch: ListeningMinute[]) {

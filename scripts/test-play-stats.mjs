@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { buildAlbums, buildArtists, buildGenres } from "../src/lib/data/libraryViews.ts";
+import { listeningTotalLabel } from "../src/lib/utils/listeningStats.ts";
 import { ListeningTimeBuffer, PlaybackListenProgress } from "../src/lib/utils/playbackListenProgress.ts";
 import {
   nextStatsLimit,
@@ -71,6 +72,39 @@ test("a play needs five seconds of actual audio as well as the configured thresh
   assert.equal(progress.qualifies(12, 50, false), false);
 });
 
+test("a long track retains time when its position updates less often than the player polls", () => {
+  const progress = new PlaybackListenProgress();
+  const buffer = new ListeningTimeBuffer();
+  progress.reset(0);
+  buffer.start("long-track", "long-session");
+
+  for (let ms = 250; ms <= 488_000; ms += 250) {
+    const position = ms <= 21_000 ? ms / 1000 : 21 + Math.floor((ms - 21_000) / 1000);
+    buffer.observe(progress.observe(position, ms, true), 60_000 + ms);
+    if (ms === 243_750) assert.equal(progress.qualifies(488, 50, false), false);
+    if (ms === 244_000) assert.equal(progress.qualifies(488, 50, false), true);
+  }
+
+  assert.equal(buffer.batch().reduce((total, minute) => total + minute.listenedMs, 0), 488_000);
+  assert.equal(progress.qualifies(488, 100, true), true);
+});
+
+test("late replies and transient zero or jumped positions retain the real progress", () => {
+  const progress = new PlaybackListenProgress();
+  progress.reset(0);
+  assert.equal(progress.observe(1, 1500, true, 900), 1);
+  assert.equal(progress.observe(1.75, 1700, true, 1650), 0.75);
+  assert.equal(progress.observe(0, 1800, true), 0);
+  assert.equal(progress.observe(400, 1900, true), 0);
+  assert.equal(progress.observe(2, 2100, true), 0.25);
+});
+
+test("old plays without timing have an unavailable duration", () => {
+  assert.equal(listeningTotalLabel(0, 6), "Time unavailable");
+  assert.equal(listeningTotalLabel(0, 0), "0s");
+  assert.equal(listeningTotalLabel(488_000, 1), "8m 8s");
+});
+
 test("measured audio is split across a minute boundary and in-flight samples retain later updates", () => {
   const progress = new PlaybackListenProgress();
   const buffer = new ListeningTimeBuffer();
@@ -87,6 +121,7 @@ test("measured audio is split across a minute boundary and in-flight samples ret
   buffer.start("b", "fixture-session-b");
   buffer.observe(0.7, 69_000);
   assert.deepEqual(buffer.batch().map(({ trackId, listenedMs }) => [trackId, listenedMs]), [["a", 1000], ["b", 700]]);
+  assert.deepEqual(buffer.batch("fixture-session-a").map(({ trackId, listenedMs }) => [trackId, listenedMs]), [["a", 1000]]);
 });
 
 function track(overrides) {

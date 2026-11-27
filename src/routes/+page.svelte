@@ -108,7 +108,7 @@
   import TrackList from "$lib/components/TrackList.svelte";
   import { buildAlbums, buildArtists, buildGenres } from "$lib/data/libraryViews";
   import { statsRangeForPeriod, type StatsPeriod } from "$lib/utils/statsPeriod";
-  import { listeningDurationLabel, resolveStatsPlayback, statsDayValueLabel } from "$lib/utils/listeningStats";
+  import { listeningDurationLabel, listeningTotalLabel, resolveStatsPlayback, statsDayValueLabel } from "$lib/utils/listeningStats";
   import type { ListeningStats, ListeningImportPreview, RecentListen } from "$lib/types/listening";
   import { albums as mockAlbums, artists as mockArtists, genres as mockGenres, navItems } from "$lib/data/mockLibrary";
   import { ENABLE_EXPERIMENTAL_VIDEOS } from "$lib/featureFlags";
@@ -743,8 +743,8 @@
   let playbackSessionEventId: string | null = null;
   const playbackListenProgress = new PlaybackListenProgress();
   const listeningTimeBuffer = new ListeningTimeBuffer();
-  let listeningTimeWrite: Promise<void> | null = null;
-  let listeningTimeRevision = 0;
+  let listeningTimeWrite: Promise<boolean> | null = null;
+  let changesDuringListeningTimeRead: Record<string, number> | null = null;
   let isTagWriteSuspendingPlayback = false;
   let tagWritePlaybackGeneration = 0;
   let positionSeconds = $state(0);
@@ -860,7 +860,7 @@
   let statsActiveDays = $derived(statsDailyActivity.filter((amount) => amount > 0).length);
   let statsOverview = $derived([
     ...(showPlayCounts ? [{ label: "Plays", value: statsTotalPlays }] : []),
-    ...(showListeningTime ? [{ label: "Listening time", value: listeningDurationLabel(statsTotalListenedMs) }] : []),
+    ...(showListeningTime ? [{ label: "Listening time", value: listeningTotalLabel(statsTotalListenedMs, statsTotalPlays) }] : []),
     { label: "Songs played", value: statsDistinctTracks },
     { label: "Artists played", value: statsDistinctArtists },
     { label: "Active days", value: statsActiveDays },
@@ -1326,6 +1326,7 @@
       isPollingPlayback = true;
 
       try {
+        const requestedAt = performance.now();
         const status = await getPlaybackStatus();
 
         if (isStartingTrack || startId !== playbackStartId || controlRevision !== playbackControlRevision || isTagWriteSuspendingPlayback
@@ -1338,7 +1339,7 @@
           return;
         }
 
-        applyPlaybackStatus(status);
+        applyPlaybackStatus(status, { requestedAt });
         await handlePlaybackStatusUpdate(status);
       } catch (error) {
         if (!isStartingTrack && startId === playbackStartId && controlRevision === playbackControlRevision && !isTagWriteSuspendingPlayback
@@ -1516,31 +1517,43 @@
   }
 
   async function reloadListeningTime() {
-    const revision = ++listeningTimeRevision;
+    const changes: Record<string, number> = Object.create(null);
+    changesDuringListeningTimeRead = changes;
     try {
       const totals = await getListeningTimeByTrack();
-      if (revision === listeningTimeRevision) listeningTimeByTrack = totals ?? {};
+      if (changesDuringListeningTimeRead === changes) listeningTimeByTrack = { ...totals, ...changes };
     } catch (error) {
       console.warn("Could not read listening time", error);
+    } finally {
+      if (changesDuringListeningTimeRead === changes) changesDuringListeningTimeRead = null;
     }
   }
 
-  function flushListeningTime() {
-    if (listeningTimeWrite || removingListenId) return;
-    const batch = listeningTimeBuffer.batch();
-    if (batch.length === 0) return;
+  function applyListeningTimeTotals(totals: Record<string, number>) {
+    if (changesDuringListeningTimeRead) Object.assign(changesDuringListeningTimeRead, totals);
+    listeningTimeByTrack = { ...listeningTimeByTrack, ...totals };
+  }
+
+  function flushListeningTime(batch = listeningTimeBuffer.batch()): Promise<boolean> {
+    if (listeningTimeWrite) return listeningTimeWrite;
+    if (removingListenId) return Promise.resolve(false);
+    if (batch.length === 0) return Promise.resolve(true);
     listeningTimeWrite = saveListeningMinutes(batch)
       .then((totals) => {
         listeningTimeBuffer.saved(batch);
-        listeningTimeRevision += 1;
-        listeningTimeByTrack = { ...listeningTimeByTrack, ...totals };
+        applyListeningTimeTotals(totals);
         if (activeView === "Stats" && showListeningTime) {
           statsClock = Date.now();
           statsRevision += 1;
         }
+        return true;
       })
-      .catch((error) => console.warn("Could not save listening time", error))
+      .catch((error) => {
+        console.warn("Could not save listening time", error);
+        return false;
+      })
       .finally(() => { listeningTimeWrite = null; });
+    return listeningTimeWrite;
   }
 
   function applyVideoLibrary(library: VideoLibrary) {
@@ -5438,6 +5451,11 @@
     countedPlaybackTrackId = trackId;
 
     try {
+      const samples = listeningTimeBuffer.batch(eventId);
+      if (samples.length > 0) {
+        while (listeningTimeWrite) await listeningTimeWrite;
+        if (!await flushListeningTime(samples)) throw new Error("Could not save listening time for this play.");
+      }
       applyUpdatedTrack(await recordTrackPlay(trackId, eventId));
       statsClock = Date.now();
       statsRevision += 1;
@@ -5457,7 +5475,7 @@
     countedPlaybackTrackId = null;
   }
 
-  function observeListenPosition(status: PlaybackStatus) {
+  function observeListenPosition(status: PlaybackStatus, requestedAt?: number) {
     if (!currentTrack || status.filePath !== currentTrack.filePath) return;
     const endedAt = status.durationSeconds ?? currentTrack.durationSeconds;
     const now = performance.now();
@@ -5465,6 +5483,7 @@
       status.hasEnded && endedAt !== null ? endedAt : status.positionSeconds,
       now,
       isPlaying || status.isPlaying,
+      requestedAt,
     );
     if (status.hasEnded || !status.isPlaying) void flushListeningTime();
   }
@@ -5475,20 +5494,23 @@
     void maybeRecordTrackPlay(true);
   }
 
-  function observeListeningAdvance(position: number, observedAt: number, wasPlaying: boolean) {
-    const advance = playbackListenProgress.observe(position, observedAt, wasPlaying);
-    if (currentTrack && !ignoredTrackIds.has(currentTrack.id)) {
-      listeningTimeBuffer.observe(advance, performance.timeOrigin + observedAt);
+  function observeListeningAdvance(position: number, observedAt: number, wasPlaying: boolean, requestedAt?: number) {
+    if (!currentTrack || ignoredTrackIds.has(currentTrack.id)) {
+      playbackListenProgress.forgetPosition();
+      return;
     }
+    const advance = playbackListenProgress.observe(position, observedAt, wasPlaying, requestedAt);
+    listeningTimeBuffer.observe(advance, performance.timeOrigin + observedAt);
   }
 
   async function sampleListenBeforeTrackChange() {
     const path = currentTrack?.filePath;
     if (!path || !isPlaying || playbackSeekCoordinator.hasPendingSeek(path)) return;
     try {
+      const requestedAt = performance.now();
       const status = await getPlaybackStatus();
       if (status.filePath === path) {
-        observeListenPosition(status);
+        observeListenPosition(status, requestedAt);
         void maybeRecordTrackPlay(status.hasEnded);
       } else if (status.filePath) {
         observeGaplessEnd(performance.now() - Math.max(0, status.positionSeconds) * 1000);
@@ -5960,9 +5982,9 @@
 
   function applyPlaybackStatus(
     status: PlaybackStatus,
-    options: { applyPosition?: boolean; positionOverride?: number; applyTransport?: boolean } = {},
+    options: { applyPosition?: boolean; positionOverride?: number; applyTransport?: boolean; requestedAt?: number } = {},
   ) {
-    if (options.applyPosition !== false && options.positionOverride === undefined) observeListenPosition(status);
+    if (options.applyPosition !== false && options.positionOverride === undefined) observeListenPosition(status, options.requestedAt);
     if (options.applyTransport !== false) {
       isPlaying = status.isPlaying;
       if (status.isPlaying) hasCurrentTrackEnded = false;
@@ -6324,7 +6346,7 @@
 
   function trackActivityLabel(track: Track) {
     const hasVisibleActivity = (showPlayCounts && track.playCount > 0)
-      || (showListeningTime && (track.listenedMs ?? 0) > 0);
+      || (showListeningTime && ((track.listenedMs ?? 0) > 0 || track.playCount > 0));
     return hasVisibleActivity ? activityLabel(track) : "";
   }
 
@@ -6335,7 +6357,7 @@
   function activityLabel({ playCount, listenedMs = 0 }: ListeningActivity) {
     const labels = [];
     if (showPlayCounts) labels.push(playCountLabel(playCount));
-    if (showListeningTime) labels.push(listeningDurationLabel(listenedMs));
+    if (showListeningTime) labels.push(listeningTotalLabel(listenedMs, playCount));
     return labels.join(" · ");
   }
 
@@ -6923,8 +6945,7 @@
       const removed = await removeListeningEvent(listen.eventId);
       if (removed) {
         if (removed.track) applyUpdatedTrack(removed.track);
-        listeningTimeRevision += 1;
-        listeningTimeByTrack = { ...listeningTimeByTrack, [removed.trackId]: removed.listenedMs };
+        applyListeningTimeTotals({ [removed.trackId]: removed.listenedMs });
       }
       statsRevision += 1;
     } catch (error) {
@@ -7992,7 +8013,7 @@
                 <summary>Tracking coverage</summary>
                 <p class="stats-coverage-note">
                   {#if statsUseListeningTime}
-                    Listening time includes sessions with at least five seconds of playback. {statsPeriod === "all" ? "The chart covers the last 30 days." : ""}
+                    Listening time includes recorded sessions with at least five seconds of playback. Older plays may have no saved duration. {statsPeriod === "all" ? "The chart covers the last 30 days." : ""}
                   {:else if statsPeriod === "all"}
                     All-time totals include {statsSnapshot.undatedLegacyPlays} plays without dates. The chart covers the last 30 days.
                   {:else}
@@ -8956,10 +8977,11 @@
           </div>
           {#if isScanning}
             <TrackList
-              activityLabel={trackActivityLabel}
               tracks={visibleSongTracks}
               {isScanning}
-              variant="library"
+              variant="songs"
+              {showPlayCounts}
+              {showListeningTime}
               showOrder={showSongListNumbers}
               selectedTrackId={currentTrack?.id}
               onTrackSelect={handleTrackSelect}
@@ -8988,10 +9010,11 @@
             </div>
           {:else}
             <TrackList
-              activityLabel={trackActivityLabel}
               tracks={visibleSongTracks}
               {isScanning}
-              variant="library"
+              variant="songs"
+              {showPlayCounts}
+              {showListeningTime}
               showOrder={showSongListNumbers}
               selectedTrackId={currentTrack?.id}
               onTrackSelect={handleTrackSelect}
@@ -10432,7 +10455,7 @@
                       {/each}
                     </select>
                   </label>
-                  <p class="settings-note">A session counts after at least five seconds of playback.</p>
+                  <p class="settings-note">A session counts after at least five seconds of playback. Older play counts may have no saved listening time.</p>
                   <details class="ignored-tracks">
                     <summary>Ignored tracks ({ignoredTrackIds.size})</summary>
                     {#if ignoredTrackIds.size === 0}
@@ -11836,10 +11859,11 @@
   }
 
   .home.songs-library-view :global(.section-label) {
-    border-color: var(--accent-strong);
-    background: var(--accent-soft);
-    color: var(--accent-text);
-    font-weight: 850;
+    min-height: 0;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--text-soft);
   }
 
   .songs-empty-state {

@@ -1,12 +1,15 @@
 <script lang="ts">
   import type { Track } from "$lib/types/library";
+  import { listeningDurationLabel, listeningTotalLabel } from "$lib/utils/listeningStats";
   import { localImageSource } from "$lib/utils/localImage";
 
   type Props = {
     tracks: Track[];
     isScanning: boolean;
-    variant?: "default" | "library";
+    variant?: "default" | "library" | "songs";
     showOrder?: boolean;
+    showPlayCounts?: boolean;
+    showListeningTime?: boolean;
     activityLabel?: (track: Track) => string;
     selectedTrackId?: string | null;
     unavailableTrackIds?: Set<string>;
@@ -27,6 +30,8 @@
     isScanning,
     variant = "default",
     showOrder = false,
+    showPlayCounts = true,
+    showListeningTime = false,
     activityLabel = playCountLabel,
     selectedTrackId = null,
     unavailableTrackIds = new Set<string>(),
@@ -43,7 +48,8 @@
   }: Props = $props();
 
   let hasMoveControls = $derived(Boolean(onMoveTrackUp || onMoveTrackDown));
-  let isLibraryVariant = $derived(variant === "library");
+  let isLibraryVariant = $derived(variant !== "default");
+  let isSongsVariant = $derived(variant === "songs");
 
   function displayArtist(track: Track) {
     return track.artist ?? "Unknown Artist";
@@ -147,11 +153,32 @@
     <p>Choose a folder to build the local library.</p>
   </div>
 {:else}
-  <div class:library-list={isLibraryVariant} class="track-list">
+  <div
+    class:library-list={isLibraryVariant}
+    class:songs-list={isSongsVariant}
+    class:numbered={showOrder}
+    class:with-plays={showPlayCounts}
+    class:with-time={showListeningTime}
+    class="track-list"
+  >
+    {#if isSongsVariant}
+      <div class="song-headings" aria-hidden="true">
+        <span class="song-title-heading">Song</span>
+        <span class="song-album-heading">Album</span>
+        <span class="song-length-heading">Length</span>
+        <div class="song-activity">
+          {#if showPlayCounts}<span>Plays</span>{/if}
+          {#if showListeningTime}<span>Listening time</span>{/if}
+        </div>
+        <span class="song-format-heading">Format</span>
+      </div>
+    {/if}
     {#each tracks as track, index (track.id)}
+      {@const listenedMs = track.listenedMs ?? 0}
       <div
         class:active={track.id === selectedTrackId}
         class:library={isLibraryVariant}
+        class:song-row={isSongsVariant}
         class:withOrder={showOrder}
         class:withMove={hasMoveControls}
         class:withRemove={Boolean(onRemoveTrack)}
@@ -191,7 +218,30 @@
         {#if isLibraryVariant}
           <span class="track-duration">{formatDuration(track.durationSeconds)}</span>
         {/if}
-        {#if !track.ignored && activityLabel(track)}
+        {#if isSongsVariant}
+          <div class="song-activity" class:no-activity={track.ignored || (!showPlayCounts && !listenedMs && !track.playCount)}>
+            {#if showPlayCounts}
+              {#if track.ignored}
+                <span class="song-metric-empty" aria-hidden="true">—</span>
+              {:else}
+                <span class="song-metric" title={`${track.playCount.toLocaleString()} ${track.playCount === 1 ? "play" : "plays"}`}>
+                  {track.playCount.toLocaleString()}<span class="song-metric-label"> {track.playCount === 1 ? "play" : "plays"}</span>
+                </span>
+              {/if}
+            {/if}
+            {#if showListeningTime}
+              {#if track.ignored || (!listenedMs && !track.playCount)}
+                <span class="song-metric-empty" aria-hidden="true">—</span>
+              {:else if !listenedMs}
+                <span class="song-metric" title="No listening time was saved for these plays">{listeningTotalLabel(listenedMs, track.playCount)}</span>
+              {:else}
+                <span class="song-metric" title={`${listeningDurationLabel(listenedMs)} listened`}>
+                  {listeningDurationLabel(listenedMs)}<span class="song-metric-label"> listened</span>
+                </span>
+              {/if}
+            {/if}
+          </div>
+        {:else if !track.ignored && activityLabel(track)}
           <span class="play-count">{activityLabel(track)}</span>
         {:else}
           <span class="play-count empty" aria-hidden="true"></span>
@@ -726,6 +776,216 @@
 
     .track-row.library .track-duration {
       display: none;
+    }
+  }
+
+  .track-list.songs-list {
+    --song-activity-columns: 3.3rem;
+    --song-activity-gap: 0px;
+    --song-layout: var(--song-order-column,) [cover] 40px [song] minmax(0, 1.25fr)
+      [album] minmax(0, 0.95fr) [length] 3.5rem [activity] max-content [favorite] 32px [format] 3.7rem;
+    gap: 0;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: var(--panel-soft);
+    overflow: hidden;
+  }
+
+  .songs-list.numbered {
+    --song-order-column: [order] 30px;
+  }
+
+  .songs-list.with-time {
+    --song-activity-columns: 7rem;
+  }
+
+  .songs-list.with-plays.with-time {
+    --song-activity-columns: 3.3rem 7rem;
+    --song-activity-gap: 14px;
+  }
+
+  .song-headings,
+  .track-row.library.song-row {
+    display: grid;
+    grid-template-columns: var(--song-layout);
+    column-gap: 14px;
+    align-items: center;
+    padding-inline: 14px;
+  }
+
+  .song-headings {
+    min-height: 36px;
+    padding-block: 8px;
+    background: var(--panel-strong);
+    color: var(--text-soft);
+    font-size: 0.75rem;
+    font-weight: 730;
+  }
+
+  .song-title-heading { grid-column: cover / album; }
+  .song-album-heading, .song-row .album-link { grid-column: album; }
+  .song-length-heading, .song-row .track-duration { grid-column: length; text-align: right; }
+  .song-format-heading, .song-row .format-badge { grid-column: format; text-align: center; }
+  .song-format-heading { justify-self: stretch; }
+
+  .track-row.library.song-row {
+    min-height: 56px;
+    border: 0;
+    border-top: 1px solid var(--border);
+    border-radius: 0;
+    background: transparent;
+    padding-block: 7px;
+  }
+
+  .track-row.library.song-row:hover,
+  .track-row.library.song-row:focus-visible {
+    background: var(--panel-hover);
+  }
+
+  .track-row.library.song-row:focus-visible {
+    outline: 1px solid var(--accent-strong);
+    outline-offset: -1px;
+  }
+
+  .track-row.library.song-row.active {
+    background: color-mix(in srgb, var(--accent-soft) 78%, var(--panel-soft));
+  }
+
+  .song-row .track-order {
+    grid-column: order;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .track-row.library.song-row .mini-cover {
+    grid-column: cover;
+    width: 40px;
+    height: 40px;
+  }
+
+  .song-row .track-title { grid-column: song; }
+
+  .song-row .track-title .track-link {
+    margin-top: 2px;
+    font-weight: 540;
+  }
+
+  .song-activity {
+    grid-column: activity;
+    display: grid;
+    grid-template-columns: var(--song-activity-columns);
+    gap: var(--song-activity-gap);
+    text-align: right;
+  }
+
+  .song-row .song-activity {
+    min-width: 0;
+    color: var(--text-soft);
+    font-size: 0.84rem;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .song-metric {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .song-metric-empty {
+    color: var(--text-dim);
+  }
+
+  .song-metric-label {
+    position: absolute;
+    clip-path: inset(50%);
+  }
+
+  .track-row.library.song-row .favorite-button {
+    grid-column: favorite;
+    border-color: transparent;
+    background: transparent;
+  }
+
+  .track-row.library.song-row .favorite-button:hover,
+  .track-row.library.song-row .favorite-button:focus-visible {
+    border-color: var(--border-strong);
+    background: var(--panel-strong);
+  }
+
+  .track-row.library.song-row .format-badge {
+    justify-self: stretch;
+    min-width: 0;
+    color: var(--text-soft) !important;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    font-weight: 720 !important;
+    padding: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  @container track-list (max-width: 820px) {
+    .song-headings,
+    .track-row.library.song-row {
+      grid-template-columns: var(--song-order-column,) [cover] 40px [song] minmax(0, 1fr)
+        [length] 3.5rem [activity] max-content [favorite] 32px [format] 3.7rem;
+      column-gap: 10px;
+      padding-inline: 10px;
+    }
+
+    .song-title-heading { grid-column: cover / length; }
+    .song-album-heading, .song-row .album-link { display: none; }
+  }
+
+  @container track-list (max-width: 560px) {
+    .song-headings,
+    .track-row.library.song-row .track-duration {
+      display: none;
+    }
+
+    .track-row.library.song-row {
+      grid-template-columns: var(--song-order-column,) [cover] 36px [song] minmax(0, 1fr) [favorite] 32px [format] 2.8rem;
+      row-gap: 1px;
+      column-gap: 8px;
+      padding-inline: 8px;
+    }
+
+    .track-row.library.song-row .mini-cover {
+      width: 36px;
+      height: 36px;
+    }
+
+    .song-row .track-order,
+    .song-row .mini-cover,
+    .song-row .favorite-button,
+    .song-row .format-badge {
+      grid-row: 1 / 3;
+    }
+
+    .song-row .track-title { grid-row: 1; }
+
+    .song-row .song-activity {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 2px 10px;
+      grid-column: song;
+      grid-row: 2;
+      font-size: 0.73rem;
+      text-align: left;
+    }
+
+    .song-row .song-activity.no-activity,
+    .song-row .song-metric-empty {
+      display: none;
+    }
+
+    .song-metric-label {
+      position: static;
+      clip-path: none;
     }
   }
 </style>
